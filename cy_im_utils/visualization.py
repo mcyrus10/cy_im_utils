@@ -1,6 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from ipywidgets import interact
+from ipywidgets import IntSlider,HBox,VBox,interactive_output
+from glob import glob
+from scipy.ndimage import rotate as rotate_cpu
+# These lines are a little hack to bring in functions that are local to this directory (prep)
+import os
+from sys import path
+real_path = os.path.realpath(__file__)
+path.append(os.path.dirname(real_path))
+from prep import *
 
 def nif_99to01contrast(image): # {{{
     #--------------------------------------------------------------------------
@@ -156,7 +164,128 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
                 a.grid(True)
                 a.grid(which = 'minor', alpha = 1)
     # }}}
+def COR_interact(data_dict,ff,df,figsize = (10,5)): # {{{
+    """
+    This is still a work in progress. The goal is to have a minimal interface
+    to act like ReconstructCT's GUI to help find the crop boundaries and
+    normalization patch coordinates. It will modify in-place the input
+    dictionary so that the output will be a dictionary with the correct
+    cropping coordinates and 
+
+    Parameters:
+    -----------
+    data_dict: dictionary
+        dictionary with projection path , read_fcn, etc. this gets its
+        crop_patch and norm_patch overwritten
+    ff: 2D numpy array
+        flat field
+    df: 2D numpy array
+        dark field
+    figsize: tuple of ints
+        figure size
+
+    """
+    proj_files = glob(data_dict['projection path'])
+    read_fcn = data_dict['imread function']
+    dtype = data_dict['dtype']
+    Transpose = data_dict['transpose']
+    cor_y0,cor_y1 = data_dict['COR rows']
+
+    n_proj = len(proj_files)
+    # Create the combined image in attenuation space to determine center of rotation
+    combined = np.zeros([2,ff.shape[0],ff.shape[1]])
+    volume_temp = np.zeros([2,ff.shape[0],ff.shape[1]])
+    for i,f in enumerate([proj_files[0],proj_files[n_proj//2]]):
+        combined[i,:,:] = -np.log((np.asarray(read_fcn(f), dtype = dtype)-df.get())/(ff-df).get())
+        volume_temp[i,:,:] = read_fcn(f)
+
+    # TRANSPOSE IF THE COR IS NOT VERTICAL!!
+    combined = np.sum(combined, axis = 0)
+    if Transpose:
+        combined = combined.T
+
+    x_max,y_max = combined.shape
+
+    def inner(crop_x0,crop_x1,crop_y0,crop_y1,norm_x0,norm_x1,norm_y0,norm_y1,cor_y0,cor_y1):
+        crop_patch = [crop_x0,crop_x1,crop_y0,crop_y1]
+        norm_patch = [norm_x0,norm_x1,norm_y0,norm_y1]
+        y0,y1 = cor_y0,cor_y1
+
+        if y0==y1:
+            fig,ax = plt.subplots(1,1, figsize = figsize)
+            ax = [ax]
+            ax[0].imshow(combined.T, cmap = 'gist_ncar')
+            plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--')
+            plot_patch(norm_patch, ax[0], color = 'k')
+            # Visualize 0 and 180 degrees with crop patch and normalization patch highlighted
+            if norm_patch[0] != norm_patch[1] and norm_patch[2] != norm_patch[3]:
+                ax[0].text(norm_patch[0],norm_patch[2],'Norm Patch',
+                        verticalalignment = 'bottom', horizontalalignment = 'left',
+                        rotation = 90)
+
+        elif y0 != y1 and crop_patch[0] != crop_patch[1] and crop_patch[2] != crop_patch[3]:
+            fig,ax = plt.subplots(1,2, figsize = figsize)
+            ax = ax.flatten()
+            ax[0].imshow(combined.T, cmap = 'gist_ncar')
+            plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--')
+            plot_patch(norm_patch, ax[0], color = 'k')
+
+            if norm_patch[0] != norm_patch[1] and norm_patch[2] != norm_patch[3]:
+                ax[0].text(norm_patch[0],norm_patch[2],'Norm Patch',
+                        verticalalignment = 'bottom', horizontalalignment = 'left',
+                        rotation = 90)
+
+
+            cor_image = combined[crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]].T
+            nan_filter(cor_image)
+            cor = center_of_rotation(cor_image, y0,y1, ax = [])
+            theta = np.tan(cor[0])*(180/np.pi)
+            rot = rotate_cpu(cor_image,-theta, reshape = False)
+            cor2 = center_of_rotation(rot, y0,y1,  ax = [])
+            #--------------------------------------------------------
+            # MODIFY CROP PATCH IN PLACE CENTERS THE IMAGE ON THE COR
+            crop_nx = crop_patch[1]-crop_patch[0]
+            dx = int(np.round(cor2[1])-crop_nx//2)
+            crop_patch[0]+=dx
+            crop_patch[1]+=dx
+            #--------------------------------------------------------
+            cor_image2 = rotate_cpu(combined[crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]].T,-theta,reshape=False)
+            cor3 = center_of_rotation(cor_image2, y0,y1, ax = ax[1], image_center = True)
+            plot_patch(crop_patch,ax[0], color = 'b')
+            ax[0].set_title("Projection$_0$+Projection$_{\pi}$")
+            #ax[1].set_title("Center of Rotation\nCalculation")
+            ax[1].set_title("Rotated and Cropped")
+            ax[0].text(crop_patch[1],crop_patch[2],'Crop Patch Centered', verticalalignment = 'bottom', horizontalalignment = 'left',color = 'b', rotation = 90)
+            fig.tight_layout()
+            data_dict['crop patch'] = crop_patch
+            data_dict['norm patch'] = norm_patch
+            data_dict['theta'] = theta
+            data_dict['COR rows'] = [cor_y0,cor_y1]
+
+
+    crop_x0 = IntSlider(description = "crop x0", continuous_update = False, min=0,max=x_max)
+    crop_x1 = IntSlider(description = "crop x1", continuous_update = False, min=0,max=x_max)
+    crop_y0 = IntSlider(description = "crop y0", continuous_update = False, min=0,max=y_max)
+    crop_y1 = IntSlider(description = "crop y1", continuous_update = False, min=0,max=y_max)
+    norm_x0 = IntSlider(description = "norm x0", continuous_update = False, min=0,max=x_max)
+    norm_x1 = IntSlider(description = "norm x1", continuous_update = False, min=0,max=x_max)
+    norm_y0 = IntSlider(description = "norm y0", continuous_update = False, min=0,max=y_max)
+    norm_y1 = IntSlider(description = "norm y1", continuous_update = False, min=0,max=y_max)
+    cor_y0  = IntSlider(description = "COR y0", continuous_update = False, min=0,max=y_max)
+    cor_y1  = IntSlider(description = "COR y1", continuous_update = False, min=0,max=y_max)
+
+    row1 = HBox([crop_x0,crop_x1,crop_y0,crop_y1])
+    row2 = HBox([norm_x0,norm_x1,norm_y0,norm_y1])
+    row3 = HBox([cor_y0,cor_y1])
+    ui = VBox([row1,row2,row3])
+    control_dict = {
+                'crop_x0':crop_x0,'crop_x1':crop_x1,'crop_y0':crop_y0,'crop_y1':crop_y1,
+                'norm_x0':norm_x0,'norm_x1':norm_x1,'norm_y0':norm_y0,'norm_y1':norm_y1,
+                'cor_y0':cor_y0,'cor_y1':cor_y1
+                    }
+    out = interactive_output(inner, control_dict)
+    display(ui,out)
+    # }}}
 
 if __name__=="__main__":
     pass
-
