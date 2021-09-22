@@ -9,7 +9,15 @@ from sys import path
 real_path = os.path.realpath(__file__)
 path.append(os.path.dirname(real_path))
 from prep import *
+from tqdm import tqdm
 
+def constrain_contrast(im, quantile_low = 0.01, quantile_high = 0.99): #{{{
+    #--------------------------------------------------------------------------
+    # Just let numpy do this
+    #--------------------------------------------------------------------------
+    temp = im.flatten()
+    return np.quantile(temp,quantile_low),np.quantile(temp,quantile_high)
+    # }}}
 def nif_99to01contrast(image): # {{{
     #--------------------------------------------------------------------------
     # This returns the bounds that you can scale the image by, to do so you can
@@ -164,7 +172,7 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
                 a.grid(True)
                 a.grid(which = 'minor', alpha = 1)
     # }}}
-def COR_interact(data_dict,ff,df,figsize = (10,5)): # {{{
+def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_ncar'): # {{{
     """
     This is still a work in progress. The goal is to have a minimal interface
     to act like ReconstructCT's GUI to help find the crop boundaries and
@@ -186,17 +194,27 @@ def COR_interact(data_dict,ff,df,figsize = (10,5)): # {{{
 
     """
     proj_files = glob(data_dict['projection path'])
+    ff_files = glob(data_dict['flat path'])
+    df_files = glob(data_dict['dark path'])
     read_fcn = data_dict['imread function']
     dtype = data_dict['dtype']
     Transpose = data_dict['transpose']
     cor_y0,cor_y1 = data_dict['COR rows']
 
+    ff = field_gpu(ff_files, dtype = data_dict['dtype'])
+    df = field_gpu(df_files, dtype = data_dict['dtype'])
+
     n_proj = len(proj_files)
     # Create the combined image in attenuation space to determine center of rotation
-    combined = np.zeros([2,ff.shape[0],ff.shape[1]])
-    volume_temp = np.zeros([2,ff.shape[0],ff.shape[1]])
-    for i,f in enumerate([proj_files[0],proj_files[n_proj//2]]):
-        combined[i,:,:] = -np.log((np.asarray(read_fcn(f), dtype = dtype)-df.get())/(ff-df).get())
+    n_angles = len(angles)
+    projection_indices = [np.round(a/(360/n_proj)).astype(int) for a in angles]
+    combined = np.zeros([n_angles,ff.shape[0],ff.shape[1]])
+    volume_temp = np.zeros([n_angles,ff.shape[0],ff.shape[1]])
+    for i,angle_index in tqdm(enumerate(projection_indices)):
+        f = proj_files[angle_index]
+        temp = -np.log((np.asarray(read_fcn(f), dtype = dtype)-df.get())/(ff-df).get())
+        temp[~np.isfinite(temp)] = 0
+        combined[i,:,:] = temp
         volume_temp[i,:,:] = read_fcn(f)
 
     # TRANSPOSE IF THE COR IS NOT VERTICAL!!
@@ -206,16 +224,30 @@ def COR_interact(data_dict,ff,df,figsize = (10,5)): # {{{
 
     x_max,y_max = combined.shape
 
+    # This is for calculating vmin and vmax for imshows
+    dist = 0.01
+    distribution = combined.flatten()
+
     def inner(crop_x0,crop_x1,crop_y0,crop_y1,norm_x0,norm_x1,norm_y0,norm_y1,cor_y0,cor_y1):
+        l,h = np.quantile(distribution,dist),np.quantile(distribution,1.0-dist)
         crop_patch = [crop_x0,crop_x1,crop_y0,crop_y1]
         norm_patch = [norm_x0,norm_x1,norm_y0,norm_y1]
         y0,y1 = cor_y0,cor_y1
 
+        
+        ##---------------------------------------------------------------------
+        ##  DEBUGGING TIP: OVERRIDING THE CONTROL OF THE INTERACT TO DEBUG
+        #crop_patch = [356,1982,731,2385]
+        #norm_patch = [111,251,192,2385]
+        ##---------------------------------------------------------------------
+
+
         if y0==y1:
             fig,ax = plt.subplots(1,1, figsize = figsize)
             ax = [ax]
-            ax[0].imshow(combined.T, cmap = 'gist_ncar')
-            plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--')
+            print('l,h = ',l,h)
+            ax[0].imshow(combined.T, cmap = cmap, vmin = l, vmax = h)
+            plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--', linewidth = 2)
             plot_patch(norm_patch, ax[0], color = 'k')
             # Visualize 0 and 180 degrees with crop patch and normalization patch highlighted
             if norm_patch[0] != norm_patch[1] and norm_patch[2] != norm_patch[3]:
@@ -224,43 +256,48 @@ def COR_interact(data_dict,ff,df,figsize = (10,5)): # {{{
                         rotation = 90)
 
         elif y0 != y1 and crop_patch[0] != crop_patch[1] and crop_patch[2] != crop_patch[3]:
-            fig,ax = plt.subplots(1,2, figsize = figsize)
-            ax = ax.flatten()
-            ax[0].imshow(combined.T, cmap = 'gist_ncar')
-            plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--')
-            plot_patch(norm_patch, ax[0], color = 'k')
+            if y1 > crop_patch[3]-crop_patch[2]:
+                print("COR y1 exceeds window size")
+            else:
+                fig,ax = plt.subplots(1,2, figsize = figsize)
+                ax = ax.flatten()
+                #l,h = nif_99to01contrast(combined[np.isfinite(combined)])
+                ax[0].imshow(combined.T, cmap = cmap, vmin = l, vmax = h)
+                plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--')
+                plot_patch(norm_patch, ax[0], color = 'k')
 
-            if norm_patch[0] != norm_patch[1] and norm_patch[2] != norm_patch[3]:
-                ax[0].text(norm_patch[0],norm_patch[2],'Norm Patch',
-                        verticalalignment = 'bottom', horizontalalignment = 'left',
-                        rotation = 90)
+                if norm_patch[0] != norm_patch[1] and norm_patch[2] != norm_patch[3]:
+                    ax[0].text(norm_patch[0],norm_patch[2],'Norm Patch',
+                            verticalalignment = 'bottom', horizontalalignment = 'left',
+                            rotation = 90)
 
 
-            cor_image = combined[crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]].T
-            nan_filter(cor_image)
-            cor = center_of_rotation(cor_image, y0,y1, ax = [])
-            theta = np.tan(cor[0])*(180/np.pi)
-            rot = rotate_cpu(cor_image,-theta, reshape = False)
-            cor2 = center_of_rotation(rot, y0,y1,  ax = [])
-            #--------------------------------------------------------
-            # MODIFY CROP PATCH IN PLACE CENTERS THE IMAGE ON THE COR
-            crop_nx = crop_patch[1]-crop_patch[0]
-            dx = int(np.round(cor2[1])-crop_nx//2)
-            crop_patch[0]+=dx
-            crop_patch[1]+=dx
-            #--------------------------------------------------------
-            cor_image2 = rotate_cpu(combined[crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]].T,-theta,reshape=False)
-            cor3 = center_of_rotation(cor_image2, y0,y1, ax = ax[1], image_center = True)
-            plot_patch(crop_patch,ax[0], color = 'b')
-            ax[0].set_title("Projection$_0$+Projection$_{\pi}$")
-            #ax[1].set_title("Center of Rotation\nCalculation")
-            ax[1].set_title("Rotated and Cropped")
-            ax[0].text(crop_patch[1],crop_patch[2],'Crop Patch Centered', verticalalignment = 'bottom', horizontalalignment = 'left',color = 'b', rotation = 90)
-            fig.tight_layout()
-            data_dict['crop patch'] = crop_patch
-            data_dict['norm patch'] = norm_patch
-            data_dict['theta'] = theta
-            data_dict['COR rows'] = [cor_y0,cor_y1]
+                cor_image = combined[crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]].T
+                cor_image[~np.isfinite(cor_image)] = 0
+                cor = center_of_rotation(cor_image, y0,y1, ax = [])
+                theta = np.tan(cor[0])*(180/np.pi)
+                rot = rotate_cpu(cor_image,-theta, reshape = False)
+                cor2 = center_of_rotation(rot, y0,y1,  ax = [])
+                #--------------------------------------------------------
+                # MODIFY CROP PATCH IN PLACE CENTERS THE IMAGE ON THE COR
+                crop_nx = crop_patch[1]-crop_patch[0]
+                dx = int(np.round(cor2[1])-crop_nx//2)
+                crop_patch[0]+=dx
+                crop_patch[1]+=dx
+                #--------------------------------------------------------
+                cor_image2 = combined[crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]].T
+                cor_image2[~np.isfinite(cor_image2)] = 0
+                cor_image2 = rotate_cpu(cor_image2,-theta,reshape=False)
+                cor3 = center_of_rotation(cor_image2, y0,y1, ax = ax[1], image_center = True)
+                plot_patch(crop_patch,ax[0], color = 'b')
+                ax[1].set_title("Rotated and Cropped")
+                ax[0].text(crop_patch[1],crop_patch[2],'Crop Patch Centered', verticalalignment = 'bottom', horizontalalignment = 'left',color = 'b', rotation = 90)
+                fig.tight_layout()
+                data_dict['crop patch'] = crop_patch
+                data_dict['norm patch'] = norm_patch
+                data_dict['theta'] = theta
+                data_dict['COR rows'] = [cor_y0,cor_y1]
+        ax[0].set_title("$\Sigma_{{i=0}}^{{{}}}$ Projection[i$\pi / {{{}}}]$".format(len(angles),len(angles)))
 
 
     crop_x0 = IntSlider(description = "crop x0", continuous_update = False, min=0,max=x_max)

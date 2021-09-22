@@ -139,6 +139,7 @@ def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True): # {
     """
     combined = image.copy()
     combined[combined < 0] = 0               #<-----------------------------------
+    combined[~np.isfinite(combined)] = 0     #<-----------------------------------
     height,width = combined.shape       # rows, cols
     axis = 1
     COM = get_y_vec(combined,axis)
@@ -147,25 +148,14 @@ def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True): # {
     com_fit = np.polyfit(y,subset2,1)
     # Plotting
     if ax:
-        if axis == 0:
-            ax.plot([0,width-1],np.polyval(com_fit,[0,width-1]),'k-', linewidth = 1, label = 'Curve Fit')
-            ax.plot([coord_0,coord_0],[0,width],'k--', linewidth = 0.5)
-            ax.plot([coord_1,coord_1],[0,width],'k--', linewidth = 0.5)
-            ax.annotate("",xy = (coord_0,height//4), xytext = (coord_1,height//4), arrowprops = dict(arrowstyle="<->"))
-            ax.text(height//10,(coord_1-coord_0)/2+coord_0,"fit\nROI", verticalalignment = 'center', color = 'w')
-            ax.scatter(range(width),COM,color = 'r', s = 0.5, label = 'Center of mass')
-            if image_center:
-                ax.plot([0,width-1],[height//2,height//2],color = 'w', linestyle = (0,(5,5)),label = 'Center of image')
-
-        elif axis == 1:
-            ax.plot(np.polyval(com_fit,[0,height-1]),[0,height-1],'k-', linewidth = 1, label = 'Curve Fit')
-            ax.plot([0,width],[coord_0,coord_0],'k--', linewidth = 0.5)
-            ax.plot([0,width],[coord_1,coord_1],'k--', linewidth = 0.5)
-            ax.annotate("",xy = (width//4,coord_0), xytext = (width//4,coord_1), arrowprops = dict(arrowstyle="<->"))
-            ax.text(width//10,(coord_1-coord_0)/2+coord_0,"fit\nROI", verticalalignment = 'center', color = 'w')
-            ax.scatter(COM,range(height),color = 'r', s = 0.5, label = 'Center of mass')
-            if image_center:
-                ax.plot([width//2,width//2],[0,height-1],color = 'w', linestyle = (0,(5,5)),label = 'Center of image')
+        ax.plot(np.polyval(com_fit,[0,height-1]),[0,height-1],'k-', linewidth = 1, label = 'Curve Fit')
+        ax.plot([0,width],[coord_0,coord_0],'k--', linewidth = 0.5)
+        ax.plot([0,width],[coord_1,coord_1],'k--', linewidth = 0.5)
+        ax.annotate("",xy = (width//4,coord_0), xytext = (width//4,coord_1), arrowprops = dict(arrowstyle="<->"))
+        ax.text(width//10,(coord_1-coord_0)/2+coord_0,"fit\nROI", verticalalignment = 'center', color = 'w')
+        ax.scatter(COM,range(height),color = 'r', s = 0.5, label = 'Center of mass')
+        if image_center:
+            ax.plot([width//2,width//2],[0,height-1],color = 'w', linestyle = (0,(5,5)),label = 'Center of image')
 
 
         ax.imshow(combined, cmap = 'gist_ncar')
@@ -173,118 +163,64 @@ def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True): # {
         ax.legend()
     return com_fit
     # }}}
-def nan_filter(im): # {{{
+def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_patch,
+                          crop_patch, theta, kernel = 3, dtype = np.float32):
+    # {{{
     """
-    Note This does not take arbitrary kernel sizes right now, only kernel size 3 (it does not 
-    handle edges correctly if the kernel is larger).
-    whew this is ugly; alternate ideas: disallow same size output and just return the inner 
-    part-> all interior nodes! simplifies this drastically, could possibly be on 
-    To debug this make a 10x10 grid and put the nans in coordinates where you think it is 
-    misbehaving then you can more simply correct the mistakes ()
-    
-    im: 2d Numpy array
-        image array with nans
-    
-    returns:
-    --------
-        None (mutates im in place)
+    This is a monster (and probably will need some modifications)
+    1) upload batch to GPU
+    2) rotate
+    3) transpose <------------ NOT NECESSARY SINCE YOU KNOW THE BLOCK STRUCTURE NOW
+    4) convert image to transmission space
+    5) extract normalization patches
+    6) normalize transmission images
+    7) spatial median (kernel x kernel) -> improves nans when you take -log
+    8) lambert beer
+    9) reverse the transpose from 3
+    10) crop
+    11) insert batch into output array
+    Parameters:
+    -----------
+    input_arr: 3D numpy array 
+        input volume array
+    ff: 2D cupy array 
+        flat field
+    df: 2D cupy array 
+        dark field
+    output_arr: 3D numpy array 
+        array to output into
+    id0: int
+        first index of batch
+    id1: int
+        final index of batch
+    batch_size: int
+        size of batch
+    norm_patch: list
+        list of coordinates of normalization patch (x0,x1,y0,y1)
+    crop_patch: list
+        list of coordinates of crop patch (x0,x1,y0,y1)
+    theta: float
+        angle to rotate the volume through
+    kernel: int (odd number)
+        size of median kernel
+    dtype: numpy data type
+        data type of all arrays
     """
-    kernel = 3
-    not_numbers = np.where(np.isnan(im))
-    infs = np.where(im == np.inf)
-    nans = np.hstack([not_numbers,infs])
-    nx,ny = im.shape
-    k = kernel//2
-    for x,y in zip(nans[0],nans[1]):
-        if (y == 0) and (x == 0):
-            #print(\"top left corner\")
-            slice_ = im[:k+1,:k+1]
-        elif (y == 0) and (x > 0) and (x < nx-1):
-            #print(\"top row\")
-            slice_ = im[x-k:x+k+1,:k+1]
-        elif (y == 0) and (x == nx-1):
-            #print(\"top corner\")
-            slice_ = im[nx-k-1:,:k+1]
-        elif (y > 0) and (y < ny-1) and (x == 0):
-            #print(\"left edge\")
-            slice_ = im[:k+1,y-k:y+k+1]
-        elif (y > 0) and (y < ny-1) and (x == nx-1):
-            #print(\"right edge\")
-            slice_ = im[nx-k-1:,y-k:y+k+1]
-        elif (y == ny-1) and (x > 0) and (x < nx-1):
-            #print(\"bottom row\")
-            slice_ = im[x-k:x+k+1,ny-k-1:]
-        elif (y == ny-1) and (x == 0):
-            #print(\"bottom left corner?\")
-            slice_ = im[:k+1,ny-k-1:]
-        elif (y == ny-1) and (x == nx-1):
-            #print('Bottom right corner')
-            slice_ = im[-k-1:,-k-1:]
-        elif (y < ny-1) and ( y > 0) and (x < nx-1) and (x > 0):
-            #print('Interior')
-            slice_ = im[x-k:x+k+1,y-k:y+k+1]
-        temp = slice_[~np.isnan(slice_)]
-        med = np.median(temp)#.flatten())
-        im[x,y] = med
-        del temp,med,slice_
-    # }}}
-def nan_filter_gpu(im): # {{{
-    """
-    Note This does not take arbitrary kernel sizes right now, only kernel size 3 (it does not 
-    handle edges correctly if the kernel is larger).
-    whew this is ugly; alternate ideas: disallow same size output and just return the inner 
-    part-> all interior nodes! simplifies this drastically, could possibly be on 
-    To debug this make a 10x10 grid and put the nans in coordinates where you think it is 
-    misbehaving then you can more simply correct the mistakes ()
-    
-    im: 2d Numpy array
-        image array with nans
-    
-    returns:
-    --------
-        None (mutates im in place)
-    """
-    kernel = 3
-    not_numbers = cp.array(cp.where(cp.isnan(im)))
-    nans = cp.where(~cp.isfinite(im))
-    nx,ny,nz = im.shape
-    k = kernel//2
-    for x,y,z in zip(nans[0],nans[1],nans[2]):
-        if (y == 0) and (x == 0):
-            print("top left corner")
-            slice_ = im[:k+1,:k+1,z]
-        elif (y == 0) and (x > 0) and (x < nx-1):
-            print("top row")
-            slice_ = im[x-k:x+k+1,:k+1,z]
-        elif (y == 0) and (x == nx-1):
-            print("top corner")
-            slice_ = im[nx-k-1:,:k+1,z]
-        elif (y > 0) and (y < ny-1) and (x == 0):
-            print("left edge")
-            slice_ = im[:k+1,y-k:y+k+1,z]
-        elif (y > 0) and (y < ny-1) and (x == nx-1):
-            print("right edge")
-            slice_ = im[nx-k-1:,y-k:y+k+1,z]
-        elif (y == ny-1) and (x > 0) and (x < nx-1):
-            print("bottom row")
-            slice_ = im[x-k:x+k+1,ny-k-1:,z]
-        elif (y == ny-1) and (x == 0):
-            print("bottom left corner?")
-            slice_ = im[:k+1,ny-k-1:,z]
-        elif (y == ny-1) and (x == nx-1):
-            print('Bottom right corner')
-            slice_ = im[-k-1:,-k-1:,z]
-        elif (y < ny-1) and ( y > 0) and (x < nx-1) and (x > 0):
-            print('Interior')
-            slice_ = im[x-k:x+k+1,y-k:y+k+1,z]
-        med = cp.nanmedian(slice_)
-        im[x,y,z] = med
-        print(slice_)
-        print(med)
-        print(im[x,y,z])
-        del med,slice_
+    n_proj,height,width = input_arr.shape
+    projection_gpu = cp.asarray(input_arr[id0:id1], dtype = dtype)
+    projection_gpu = rotate_gpu(projection_gpu,theta, axes = (1,2), reshape = False)
+    projection_gpu -= df.reshape(1,height,width)
+    projection_gpu /= (ff-df).reshape(1,height,width)
+    patch = cp.mean(projection_gpu[:,norm_patch[0]:norm_patch[1],norm_patch[2]:norm_patch[3]], axis = (1,2), dtype = dtype)
+    projection_gpu /= patch.reshape(batch_size,1,1)
+    projection_gpu = median_gpu(projection_gpu, (1,kernel,kernel))
+    projection_gpu = -cp.log(projection_gpu)
+    #-----------------------------------------------
+    #---      make all non-finite values 0?      ---
+    projection_gpu[~cp.isfinite(projection_gpu)] = 0
+    #-----------------------------------------------
+    output_arr[id0:id1] = cp.asnumpy(projection_gpu[:,crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]])
     # }}}
 
 if __name__=="__main__":
     pass
-
