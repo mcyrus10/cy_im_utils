@@ -3,34 +3,14 @@
 #                       SAREPY GPU FUNCTIONS
 #
 #------------------------------------------------------------------------------
-from cupyx.scipy.ndimage import gaussian_filter, median_filter as median_filter_GPU, binary_dilation as binary_dilation_GPU,uniform_filter1d as uniform_filter1d_gpu
+from cupyx.scipy.ndimage import gaussian_filter
+from cupyx.scipy.ndimage import median_filter as median_filter_GPU
+from cupyx.scipy.ndimage import binary_dilation as binary_dilation_GPU
+from cupyx.scipy.ndimage import uniform_filter1d as uniform_filter1d_gpu
 from numba import cuda
 import cupy as cp
 import numpy as np
 
-
-def remove_stripe_based_normalization(sinogram, sigma, in_place = False): # {{{
-    """
-    This is from SAREPY
-    
-    I removed the num_chunks since you process these in batches?
-    """
-    n_proj,n_sino,detector_width = sinogram.shape
-    if not in_place:
-        sinogram = cp.copy(sinogram)
-    else:
-        print("Mutating sinograms in place")
-    listindex = cp.array_split(cp.arange(n_proj),1)
-    for pos in listindex:
-        bindex = cp.asnumpy(pos[0])
-        eindex = cp.asnumpy(pos[-1] + 1)
-        listmean = cp.mean(sinogram[bindex:eindex], axis = 0)
-        list_filtered = gaussian_filter(listmean,sigma)
-        listcoe = list_filtered - listmean
-        matcoe = cp.tile(listcoe, (eindex - bindex, 1)).reshape(n_proj,n_sino,detector_width)
-        sinogram[bindex:eindex, :] = sinogram[bindex:eindex,:] + matcoe
-    return sinogram
-    # }}}
 @cuda.jit('void(float32[:,:,:],int32[:,:,:],float32[:,:,:])')
 def invert_sort_GPU(input_arr,index_arr,output_arr):# {{{
     """
@@ -40,8 +20,10 @@ def invert_sort_GPU(input_arr,index_arr,output_arr):# {{{
     -----------
     input_arr: (float32) 3 dimensional cp.array
         the sorted/filtered sinogram
+
     index_arr: (uint32) 3 dimensional cp.array
         the argsort output of sorting the sinogram
+
     output_arr: (float32) 3 dimensional cp.array
         the variable for holding the reverse sorted sinogram
     
@@ -67,8 +49,10 @@ def invert_sort_GPU_2(input_arr,index_arr,output_arr):# {{{
     -----------
     input_arr: (float32) 3 dimensional cp.array
         the sorted/filtered sinogram
+
     index_arr: (uint32) 3 dimensional cp.array
         the argsort output of sorting the sinogram
+
     output_arr: (float32) 3 dimensional cp.array
         the variable for holding the reverse sorted sinogram
     
@@ -80,6 +64,28 @@ def invert_sort_GPU_2(input_arr,index_arr,output_arr):# {{{
         val = input_arr[i,j,k]
         output_arr[i,proj_index,k] = val
 # }}}
+def remove_stripe_based_normalization(sinogram, sigma, in_place = False): # {{{
+    """
+    This is from SAREPY
+    
+    I removed the num_chunks since you process these in batches?
+    """
+    n_proj,n_sino,detector_width = sinogram.shape
+    if not in_place:
+        sinogram = cp.copy(sinogram)
+    else:
+        print("Mutating sinograms in place")
+    listindex = cp.array_split(cp.arange(n_proj),1)
+    for pos in listindex:
+        bindex = cp.asnumpy(pos[0])
+        eindex = cp.asnumpy(pos[-1] + 1)
+        listmean = cp.mean(sinogram[bindex:eindex], axis = 0)
+        list_filtered = gaussian_filter(listmean,sigma)
+        listcoe = list_filtered - listmean
+        matcoe = cp.tile(listcoe, (eindex - bindex, 1)).reshape(n_proj,n_sino,detector_width)
+        sinogram[bindex:eindex, :] = sinogram[bindex:eindex,:] + matcoe
+    return sinogram
+    # }}}
 def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, threads_per_block = (8,8,8)): # {{{
     """
     This is from SAREPY but modified a little bit since the syntax becomes a
@@ -132,10 +138,10 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
     blockspergrid_z = int((detector_width+threads_per_block[0]-1)/threads_per_block[0])
     blocks = (blockspergrid_x,blockspergrid_y,blockspergrid_z)
     invert_sort_GPU[blocks,threads_per_block](
-                                       mat_sort,
-                                       mat_argsort,
-                                       mat_sort_back,
-                                      )
+                                               mat_sort,
+                                               mat_argsort,
+                                               mat_sort_back,
+                                              )
 
     return mat_sort_back
 # }}}
@@ -304,7 +310,7 @@ def nd_interp2d(input_arr,live_rows,dead_rows): #{{{
             input_arr[:,sino,c] = input_arr[:,sino,below] + (c-below) *\
                     (input_arr[:,sino,above]-input_arr[:,sino,below])/(above-below)
     # }}}
-def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram,snr,size,residual = False): # {{{
+def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, size, residual = False): # {{{
     """
     """
     n_proj,n_sino,detector_width = sinogram.shape
@@ -316,9 +322,9 @@ def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram,snr,size,residual = 
     list_diff = cp.sum(cp.abs(sinogram-sino_smooth), axis = 0)
     list_diff_bck = median_filter_GPU(list_diff, (1,size))
     list_fact = list_diff/list_diff_bck
-    list_fact[~cp.isfinite(list_fact)] = 1                     #<-------------------------- Hack for getting around true divide?
+    list_fact[~cp.isfinite(list_fact)] = 1                     #<-------- Hack for getting around true divide?
     list_mask = detect_stripe_GPU(list_fact,snr)
-    list_mask = cp.array([binary_dilation_GPU(list_mask[i], iterations = 1) for i in range(2)], dtype = cp.float32)
+    list_mask = cp.array([binary_dilation_GPU(list_mask[i], iterations = 1) for i in range(n_sino)], dtype = cp.float32)
     list_mask[:,0:2] = 0.0
     list_mask[:,-2:] = 0.0
     listx = cp.array(cp.where(list_mask < 1.0))
@@ -331,8 +337,6 @@ def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram,snr,size,residual = 
 def remove_all_stripe_GPU(sinogram,snr,la_size,sm_size,drop_ratio = 0.1,norm = True, dim = 1):# {{{
     sinogram = remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, la_size)
     sinogram = remove_large_stripe_GPU(sinogram, snr, la_size, drop_ratio, norm)
-    return remove_stripe_based_sorting_GPU(sinogram,sm_size, dim = dim)
+    sinogram = remove_stripe_based_sorting_GPU(sinogram,sm_size, dim = dim)
+    return sinogram
     # }}}
-
-if __name__=="__main__":
-    pass

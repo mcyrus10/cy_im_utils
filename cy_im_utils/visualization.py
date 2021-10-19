@@ -1,15 +1,22 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from ipywidgets import IntSlider,HBox,VBox,interactive_output
+#------------------------------------------------------------------------------
 from glob import glob
+from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual
+from matplotlib.gridspec import GridSpec
 from scipy.ndimage import rotate as rotate_cpu
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import numpy as np
+
 # These lines are a little hack to bring in functions that are local to this directory (prep)
 import os
 from sys import path
 real_path = os.path.realpath(__file__)
 path.append(os.path.dirname(real_path))
 from prep import *
-from tqdm import tqdm
+from recon_utils import *
+
+path.append("C:\\Users\\mcd4\\Documents\\vo_filter_source\\sarepy")
+from sarepy.prep.stripe_removal_original import remove_all_stripe as remove_all_stripe_CPU
 
 def constrain_contrast(im, quantile_low = 0.01, quantile_high = 0.99): #{{{
     #--------------------------------------------------------------------------
@@ -147,14 +154,14 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
                 ax[0].plot([x,x],[0,shape[1]-1],color = line_color, linewidth = lw, linestyle = ls)
 
         if view == 'yz' or view == 'all':
-            ax[1].imshow(ndimage.rotate(volume[x,:,:], yz, reshape = False), cmap = cmap, vmin = l, vmax = h)
+            ax[1].imshow(rotate_cpu(volume[x,:,:], yz, reshape = False), cmap = cmap, vmin = l, vmax = h)
             ax[1].set_title("y-z plane")
             if crosshairs:
                 ax[1].plot([z,z],[0,shape[1]-1],color = line_color, linewidth = lw, linestyle = ls)
                 ax[1].plot([0,shape[2]-1],[y,y],color = line_color, linewidth = lw, linestyle = ls)
 
         if view == 'xz' or view == 'all':
-            ax[2].imshow(ndimage.rotate(volume[:,y,:].T, xz, reshape = False), cmap = cmap, vmin = l, vmax = h)
+            ax[2].imshow(rotate_cpu(volume[:,y,:].T, xz, reshape = False), cmap = cmap, vmin = l, vmax = h)
             ax[2].set_title("x-z plane")
             if crosshairs:
                 ax[2].plot([0,shape[0]-1],[z,z],color = line_color, linewidth = lw, linestyle = ls)
@@ -198,7 +205,7 @@ def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_nca
     df_files = glob(data_dict['dark path'])
     read_fcn = data_dict['imread function']
     dtype = data_dict['dtype']
-    Transpose = data_dict['transpose']
+    Transpose = data_dict['Transpose']
     cor_y0,cor_y1 = data_dict['COR rows']
 
     ff = field_gpu(ff_files, dtype = data_dict['dtype'])
@@ -323,6 +330,146 @@ def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_nca
     out = interactive_output(inner, control_dict)
     display(ui,out)
     # }}}
+def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_size_max = 51): # {{{
+    """
+    Interactive inspection of remove_all_stripe with sliders to control the
+    arguments. It overwrites the values in data_dict so they can be unpacked
+    and used for the Vo filter batch.
 
-if __name__=="__main__":
-    pass
+    Parameters:
+    -----------
+    input_array: 3d numpy array
+        array of attenuation values
+
+    figsize: tuple
+        
+    snr_max: float
+        maximum value for snr slider to take
+
+    sm_size_max: int
+        (odd number) maximum value for sm_size slider to take
+    """
+    gs = GridSpec(1,5)
+    fig = plt.figure(figsize = figsize)
+    ax = []
+    ax.append(fig.add_subplot(gs[0]))
+    ax.append(fig.add_subplot(gs[1], sharex = ax[0], sharey = ax[0]))
+    ax.append(fig.add_subplot(gs[2], sharex = ax[0], sharey = ax[0]))
+    ax.append(fig.add_subplot(gs[3:]))
+    ax[1].yaxis.set_ticklabels([])
+    ax[2].yaxis.set_ticklabels([])
+    ax[3].yaxis.tick_right()
+    ax[0].set_title("unfiltered")
+    ax[1].set_title("filtered")
+    ax[2].set_title("diff")
+    ax[3].set_title("recon (FBP)")
+    n_proj,n_sino,detector_width = input_array.shape
+    def inner(frame,snr,la_size,sm_size):
+        temp = input_array[:,frame,:]
+        try:
+            filtered = remove_all_stripe_CPU(temp,snr,la_size,sm_size)
+            reco = astra_2d_simple(filtered)
+            ax[0].imshow(temp.T)
+            ax[1].imshow(filtered.T)
+            ax[2].imshow(temp.T-filtered.T)
+            ax[3].imshow(reco)
+        except:
+            print("SVD did not converge")
+        data_dict['signal to noise ratio'] = snr
+        data_dict['large filter'] = la_size
+        data_dict['small filter'] = sm_size
+        
+    frame = IntSlider(description = "row", continuous_update = False, min = 0, max = n_sino)
+    snr = FloatSlider(description = "snr", continuous_update = False, min = 0, max = snr_max)
+    la_size = IntSlider(description = "la_size", continuous_update = False, min = 1, max = detector_width//2, step = 2)
+    sm_size = IntSlider(description = "sm_size", continuous_update = False, min = 1, max = sm_size_max, step = 2)
+    
+    control_dict = {
+                    'frame':frame,
+                    'snr':snr,
+                    'la_size':la_size,
+                    'sm_size':sm_size
+                   }
+    
+    ui = HBox([frame,snr,la_size,sm_size])
+    out = interactive_output(inner, control_dict)
+    display(ui,out)
+    # }}}
+def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, 
+        fix_upper = True, n_interval = 2, hist_width = 2, cmap = 'gist_ncar',
+        figsize = (10,5)):
+    # {{{
+    """
+    This is still a work in progress, I can't figure out how to curry the interactive plot... :(
+
+    This renders a histogram which can be segmented into 3 parts (4 sliders)
+    the accompanying plots are the raw image and the respective segments. This
+    plot has an 'interact button' which you press to execute the segments (so
+    that it does not try to continuously update while you move the slider,
+    which makes it super laggy) 
+
+    Parameters
+    ----------
+    im: 2D numpy array
+        raw image
+
+    im_filtered: 2D numpy array
+        image with some type of filtering (for pixel clustering); this argument
+        can also be the same as 'im', but the histogram segmentation is aided
+        by some filtering
+
+    step: float
+        how large the steps are in the interactive plot sliders
+
+    alpha: float (0-1)
+        degree of transparency of the mask
+
+    fix_upper: bool
+        ---> I don't think this works
+
+    n_interval: int
+        THE GOAL OF THIS WAS TO BE ABLE TO PASS THE NUMBER OF INTERVALS AS AN
+        ARGUMENT AND PRODUCE A PLOT WITH THE CORRESPONDING NUMBER OF SEGMENTS,
+        BUT CURRYING THE INNER FUNCTION DOES NOT WORK AS EXPECTED
+
+    hist_width: int
+        how many 'effective' gridspec slots the histogram will occupy
+
+    cmap: string
+        colormap
+
+    figsize: tuple
+        figure size
+
+    """
+    fig = plt.figure(figsize = figsize)
+    min_ = np.min(im_filtered)
+    max_ = np.max(im_filtered)
+    interval = (min_,max_,step)
+    interact_dict = {f"thresh_{t}":interval for t in range(n_interval+1)}
+    @interact_manual(**interact_dict)
+    def innermost(thresh_0, thresh_1, thresh_2, thresh_3):
+        thresh = locals()
+        thresh = [thresh[key] for key in thresh if "thresh_" in key]
+        
+        gs = GridSpec(1,hist_width+n_interval+1)
+        ax = [fig.add_subplot(gs[0:hist_width])]
+        ax[0].tick_params(axis = 'x', labelbottom = True)
+        ax[0].tick_params(axis = 'y', labelleft = True)
+        hist = ax[0].hist(im_filtered.flatten(), bins = 250, color = 'k')
+        m = np.max(hist[0][1:])
+        ax[0].set_ylim(0,m)
+        ax.append(fig.add_subplot(gs[0,hist_width]))
+        ax[1].imshow(im)
+        for i in range(n_interval):
+            thresh_im = (im_filtered>thresh[i])*(im_filtered<thresh[i+1])
+            ax[0].plot([thresh[i],thresh[i]],[0,m],'r--', linewidth = 1)
+            ax.append(fig.add_subplot(gs[0,hist_width+i+1]))
+            ax[-1].imshow(im, cmap = cmap)
+            ax[-1].imshow(thresh_im, cmap = 'bone', alpha = alpha)
+
+        # Get the last threshold boundary
+        ax[0].plot([thresh[-1],thresh[-1]],[0,m],'r--', linewidth = 1)
+
+    return innermost
+    # }}}
