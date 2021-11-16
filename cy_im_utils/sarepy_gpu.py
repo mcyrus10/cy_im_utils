@@ -30,10 +30,7 @@
 #                       SAREPY GPU FUNCTIONS
 #
 #------------------------------------------------------------------------------
-from cupyx.scipy.ndimage import gaussian_filter
-from cupyx.scipy.ndimage import median_filter as 
-from cupyx.scipy.ndimage import binary_dilation as binary_dilation_GPU
-from cupyx.scipy.ndimage import uniform_filter1d as uniform_filter1d_gpu
+from cupyx.scipy.ndimage import gaussian_filter,median_filter,binary_dilation,uniform_filter1d
 from numba import cuda
 import cupy as cp
 import numpy as np
@@ -62,7 +59,7 @@ def invert_sort_GPU(input_arr : cp.array,index_arr : cp.array,output_arr : cp.ar
         val = input_arr[i,j,k]
         output_arr[proj_index,j,k] = val
 # }}}
-def remove_stripe_based_normalization(sinogram, sigma, in_place = False): # {{{
+def remove_stripe_based_normalization(sinogram : cp.array, sigma, in_place = False): # {{{
     """
     This is from SAREPY
     
@@ -122,9 +119,9 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
     
     # Apply Median Filter
     if dim == 2:
-        mat_sort = (mat_sort, (size,1,size))
+        mat_sort = median_filter(mat_sort, (size,1,size))
     elif dim == 1:
-        mat_sort = (mat_sort, (1,1,size))
+        mat_sort = median_filter(mat_sort, (1,1,size))
 
     # Invert Sort
     if not in_place:
@@ -143,7 +140,7 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
 
     return mat_sort_back
 # }}}
-def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio : float = 0.1, norm : bool = True, threads_per_block : tuple = (8,8,8)): # {{{
+def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio : cp.array = cp.array(0.1), norm : bool = True, threads_per_block : tuple = (8,8,8)): # {{{
     """
 
     Parameters:
@@ -170,20 +167,19 @@ def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio : float = 0.1, norm 
         filterd sinogram
 
     """
-    print("---> HOWDY")
     sinogram = cp.copy(sinogram).astype(cp.float32)
-    drop_ratio = np.clip(drop_ratio, 0.0, 0.8)
+    drop_ratio = cp.clip(drop_ratio, 0.0, 0.8)
     sino_sort = cp.sort(sinogram, axis = 0)
     n_row,n_sino,n_col = sinogram.shape
     n_drop = int(0.5 * drop_ratio * n_row)
-    sino_smooth = (sino_sort, (1,1,size))
+    sino_smooth = median_filter(sino_sort, (1,1,size))
     list1 = cp.mean(sino_sort[n_drop:n_row-n_drop,:,:], axis = 0)
     list2 = cp.mean(sino_smooth[n_drop:n_row-n_drop,:,:], axis = 0)
     list_fact = list1/list2
     list_fact[~cp.isfinite(list_fact)] = 1
     list_mask = detect_stripe_GPU(list_fact,snr)
     # NOT IDEAL, BUT GO WITH IT FOR NOW
-    list_mask = [cp.array(binary_dilation_GPU(list_mask[i], iterations = 1), dtype = cp.float32) for i in range(n_sino)]
+    list_mask = [cp.array(binary_dilation(list_mask[i], iterations = 1), dtype = cp.float32) for i in range(n_sino)]
     list_mask = cp.vstack(list_mask)
     mat_fact = cp.tile(list_fact, (n_row,1)).reshape(sinogram.shape)
     if norm:
@@ -311,15 +307,15 @@ def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, size, residual
     n_proj,n_sino,detector_width = sinogram.shape
     # Vo used the function np.apply_along_axis when calling uniform_filter1d, but this is redundant
     # as uniform_filter1d takes an axis as an argument. THIS IS ALSO MUCH SLOWER THAN JUST CALLING
-    # uniform_filter1d_gpu!
-    #sino_smooth = cp.apply_along_axis(uniform_filter1d_gpu, 0, sinogram, 10)     
-    sino_smooth = uniform_filter1d_gpu(sinogram, 10, axis = 0)
+    # uniform_filter1d!
+    #sino_smooth = cp.apply_along_axis(uniform_filter1d, 0, sinogram, 10)     
+    sino_smooth = uniform_filter1d(sinogram, 10, axis = 0)
     list_diff = cp.sum(cp.abs(sinogram-sino_smooth), axis = 0)
-    list_diff_bck = (list_diff, (1,size))
+    list_diff_bck = median_filter(list_diff, (1,size))
     list_fact = list_diff/list_diff_bck
     list_fact[~cp.isfinite(list_fact)] = 1                     #<-------- Hack for getting around true divide?
     list_mask = detect_stripe_GPU(list_fact,snr)
-    list_mask = cp.array([binary_dilation_GPU(list_mask[i], iterations = 1) for i in range(n_sino)], dtype = cp.float32)
+    list_mask = cp.array([binary_dilation(list_mask[i], iterations = 1) for i in range(n_sino)], dtype = cp.float32)
     list_mask[:,0:2] = 0.0
     list_mask[:,-2:] = 0.0
     listx = cp.array(cp.where(list_mask < 1.0))
@@ -329,13 +325,29 @@ def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, size, residual
     nd_interp2d(output_mat,listx,listx_miss)
     return output_mat
     # }}}
-def remove_all_stripe_GPU(sinogram,snr,la_size,sm_size,drop_ratio = 0.1,norm = True, dim = 1):# {{{
+def remove_all_stripe_GPU(sinogram,snr,la_size,sm_size,drop_ratio = cp.array(0.1),norm = True, dim = 1):# {{{
     sinogram = remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, la_size)
     sinogram = remove_large_stripe_GPU(sinogram, snr, la_size, drop_ratio, norm)
     sinogram = remove_stripe_based_sorting_GPU(sinogram,sm_size, dim = dim)
     return sinogram
     # }}}
+def test(): # {{{
+    import matplotlib.pyplot as plt
+    from pickle import load
+    _,ax = plt.subplots(1,2)
+    data_path = "D:\\Data\\sinogram_binaries\\sinogram_volume_AAA_bottom_25_spacing.p"
+    print(f"Loading Data from {data_path}")
+    sinograms = load(open(data_path,'rb'))
+    _,n_sino,_ = sinograms.shape
+    idx = n_sino//2
+    ax[0].imshow(sinograms[:,idx,:])
+    sinograms = cp.asarray(sinograms)
+    output = remove_all_stripe_GPU(sinograms, snr = 1.5, la_size = 85, sm_size = 10, drop_ratio = cp.array(0.1), norm = True, dim=1)
+    ax[1].imshow(cp.asnumpy(output[:,idx,:]))
+    ax[0].set_title("Unfiltered")
+    ax[1].set_title("remove_all_stripe")
+    plt.show()
+    # }}}
 
 if __name__=="__main__":
-    # make a testing case?
-    pass
+    test()
