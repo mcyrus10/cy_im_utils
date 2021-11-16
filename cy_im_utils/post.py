@@ -1,9 +1,10 @@
 from PIL import Image
 from tqdm import tqdm
 from datetime import datetime
+import cupy as cp
 import os
 
-def write_log(data_dict, path):
+def write_log(data_dict : dict, path : str) -> None:
     with open(f"{path}\\.Log.txt",'w') as f:
         f.write(f"Data set name:\t {data_dict['Name']}\n")
         date_time_object = datetime.now()
@@ -14,7 +15,8 @@ def write_log(data_dict, path):
                 f.write(f"{key}:\t{data_dict[key]}\n")
 
 
-def write_volume(volume, data_dict, path, file_name, extension = 'tif'):
+def write_volume(volume : cp.array, data_dict : dict, path : str, 
+        file_name : str, extension : str = 'tif') -> None:
     """
     This function will write a reconstruction volume to disk as images, if the
     directory (path) does not exist, it will create the new directory.

@@ -5,6 +5,7 @@
 from PIL import Image
 from astropy.io import fits
 from cupyx.scipy.ndimage import median_filter as median_filter_gpu
+from cupyx.scipy import ndimage as gpu_ndimage
 from scipy.ndimage import median_filter
 from tqdm import tqdm
 import cupy as cp
@@ -12,7 +13,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-
+def imstack_read(files : list, dtype = np.float32) -> np.array: # {{{
+    """
+    
+    """
+    n_images = len(files)
+    h,w = np.asarray(Image.open(files[0]), dtype = dtype).shape
+    im_stack = np.zeros([n_images,h,w], dtype = dtype)
+    for i,f in tqdm(enumerate(files)):
+        im = np.asarray(Image.open(f), dtype = dtype)
+        im_stack[i] = im
+    return im_stack
+# }}}
 def field(files, median_spatial = 3, dtype = np.float32): # {{{
     """
     parameters
@@ -221,6 +233,40 @@ def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_pat
     #-----------------------------------------------
     output_arr[id0:id1] = cp.asnumpy(projection_gpu[:,crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]])
     # }}}
-
-if __name__=="__main__":
-    pass
+def GPU_rotate_inplace(volume , plane, theta, batch_size): # {{{
+    """
+    GPU In Place Rotation of a volume by plane; Note that this does not allow reshape, so the in place 
+    operation can be achieved (reshape changes the dimensions of the array to allow the entirety of the 
+    rotated image). This means that if the window is not large enough it will crop the edge of the image
+    
+    parameters
+    ----------
+    volume: numpy array with ndim = 3
+        volume to be rotated
+    plane: string; 'xz' or 'yz'
+        about which plane to apply rotation: 'xz' -> about y-axis; 'yz' about x-axis
+    theta: float
+        angle to rotate through
+    batch_size: int
+        size of batch to send to GPU
+    """
+    nx,ny,nz = volume.shape
+    if plane.lower() == 'yz' and theta != 0.0:
+        for j in tqdm(range(nx//batch_size)):
+            volume_gpu = cp.array(volume[j*batch_size:(j+1)*batch_size,:,:])
+            volume[j*batch_size:(j+1)*batch_size,:,:] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = (2,1), reshape = False))
+        remainder = nx%batch_size
+        if remainder > 0:
+            volume_gpu = cp.array(volume[-remainder:,:,:])
+            volume[-remainder:,:,:] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = (2,1), reshape = False))
+    elif plane.lower() == 'xz' and theta != 0.0:
+        for j in tqdm(range(ny//batch_size)):
+            volume_gpu = cp.array(volume[:,j*batch_size:(j+1)*batch_size,:])
+            volume[:,j*batch_size:(j+1)*batch_size,:] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = (2,0), reshape = False))
+        remainder = ny%batch_size
+        if remainder > 0:
+            volume_gpu = cp.array(volume[:,-remainder:,:])
+            volume[:,-remainder:,:] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = (2,0), reshape = False))
+    else:
+        assert False, "Invalid input"
+#}}}

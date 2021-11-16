@@ -1,3 +1,30 @@
+#============================================================================
+# Copyright (c) 2018 Diamond Light Source Ltd. All rights reserved.
+# Copyright 2021 Michael Daugherty.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#============================================================================
+# Author: Nghia T. Vo
+# E-mail: nghia.vo@diamond.ac.uk
+# Description: Original implementation of stripe artifact removal methods, 
+# Nghia T. Vo, Robert C. Atwood, and Michael Drakopoulos, "Superior
+# techniques for eliminating ring artifacts in X-ray micro-tomography," Optics
+# Express 26, 28396-28412 (2018).
+# https://doi.org/10.1364/OE.26.028396
+#============================================================================
+#
+#               Adapted from https://github.com/nghia-vo/sarepy
+#
 #------------------------------------------------------------------------------
 #
 #                       SAREPY GPU FUNCTIONS
@@ -12,7 +39,7 @@ import cupy as cp
 import numpy as np
 
 @cuda.jit('void(float32[:,:,:],int32[:,:,:],float32[:,:,:])')
-def invert_sort_GPU(input_arr,index_arr,output_arr):# {{{
+def invert_sort_GPU(input_arr : cp.array,index_arr : cp.array,output_arr : cp.array):# {{{
     """
     This function reverses? (inverts?) the sort after the median
     
@@ -115,10 +142,10 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
     n_proj,n_sino,detector_width = sinogram.shape
     list_index = cp.arange(0.0,n_proj,1.0)
     mat_index = cp.tile(cp.tile(list_index, (detector_width,1)),(n_sino,1)).reshape(sinogram.shape)
-    #------------------------------------------------------------------------------
-    # THIS REQUIRES TRAVERSING THE ARRAYS TWICE, BUT I DON'T UNDERSTAND THE ORIGINAL 
-    # SYNTAX WELL ENOUGH TO REPLICATE IT WITH 3D ARRAYS
-    #------------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
+    # THIS REQUIRES TRAVERSING THE ARRAYS TWICE, BUT I DON'T UNDERSTAND THE
+    # ORIGINAL SYNTAX WELL ENOUGH TO REPLICATE IT WITH 3D ARRAYS
+    #---------------------------------------------------------------------------
     mat_argsort = cp.argsort(sinogram, axis = 0).astype(cp.uint32)
     mat_sort = cp.sort(sinogram,axis = 0).astype(cp.float32)
     
@@ -148,6 +175,7 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
 def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio = 0.1, norm = True, threads_per_block = (8,8,8)): # {{{
     """
     Adapted from Vo et al.
+
     Parameters:
     -----------
     sinogram: 3D cupy array
@@ -340,3 +368,7 @@ def remove_all_stripe_GPU(sinogram,snr,la_size,sm_size,drop_ratio = 0.1,norm = T
     sinogram = remove_stripe_based_sorting_GPU(sinogram,sm_size, dim = dim)
     return sinogram
     # }}}
+
+if __name__=="__main__":
+    # make a testing case?
+    pass

@@ -96,7 +96,8 @@ def plot_circle(coords, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):# {
     # }}}
 def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
         figsize = (10,10), cmap = 'gray', colorbar = False, grid = False,
-        crosshairs = True, view = 'all', refresh = 'refresh', cbar_range = []): 
+        crosshairs = True, view = 'all', refresh = 'refresh', cbar_range = [], 
+        theta_max = 15.0): 
     # {{{
     """
     This is my ripoff of ImageJ orthogonal views, you can change x,y,z slice
@@ -128,8 +129,8 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
     @interact(  x=(0,volume.shape[0]-1,step), 
                 y = (0,volume.shape[1]-1,step), 
                 z = (0,volume.shape[2]-1, step), 
-                yz = (-15.,15.), 
-                xz = (-15.,15.))
+                yz = (-theta_max,theta_max), 
+                xz = (-theta_max,theta_max))
     def imshow_line(x,y,z,xz,yz):
         if refresh == 'refresh':
             if view == 'all':
