@@ -31,7 +31,7 @@
 #
 #------------------------------------------------------------------------------
 from cupyx.scipy.ndimage import gaussian_filter
-from cupyx.scipy.ndimage import median_filter as median_filter_GPU
+from cupyx.scipy.ndimage import median_filter as 
 from cupyx.scipy.ndimage import binary_dilation as binary_dilation_GPU
 from cupyx.scipy.ndimage import uniform_filter1d as uniform_filter1d_gpu
 from numba import cuda
@@ -61,35 +61,6 @@ def invert_sort_GPU(input_arr : cp.array,index_arr : cp.array,output_arr : cp.ar
         proj_index = int(index_arr[i,j,k])
         val = input_arr[i,j,k]
         output_arr[proj_index,j,k] = val
-# }}}
-@cuda.jit('void(float32[:,:,:],int32[:,:,:],float32[:,:,:])')
-def invert_sort_GPU_2(input_arr,index_arr,output_arr):# {{{
-    """
-    
-    THIS ONE IS DIFFERENT FROM invert_sort_GPU BECAUSE IT SEEDS THE SECOND
-    INDEX OF OUTPUT_ARR NOT THE FIRST INDEX. YOU COULD CHANGE THE SHAPES TO BE
-    CONSISTENT, OR JUST DO THIS
-
-    This function reverses? (inverts?) the sort after the median
-
-    parameters:
-    -----------
-    input_arr: (float32) 3 dimensional cp.array
-        the sorted/filtered sinogram
-
-    index_arr: (uint32) 3 dimensional cp.array
-        the argsort output of sorting the sinogram
-
-    output_arr: (float32) 3 dimensional cp.array
-        the variable for holding the reverse sorted sinogram
-    
-    """
-    detector_width, n_proj ,n_sino = input_arr.shape
-    i,j,k = cuda.grid(3)
-    if i < detector_width and j < n_proj and k < n_sino:
-        proj_index = int(index_arr[i,j,k])
-        val = input_arr[i,j,k]
-        output_arr[i,proj_index,k] = val
 # }}}
 def remove_stripe_based_normalization(sinogram, sigma, in_place = False): # {{{
     """
@@ -151,9 +122,9 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
     
     # Apply Median Filter
     if dim == 2:
-        mat_sort = median_filter_GPU(mat_sort, (size,1,size))
+        mat_sort = (mat_sort, (size,1,size))
     elif dim == 1:
-        mat_sort = median_filter_GPU(mat_sort, (1,1,size))
+        mat_sort = (mat_sort, (1,1,size))
 
     # Invert Sort
     if not in_place:
@@ -172,9 +143,8 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
 
     return mat_sort_back
 # }}}
-def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio = 0.1, norm = True, threads_per_block = (8,8,8)): # {{{
+def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio : float = 0.1, norm : bool = True, threads_per_block : tuple = (8,8,8)): # {{{
     """
-    Adapted from Vo et al.
 
     Parameters:
     -----------
@@ -200,12 +170,13 @@ def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio = 0.1, norm = True, 
         filterd sinogram
 
     """
+    print("---> HOWDY")
     sinogram = cp.copy(sinogram).astype(cp.float32)
     drop_ratio = np.clip(drop_ratio, 0.0, 0.8)
     sino_sort = cp.sort(sinogram, axis = 0)
     n_row,n_sino,n_col = sinogram.shape
     n_drop = int(0.5 * drop_ratio * n_row)
-    sino_smooth = median_filter_GPU(sino_sort, (1,1,size))
+    sino_smooth = (sino_sort, (1,1,size))
     list1 = cp.mean(sino_sort[n_drop:n_row-n_drop,:,:], axis = 0)
     list2 = cp.mean(sino_smooth[n_drop:n_row-n_drop,:,:], axis = 0)
     list_fact = list1/list2
@@ -218,24 +189,20 @@ def remove_large_stripe_GPU(sinogram, snr, size, drop_ratio = 0.1, norm = True, 
     if norm:
         sinogram = sinogram/mat_fact
 
-    transpose_shape = (2,0,1)
-    sino_tran = cp.transpose(sinogram,transpose_shape).astype(cp.float32)
-    sino_tran_argsort = cp.argsort(sino_tran, axis = 1).astype(cp.uint32)
-    sino_cor = cp.empty_like(sino_tran_argsort, dtype = cp.float32)
-    sino_smooth_tran = cp.transpose(sino_smooth, transpose_shape).astype(cp.float32)
-    detector_width,n_sino,n_projections =  sino_smooth_tran.shape
+    sino_argsort = cp.argsort(sinogram, axis = 0).astype(cp.uint32)
+    sino_cor = cp.empty_like(sino_argsort, dtype = cp.float32)
+    detector_width,n_sino,n_projections =  sino_smooth.shape
     
     threads_per_block = (8,8,8)
     blockspergrid_x = int((detector_width+threads_per_block[0]-1)/threads_per_block[0])
     blockspergrid_y = int((n_sino+threads_per_block[1]-1)/threads_per_block[1])
     blockspergrid_z = int((n_projections+threads_per_block[2]-1)/threads_per_block[2])
     blocks = (blockspergrid_x,blockspergrid_y,blockspergrid_z)
-    invert_sort_GPU_2[blocks, threads_per_block](
-                                                sino_smooth_tran,
-                                                sino_tran_argsort,
+    invert_sort_GPU[blocks, threads_per_block](
+                                                sino_smooth,
+                                                sino_argsort,
                                                 sino_cor
                                                 )
-    sino_cor = cp.transpose(sino_cor,(1,2,0))
     listx_miss = cp.where(list_mask>0.0)
     
     # Make this into a CUDA Kernel? <-- THIS LOOP EXECUTES SUPER QUICKLY, I WOULDN'T WORRY ABOUT THIS
@@ -348,7 +315,7 @@ def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, size, residual
     #sino_smooth = cp.apply_along_axis(uniform_filter1d_gpu, 0, sinogram, 10)     
     sino_smooth = uniform_filter1d_gpu(sinogram, 10, axis = 0)
     list_diff = cp.sum(cp.abs(sinogram-sino_smooth), axis = 0)
-    list_diff_bck = median_filter_GPU(list_diff, (1,size))
+    list_diff_bck = (list_diff, (1,size))
     list_fact = list_diff/list_diff_bck
     list_fact[~cp.isfinite(list_fact)] = 1                     #<-------- Hack for getting around true divide?
     list_mask = detect_stripe_GPU(list_fact,snr)
