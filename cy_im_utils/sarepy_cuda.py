@@ -22,6 +22,9 @@
 # Express 26, 28396-28412 (2018).
 # https://doi.org/10.1364/OE.26.028396
 #============================================================================
+# Author: M. Cyrus Daugherty
+# E-mail: michael.daugherty@nist.gov
+# Description: GPU adaptation of Vo's SAREPY
 #
 #               Adapted from https://github.com/nghia-vo/sarepy
 #
@@ -33,7 +36,6 @@
 from cupyx.scipy.ndimage import gaussian_filter,median_filter,binary_dilation,uniform_filter1d
 from numba import cuda
 import cupy as cp
-import numpy as np
 
 @cuda.jit('void(float32[:,:,:],int32[:,:,:],float32[:,:,:])')
 def invert_sort_GPU(input_arr : cp.array,index_arr : cp.array,output_arr : cp.array):# {{{
@@ -333,11 +335,11 @@ def remove_all_stripe_GPU(sinogram,snr,la_size,sm_size,drop_ratio = cp.array(0.1
     # }}}
 def test(): # {{{
     import matplotlib.pyplot as plt
-    from pickle import load
+    import numpy as np
     _,ax = plt.subplots(1,2)
     data_path = "D:\\Data\\sinogram_binaries\\sinogram_volume_AAA_bottom_25_spacing.p"
     print(f"Loading Data from {data_path}")
-    sinograms = load(open(data_path,'rb'))
+    sinograms = np.load(data_path,allow_pickle = True)
     _,n_sino,_ = sinograms.shape
     idx = n_sino//2
     ax[0].imshow(sinograms[:,idx,:])
@@ -350,20 +352,4 @@ def test(): # {{{
     # }}}
 
 if __name__=="__main__":
-    import matplotlib.pyplot as plt
-    from pickle import load
-    _,ax = plt.subplots(1,2)
-    data_path = "D:\\Data\\sinogram_binaries\\sinogram_volume_AAA_bottom_25_spacing.p"
-    print(f"Loading Data from {data_path}")
-    sinograms = load(open(data_path,'rb'))
-    _,n_sino,_ = sinograms.shape
-    idx = n_sino//2
-    ax[0].imshow(sinograms[:,idx,:])
-    sinograms = cp.asarray(sinograms)
-    output = remove_all_stripe_GPU(sinograms, snr = 1.5, la_size = 85, sm_size = 10, drop_ratio = cp.array(0.1), norm = True, dim=1)
-    ax[1].imshow(cp.asnumpy(output[:,idx,:]))
-    ax[0].set_title("Unfiltered")
-    ax[1].set_title("remove_all_stripe")
-    plt.show()
-    # }}}
-
+    test()

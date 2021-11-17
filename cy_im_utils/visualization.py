@@ -126,12 +126,7 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
             fig = plt.figure(figsize = figsize)
             ax = [plt.gca(),plt.gca(),plt.gca()]
 
-    @interact(  x=(0,volume.shape[0]-1,step), 
-                y = (0,volume.shape[1]-1,step), 
-                z = (0,volume.shape[2]-1, step), 
-                yz = (-theta_max,theta_max), 
-                xz = (-theta_max,theta_max))
-    def imshow_line(x,y,z,xz,yz):
+    def inner(x,y,z,xz,yz):
         if refresh == 'refresh':
             if view == 'all':
                 fig,ax = plt.subplots(2,2, figsize = figsize)
@@ -162,7 +157,8 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
                 ax[1].plot([0,shape[2]-1],[y,y],color = line_color, linewidth = lw, linestyle = ls)
 
         if view == 'xz' or view == 'all':
-            ax[2].imshow(rotate_cpu(volume[:,y,:].T, xz, reshape = False), cmap = cmap, vmin = l, vmax = h)
+            rotated_image = rotate_cpu(volume[:,y,:], xz, reshape = False)
+            ax[2].imshow(rotated_image.T, cmap = cmap, vmin = l, vmax = h, origin = 'upper')
             ax[2].set_title("x-z plane")
             if crosshairs:
                 ax[2].plot([0,shape[0]-1],[z,z],color = line_color, linewidth = lw, linestyle = ls)
@@ -179,6 +175,24 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
             for a in ax:
                 a.grid(True)
                 a.grid(which = 'minor', alpha = 1)
+
+    # The Rest of this function sets up the UI
+    x_max = volume.shape[0]-1
+    y_max = volume.shape[1]-1
+    z_max = volume.shape[2]-1
+    x = IntSlider(description = "x", continuous_update = False, min=0, max=x_max)
+    y = IntSlider(description = "y", continuous_update = False, min=0, max=y_max)
+    z = IntSlider(description = "z", continuous_update = False, min=0, max=z_max)
+    xz = FloatSlider(description = r"$\theta_{xz}$", continuous_update = False, min=-theta_max,max=theta_max)
+    yz = FloatSlider(description = r"$\theta_{yz}$", continuous_update = False, min=-theta_max,max=theta_max)
+
+    row1 = HBox([x,y,z])
+    row2 = HBox([xz,yz])
+    ui = VBox([row1,row2])
+    control_dict = { 'x':x,'y':y,'z':z,'xz':xz,'yz':yz }
+    out = interactive_output(inner, control_dict)
+    display(ui,out)
+
     # }}}
 def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_ncar'): # {{{
     """
