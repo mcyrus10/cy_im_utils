@@ -15,7 +15,20 @@ import matplotlib.pyplot as plt
 
 def imstack_read(files : list, dtype = np.float32) -> np.array: # {{{
     """
-    
+    Boilerplate image stack reader: takes a list of file names and writes the
+    images to a 3D array (image stack)
+
+    Parameters
+    ----------
+    files : list
+        list of filenames
+
+    dtype : numpy datatype
+        datatype for the array
+
+    Returns
+    -------
+    im_stack : 3D np.array of imagems 
     """
     n_images = len(files)
     h,w = np.asarray(Image.open(files[0]), dtype = dtype).shape

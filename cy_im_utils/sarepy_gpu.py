@@ -85,11 +85,11 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
     """
     This is from SAREPY but modified a little bit since the syntax becomes a
     little unwieldy with 3D arrays.  Greatest inefficiency, I assume, comes
-    from calling argsort and sort independently, Vo used a nexted list
+    from calling argsort and sort independently, Vo used a nested list
     comprehension that achieved this in a compact syntax, but I was unable to
     figure it out for these data so I am calling them both then using a
     *numba.cuda.jit* kernel to invert the sort. Note the behavior of the cuda
-    kernel is unpredictable if the data types or not enforced
+    kernel is unpredictable if the data types are not enforced
     float32,uint32,float32. I also changed the order of the input indices so
     that it is consistent with ASTRA, this can obviously be changed, but be
     careful and test the output to make sure it still works correctly
@@ -350,4 +350,20 @@ def test(): # {{{
     # }}}
 
 if __name__=="__main__":
-    test()
+    import matplotlib.pyplot as plt
+    from pickle import load
+    _,ax = plt.subplots(1,2)
+    data_path = "D:\\Data\\sinogram_binaries\\sinogram_volume_AAA_bottom_25_spacing.p"
+    print(f"Loading Data from {data_path}")
+    sinograms = load(open(data_path,'rb'))
+    _,n_sino,_ = sinograms.shape
+    idx = n_sino//2
+    ax[0].imshow(sinograms[:,idx,:])
+    sinograms = cp.asarray(sinograms)
+    output = remove_all_stripe_GPU(sinograms, snr = 1.5, la_size = 85, sm_size = 10, drop_ratio = cp.array(0.1), norm = True, dim=1)
+    ax[1].imshow(cp.asnumpy(output[:,idx,:]))
+    ax[0].set_title("Unfiltered")
+    ax[1].set_title("remove_all_stripe")
+    plt.show()
+    # }}}
+

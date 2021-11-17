@@ -1,5 +1,6 @@
 # Cyrus Image Utils
 
+
 This should mostly just be functions, unless a class is really appropriate, it
 will be simpler most of the time to just deal with numpy arrays.
 
@@ -34,3 +35,9 @@ branch tier 1:
 
 from cy_im_utils.analysis.visualization import nif_99to01contrast
 from cy_im_utils.prep import field
+
+## Sarepy GPU
+
+![SAREPY GPU Array format](sarepy_gpu_array_format.png)
+
+SAREPY GPU array format.
