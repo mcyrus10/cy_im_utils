@@ -1,5 +1,5 @@
-from prep import GPU_rotate_inplace
 from post import write_volume
+from prep import GPU_rotate_inplace
 import numpy as np
 
 import logging
@@ -32,9 +32,10 @@ class ROI:
             size of the batches to be moved to the GPU
             
         in_place : bool
-            This boolean determines if 'volume_slice' is a copy of 'volume' or if it is a view,
-            be careful with this because if it is True then it modifies the original volume so 
-            it might distort further ROIs. It is much faster using in_place though!
+            This boolean determines if 'volume_slice' is a copy of 'volume' or
+            if it is a view, be careful with this because if it is True then it
+            modifies the original volume so it might distort further ROIs. It
+            is much faster using in_place though!
         
         Returns
         -------
@@ -61,24 +62,47 @@ class ROI:
             volume to be cropped
             
         crop : list
-            6 integers corresponding to the corners of the crop [x0,x1,y0,y1,z0,z1]
+            6 integers corresponding to the corners of the crop
+            [x0,x1,y0,y1,z0,z1]
 
         in_place : bool
-            the bool determines whether or not a copy is returned or a reference (view) 
-            of the volume (i.e. the same memory)
+            the bool determines whether or not a copy is returned or a
+            reference (view) of the volume (i.e. the same memory)
 
         """
         slice_x = slice(crop[0],crop[1],1)
         slice_y = slice(crop[2],crop[3],1)
         slice_z = slice(crop[4],crop[5],1)
         if in_place:
-            logger.warning("transforming volume in-place --> ensure rotations don't skew other ROIs")
+            logger.warning("transforming input volume in-place --> ensure rotations don't skew other ROIs")
             return volume[slice_x,slice_y,slice_z]
         else:
             return volume[slice_x,slice_y,slice_z].copy()
 
-    def write_volume(self, path : str, extension : str = "tif"):
+    def write_volume(self, path : str, extension : str = "tif") -> None:
         """
-        Wrapper for calling write_volume
+        Wrapper for calling write_volume, this automatically uses self.label as
+        the prefix
+
+        Parameters
+        ----------
+        path : string
+            output path for image stack
+
+        extension : string
+            image extension
         """
         write_volume(self.slice, path, self.label, extension )
+
+    def dump_binary(self, path : str) -> None:
+        """
+        write the volume to binary file like pickle.dump, but just using np.save
+
+        Parameters
+        ----------
+        path : string
+            output path for binary file
+        
+        """
+        filename_name = f"{path}\\{self.label}.npy"
+        np.save(filename, self.slice)

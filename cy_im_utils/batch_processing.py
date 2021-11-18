@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_patch,
                           crop_patch, theta, kernel = 3, dtype = cp.float32):
-    # {{{
+    
     """
     This is a monster (and probably will need some modifications)
     1) upload batch to GPU
@@ -66,8 +66,8 @@ def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_pat
     projection_gpu[~cp.isfinite(projection_gpu)] = 0
     #-----------------------------------------------
     output_arr[id0:id1] = cp.asnumpy(projection_gpu[:,crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]])
-    # }}}
-def fbp_cuda_3d(attn, pixel_size): # {{{
+    
+def fbp_cuda_3d(attn, pixel_size): 
     """
     naiive implementation of FBP_CUDA on each sinogram individually; not sure why this 
     isn't in the regular ASTRA configuration for parallel3d.... 
@@ -109,10 +109,9 @@ def fbp_cuda_3d(attn, pixel_size): # {{{
         astra.algorithm.delete(algorithm_id)
         astra.data2d.delete([sino_id,reconstruction_id])
     return recon/pixel_size
-    # }}}
-def ASTRA_GENERIC(attn,geometry = 'cone', algorithm = 'FDK_CUDA', detector_pixel_size = 0.0087, 
-                  source_origin = 5965, origin_detector = 35):
-    # {{{
+    
+def ASTRA_GENERIC(attn,geometry = 'cone', algorithm = 'FDK_CUDA', detector_pixel_size = 0.0087, source_origin = 5965, origin_detector = 35):
+    
     """
     algorithm for cone -> FDK_CUDA
     algorithms for Parallel -> SIRT3D_CUDA, FP3D_CUDA, BP3D_CUDA
@@ -150,7 +149,6 @@ def ASTRA_GENERIC(attn,geometry = 'cone', algorithm = 'FDK_CUDA', detector_pixel
     astra.algorithm.delete(algorithm_id)
     astra.data2d.delete([projections_id,reconstruction_id])
     return reconstruction
-    # }}}
-
+    
 if __name__=="__main__":
     pass

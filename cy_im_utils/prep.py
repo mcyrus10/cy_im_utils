@@ -13,7 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def imstack_read(files : list, dtype = np.float32) -> np.array: # {{{
+def imstack_read(files : list, dtype = np.float32) -> np.array: 
     """
     Boilerplate image stack reader: takes a list of file names and writes the
     images to a 3D array (image stack)
@@ -37,15 +37,17 @@ def imstack_read(files : list, dtype = np.float32) -> np.array: # {{{
         im = np.asarray(Image.open(f), dtype = dtype)
         im_stack[i] = im
     return im_stack
-# }}}
-def field(files, median_spatial = 3, dtype = np.float32): # {{{
+
+def field(files, median_spatial = 3, dtype = np.float32): 
     """
     parameters
     ----------
     files: list 
         Image files for the field (dark/flat)
+
     median_spatial: int
         Median spatial filter size
+
     dtype: numpy numerical type
         Data type for the images
 
@@ -67,8 +69,8 @@ def field(files, median_spatial = 3, dtype = np.float32): # {{{
         temp[i,:,:] = np.asarray(read_fcn(f))
 
     return median_filter(np.median(temp,axis = 0),median_spatial).astype(dtype)
-    # }}}    
-def field_gpu(files, median_spatial = 3, dtype = cp.float32): # {{{
+        
+def field_gpu(files, median_spatial = 3, dtype = cp.float32): 
     """
     parameters
     ----------
@@ -98,8 +100,8 @@ def field_gpu(files, median_spatial = 3, dtype = cp.float32): # {{{
         temp[i,:,:] = cp.asarray(read_fcn(f))
 
     return median_filter_gpu(cp.median(temp,axis = 0),median_spatial).astype(dtype)
-    # }}}    
-def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float32]): # {{{
+        
+def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float32]): 
     """
 
     Parameters:
@@ -127,8 +129,8 @@ def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float
         return cp.asnumpy(cp.median(im, axis = axis))
     elif device == 'cpu':
         return np.median(im, axis = axis)
-    # }}}
-def get_y_vec(img, axis = 0):#{{{
+    
+def get_y_vec(img : np.array, axis = 0) -> np.array:
     """
     Snagged this from a stack overflow post
     """
@@ -137,8 +139,8 @@ def get_y_vec(img, axis = 0):#{{{
     s[axis] = -1
     i = np.arange(n).reshape(s)
     return np.round(np.sum(img * i, axis = axis) / np.sum(img, axis = axis), 1)
-#}}}
-def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True): # {{{
+
+def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True): 
     """
     Parameters
     ----------
@@ -187,10 +189,8 @@ def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True): # {
         ax.set_title("Center of Rotation")
         ax.legend()
     return com_fit
-    # }}}
-def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_patch,
-                          crop_patch, theta, kernel = 3, dtype = np.float32):
-    # {{{
+    
+def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_patch, crop_patch, theta, kernel = 3, dtype = np.float32):
     """
     This is a monster (and probably will need some modifications)
     1) upload batch to GPU
@@ -245,8 +245,8 @@ def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_pat
     projection_gpu[~cp.isfinite(projection_gpu)] = 0
     #-----------------------------------------------
     output_arr[id0:id1] = cp.asnumpy(projection_gpu[:,crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]])
-    # }}}
-def GPU_rotate_inplace(volume , plane, theta, batch_size): # {{{
+    
+def GPU_rotate_inplace(volume , plane, theta, batch_size): 
     """
     GPU In Place Rotation of a volume by plane; Note that this does not allow reshape, so the in place 
     operation can be achieved (reshape changes the dimensions of the array to allow the entirety of the 
@@ -282,4 +282,3 @@ def GPU_rotate_inplace(volume , plane, theta, batch_size): # {{{
             volume[:,-remainder:,:] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = (2,0), reshape = False))
     else:
         assert False, "Invalid input"
-#}}}

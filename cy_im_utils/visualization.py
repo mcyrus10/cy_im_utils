@@ -18,23 +18,25 @@ from recon_utils import *
 path.append("C:\\Users\\mcd4\\Documents\\vo_filter_source\\sarepy")
 from sarepy.prep.stripe_removal_original import remove_all_stripe as remove_all_stripe_CPU
 
-def constrain_contrast(im, quantile_low = 0.01, quantile_high = 0.99): #{{{
+def constrain_contrast(im, quantile_low = 0.01, quantile_high = 0.99): 
     #--------------------------------------------------------------------------
     # Just let numpy do this
     #--------------------------------------------------------------------------
     temp = im.flatten()
     return np.quantile(temp,quantile_low),np.quantile(temp,quantile_high)
-    # }}}
-def nif_99to01contrast(image): # {{{
-    #--------------------------------------------------------------------------
-    # This returns the bounds that you can scale the image by, to do so you can
-    # use this type of syntax:
-    #   example:
-    #       im = ....
-    #       lowbin,highbin = nif_99to01contrast(im)
-    #       im[im<lowbin] = lowbin
-    #       im[im>highbin] = highbin
-    #--------------------------------------------------------------------------
+    
+def nif_99to01contrast(image): 
+    """
+    --------------------------------------------------------------------------
+     This returns the bounds that you can scale the image by, to do so you can
+     use this type of syntax:
+       example:
+           im = ....
+           lowbin,highbin = nif_99to01contrast(im)
+           im[im<lowbin] = lowbin
+           im[im>highbin] = highbin
+    --------------------------------------------------------------------------
+    """
     hist, edges = np.histogram(image)
     normhist = np.cumsum(hist)/np.sum(hist)
     lowinds = normhist <= 0.01
@@ -52,8 +54,8 @@ def nif_99to01contrast(image): # {{{
     if highbin == lowbin:
         highbin = highbin+1
     return lowbin,highbin
-    # }}}
-def plot_patch(patch, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):# {{{
+    
+def plot_patch(patch, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):
     """
     This is just a hack to make a rectangular patch for matplotlib
     Parameters
@@ -74,8 +76,8 @@ def plot_patch(patch, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):# {{{
     ax.plot([patch[0],patch[0]],[patch[2],patch[3]],color = color, linestyle = linestyle, linewidth = linewidth)
     ax.plot([patch[1],patch[1]],[patch[2],patch[3]],color = color, linestyle = linestyle, linewidth = linewidth)
     return None 
-    # }}}
-def plot_circle(coords, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):# {{{
+    
+def plot_circle(coords, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):
     """
     This is just a hack to make a rectangular patch for matplotlib
     Parameters
@@ -93,12 +95,12 @@ def plot_circle(coords, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):# {
     """
     
     return None 
-    # }}}
+    
 def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
         figsize = (10,10), cmap = 'gray', colorbar = False, grid = False,
         crosshairs = True, view = 'all', refresh = 'refresh', cbar_range = [], 
         theta_max = 15.0): 
-    # {{{
+    
     """
     This is my ripoff of ImageJ orthogonal views, you can change x,y,z slice
     and xz rotation (i.e. rotation about the y-axis) and the yz roatation
@@ -193,8 +195,8 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
     out = interactive_output(inner, control_dict)
     display(ui,out)
 
-    # }}}
-def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_ncar'): # {{{
+    
+def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_ncar'): 
     """
     This is still a work in progress. The goal is to have a minimal interface
     to act like ReconstructCT's GUI to help find the crop boundaries and
@@ -344,8 +346,8 @@ def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_nca
                     }
     out = interactive_output(inner, control_dict)
     display(ui,out)
-    # }}}
-def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_size_max = 51): # {{{
+    
+def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_size_max = 51): 
     """
     Interactive inspection of remove_all_stripe with sliders to control the
     arguments. It overwrites the values in data_dict so they can be unpacked
@@ -409,11 +411,11 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
     ui = HBox([frame,snr,la_size,sm_size])
     out = interactive_output(inner, control_dict)
     display(ui,out)
-    # }}}
+    
 def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, 
         fix_upper = True, n_interval = 2, hist_width = 2, cmap = 'gist_ncar',
         figsize = (10,5)):
-    # {{{
+    
     """
     This is still a work in progress, I can't figure out how to curry the interactive plot... :(
 
@@ -487,4 +489,4 @@ def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9,
         ax[0].plot([thresh[-1],thresh[-1]],[0,m],'r--', linewidth = 1)
 
     return innermost
-    # }}}
+    

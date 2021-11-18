@@ -4,8 +4,7 @@ from datetime import datetime
 import cupy as cp
 import os
 
-def write_volume(volume : cp.array, path : str, prefix : str, 
-        extension : str = 'tif') -> None:
+def write_volume(volume : cp.array, path : str, prefix : str, extension : str = 'tif') -> None:
     """
     This function will write a reconstruction volume to disk as images, if the
     directory (path) does not exist, it will create the new directory.
