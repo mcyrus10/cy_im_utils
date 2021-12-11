@@ -111,7 +111,6 @@ def fbp_cuda_3d(attn, pixel_size):
     return recon/pixel_size
     
 def ASTRA_GENERIC(attn,geometry = 'cone', algorithm = 'FDK_CUDA', detector_pixel_size = 0.0087, source_origin = 5965, origin_detector = 35):
-    
     """
     algorithm for cone -> FDK_CUDA
     algorithms for Parallel -> SIRT3D_CUDA, FP3D_CUDA, BP3D_CUDA

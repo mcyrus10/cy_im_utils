@@ -1,10 +1,9 @@
 from PIL import Image
 from tqdm import tqdm
-from datetime import datetime
-import cupy as cp
+import numpy as np
 import os
 
-def write_volume(volume : cp.array, path : str, prefix : str, extension : str = 'tif') -> None:
+def write_volume(volume : np.array, path : str, prefix : str, extension : str = 'tif') -> None:
     """
     This function will write a reconstruction volume to disk as images, if the
     directory (path) does not exist, it will create the new directory.
@@ -28,6 +27,5 @@ def write_volume(volume : cp.array, path : str, prefix : str, extension : str = 
     nz,nx,ny = volume.shape
     for j in tqdm(range(nz)):
         im = Image.fromarray(volume[j,:,:])
-        im_path= f"{path}\\{prefix}_{j:04d}.{extension}"
+        im_path= f"{path}\\{prefix}_{j:05d}.{extension}"
         im.save(im_path)
-

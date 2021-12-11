@@ -143,7 +143,7 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
 
     return mat_sort_back
 
-def remove_large_stripe_GPU(sinogram : cp.array, snr : float, size : int, drop_ratio : cp.array : cp.array = cp.array(0.1), norm : bool = True, threads_per_block : tuple = (8,8,8)) -> cp.array:
+def remove_large_stripe_GPU(sinogram : cp.array, snr : float, size : int, drop_ratio : cp.array = cp.array(0.1), norm : bool = True, threads_per_block : tuple = (8,8,8)) -> cp.array:
     """
 
     Parameters:

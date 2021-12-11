@@ -1,4 +1,5 @@
-#------------------------------------------------------------------------------
+"""
+"""
 from glob import glob
 from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual
 from matplotlib.gridspec import GridSpec
@@ -7,21 +8,16 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 
-# These lines are a little hack to bring in functions that are local to this directory (prep)
-import os
-from sys import path
-real_path = os.path.realpath(__file__)
-path.append(os.path.dirname(real_path))
-from prep import *
-from recon_utils import *
+from .prep import *
+from .recon_utils import *
 
-path.append("C:\\Users\\mcd4\\Documents\\vo_filter_source\\sarepy")
-from sarepy.prep.stripe_removal_original import remove_all_stripe as remove_all_stripe_CPU
 
 def constrain_contrast(im, quantile_low = 0.01, quantile_high = 0.99): 
-    #--------------------------------------------------------------------------
-    # Just let numpy do this
-    #--------------------------------------------------------------------------
+    """
+    --------------------------------------------------------------------------
+    Just let numpy do this
+    --------------------------------------------------------------------------
+    """
     temp = im.flatten()
     return np.quantile(temp,quantile_low),np.quantile(temp,quantile_high)
     
@@ -55,7 +51,7 @@ def nif_99to01contrast(image):
         highbin = highbin+1
     return lowbin,highbin
     
-def plot_patch(patch, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):
+def plot_patch(patch : list, ax , color = 'k', linestyle = '-' , linewidth  = 0.5):
     """
     This is just a hack to make a rectangular patch for matplotlib
     Parameters
@@ -195,7 +191,6 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
     out = interactive_output(inner, control_dict)
     display(ui,out)
 
-    
 def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_ncar'): 
     """
     This is still a work in progress. The goal is to have a minimal interface
@@ -366,6 +361,11 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
     sm_size_max: int
         (odd number) maximum value for sm_size slider to take
     """
+    # Importing the regular sarepy for 2d images for interactive
+    from sys import path
+    path.append("C:\\Users\\mcd4\\Documents\\vo_filter_source\\sarepy")
+    from sarepy.prep.stripe_removal_original import remove_all_stripe as remove_all_stripe_CPU
+
     gs = GridSpec(1,5)
     fig = plt.figure(figsize = figsize)
     ax = []
@@ -412,10 +412,7 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
     out = interactive_output(inner, control_dict)
     display(ui,out)
     
-def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, 
-        fix_upper = True, n_interval = 2, hist_width = 2, cmap = 'gist_ncar',
-        figsize = (10,5)):
-    
+def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, fix_upper = True, n_interval = 2, hist_width = 2, cmap = 'gist_ncar', figsize = (10,5)):
     """
     This is still a work in progress, I can't figure out how to curry the interactive plot... :(
 
@@ -465,7 +462,7 @@ def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9,
     interval = (min_,max_,step)
     interact_dict = {f"thresh_{t}":interval for t in range(n_interval+1)}
     @interact_manual(**interact_dict)
-    def innermost(thresh_0, thresh_1, thresh_2, thresh_3):
+    def innermost(thresh_0, thresh_1, thresh_2):#, thresh_3):
         thresh = locals()
         thresh = [thresh[key] for key in thresh if "thresh_" in key]
         
@@ -489,4 +486,3 @@ def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9,
         ax[0].plot([thresh[-1],thresh[-1]],[0,m],'r--', linewidth = 1)
 
     return innermost
-    

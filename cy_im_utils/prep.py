@@ -103,7 +103,6 @@ def field_gpu(files, median_spatial = 3, dtype = cp.float32):
         
 def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float32]): 
     """
-
     Parameters:
     -----------
     file_name: string

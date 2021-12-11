@@ -4,7 +4,6 @@ import numpy as np
 
 import logging
 logger = logging.getLogger(__name__)
-
 class ROI:
     """
     Class for expressing the operations applied to cropping and rotating a volume
@@ -19,6 +18,17 @@ class ROI:
         logger.info(f"crop 1 -> {crop['crop 1']}")
         logger.info(f"crop 2 -> {crop['crop 2']}")
          
+    def __call__(self) -> np.array:
+        """
+        I'm not crazy about using this syntax, but it is nice shorthand for
+        returning just the data as an array
+
+        Returns
+        -------
+            self.slice : np.array -> the sliced array
+        """
+        return self.slice
+
     def process(self, volume : np.array, batch_size : int, in_place : bool = False) -> None:
         """
         Execute slicing operations defined by theta and crop
@@ -78,31 +88,3 @@ class ROI:
             return volume[slice_x,slice_y,slice_z]
         else:
             return volume[slice_x,slice_y,slice_z].copy()
-
-    def write_volume(self, path : str, extension : str = "tif") -> None:
-        """
-        Wrapper for calling write_volume, this automatically uses self.label as
-        the prefix
-
-        Parameters
-        ----------
-        path : string
-            output path for image stack
-
-        extension : string
-            image extension
-        """
-        write_volume(self.slice, path, self.label, extension )
-
-    def dump_binary(self, path : str) -> None:
-        """
-        write the volume to binary file like pickle.dump, but just using np.save
-
-        Parameters
-        ----------
-        path : string
-            output path for binary file
-        
-        """
-        filename_name = f"{path}\\{self.label}.npy"
-        np.save(filename, self.slice)
