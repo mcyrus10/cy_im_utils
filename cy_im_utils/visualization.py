@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .prep import *
+from .prep import center_of_rotation
 from .recon_utils import *
 
 
@@ -301,6 +302,8 @@ def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_nca
                 # MODIFY CROP PATCH IN PLACE CENTERS THE IMAGE ON THE COR
                 crop_nx = crop_patch[1]-crop_patch[0]
                 dx = int(np.round(cor2[1])-crop_nx//2)
+                print(f"dx = {dx}")
+                print(f"intercept (should be center) = {cor2[1]}")
                 crop_patch[0]+=dx
                 crop_patch[1]+=dx
                 #--------------------------------------------------------
@@ -317,6 +320,7 @@ def COR_interact(data_dict, angles = [0,180], figsize = (10,5), cmap = 'gist_nca
                 data_dict['theta'] = theta
                 data_dict['COR rows'] = [cor_y0,cor_y1]
         ax[0].set_title("$\Sigma_{{i=0}}^{{{}}}$ Projection[i$\pi / {{{}}}]$".format(len(angles),len(angles)))
+        plt.show()
 
 
     crop_x0 = IntSlider(description = "crop x0", continuous_update = False, min=0,max=x_max)

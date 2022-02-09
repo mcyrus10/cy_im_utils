@@ -1,7 +1,10 @@
 import astra
 import numpy as np
 
-def astra_2d_simple(sinogram, algorithm = 'FBP_CUDA', pixel_size = 0.0087):
+def astra_2d_simple(sinogram : np.array, algorithm : str = 'FBP_CUDA', pixel_size : float = 0.0087) -> np.array:
+    """
+    basic for the AAA_bottom dataset with 0.0087 pixel size 
+    """
     n_projections,detector_width = sinogram.shape
     vol_geom = astra.create_vol_geom(detector_width,detector_width)
     angles = np.linspace(0,2*np.pi,n_projections, endpoint = False)
@@ -20,3 +23,4 @@ def astra_2d_simple(sinogram, algorithm = 'FBP_CUDA', pixel_size = 0.0087):
     astra.data2d.delete([sino_id,reconstruction_id])
     astra.algorithm.delete(alg_id)
     return reconstruction
+
