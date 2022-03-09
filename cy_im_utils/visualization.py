@@ -51,6 +51,17 @@ def nif_99to01contrast(image):
     if highbin == lowbin:
         highbin = highbin+1
     return lowbin,highbin
+
+def contrast(image , low : float  = 0.01, high : float = 0.99) -> tuple:
+    """
+    parameters
+    ----------
+    image: array-like
+
+    """
+    assert low+high == 1, "Qunatiles don't sum to 1"
+    temp = image.flatten()
+    return np.quantile(temp,low),np.quantile(temp,high)
     
 def plot_patch(patch : list, ax , color = 'k', linestyle = '-' , linewidth  = 0.5):
     """
@@ -416,7 +427,8 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
     out = interactive_output(inner, control_dict)
     display(ui,out)
     
-def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, fix_upper = True, n_interval = 2, hist_width = 2, cmap = 'gist_ncar', figsize = (10,5)):
+def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, fix_upper = True, 
+        n_interval = 2, hist_width = 2, cmap = 'gist_ncar', figsize = (10,5)):
     """
     This is still a work in progress, I can't figure out how to curry the interactive plot... :(
 
@@ -479,12 +491,14 @@ def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, fix_upper = T
         ax[0].set_ylim(0,m)
         ax.append(fig.add_subplot(gs[0,hist_width]))
         ax[1].imshow(im)
+        ax[1].axis(False)
         for i in range(n_interval):
             thresh_im = (im_filtered>thresh[i])*(im_filtered<thresh[i+1])
             ax[0].plot([thresh[i],thresh[i]],[0,m],'r--', linewidth = 1)
-            ax.append(fig.add_subplot(gs[0,hist_width+i+1]))
+            ax.append(fig.add_subplot(gs[0,hist_width+i+1], sharex = ax[-1], sharey = ax[-1]))
             ax[-1].imshow(im, cmap = cmap)
             ax[-1].imshow(thresh_im, cmap = 'bone', alpha = alpha)
+            ax[-1].axis(False)
 
         # Get the last threshold boundary
         ax[0].plot([thresh[-1],thresh[-1]],[0,m],'r--', linewidth = 1)
