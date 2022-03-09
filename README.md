@@ -1,12 +1,15 @@
 # cy_im_utils (Cyrus' Image Utils)
 
-This should mostly just be functions, unless a class is really appropriate, it
-will be simpler most of the time to just deal with numpy arrays.
+To do:
+- add logging (as needed for debugging and info)
 
+KEEP IT SIMPLE STUPID:
+**This should mostly just be functions, unless a class is really appropriate,
+it will be simpler most of the time to just deal with numpy arrays.**
 
-**Default dtype : np.float32**
+**Default dtype for everything: np.float32 (equivalent to cp.float32)**
 
-The most natural way to represent images as 3D arrays?
+The most natural way to represent projection image stack as 3D arrays:
 - index 1 = Image index (in the stack)
 - index 2 = Column
 - index 3 = Row
