@@ -53,3 +53,29 @@ efficiency boosts:
 ![SAREPY GPU Array format](sarepy_gpu_array_format.png)
 
 SAREPY GPU array format.
+
+---
+
+### CUDA notes
+
+[link to cuda slides](https://www.nvidia.com/content/GTC-2010/pdfs/2131_GTC2010.pdf)
+
+[link to stack overflow](https://stackoverflow.com/questions/4391162/cuda-determining-threads-per-block-blocks-per-gridhttps://stackoverflow.com/questions/4391162/cuda-determining-threads-per-block-blocks-per-grid)
+> First of all, your thread block size should always be a multiple of 32, because kernels issue instructions in warps (32 threads).
+
+[link to nvidia blog post](https://developer.nvidia.com/blog/even-easier-introduction-cuda/)
+
+<<<a,b>>> $\rightarrow$ 
+- a = number of thread blocks
+- b = threads in a thread block
+
+This will execute (add) once per thread rather than spreading hte computation across the parallel threads
+
+    add<<<1,256>>>(N,x,y) 
+    
+> Together, the blocks of parallel threads make up what is known as the *grid*. Since I have N elements to process, and 256 threads per block, I just need to calculate the number of blocks to get at least N threads. I simply divide N by the block size (being careful to round up in case N is not a multiple of blockSize).
+
+    int N = 1<<20;
+    int blockSize = 256;
+    int numBlocks = (N+blockSize-1) / blockSize;
+    add<<<numBlocks, blockSize>>>(N,x,y);

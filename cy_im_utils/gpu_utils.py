@@ -2,7 +2,7 @@ from tqdm import tqdm
 import cupy as cp
 import numpy as np
 
-def GPU_curry(function ,arr : np.array, ax : int = 0 ,batch_size : int = 20) -> None:
+def GPU_curry(function ,arr : np.array, axis : int = 0 ,batch_size : int = 20) -> None:
     """
     This is a generic template for dispatching a function over a GPU array that
     won't fit on the GPU ram
@@ -13,8 +13,8 @@ def GPU_curry(function ,arr : np.array, ax : int = 0 ,batch_size : int = 20) -> 
             function that takes the array as an argument (lambda)
         arr : np.array
             array on which to perform operations
-        ax : int
-            axis along which to subdivide the array (this is the dimension
+        axis : int
+            axisis along which to subdivide the array (this is the dimension
             batch_size slices)
         batch_size : int
             size of batches for GPU to process
@@ -27,7 +27,7 @@ def GPU_curry(function ,arr : np.array, ax : int = 0 ,batch_size : int = 20) -> 
         
         arr = np.ones(100**3).reshape(100,100,100)
         function = lambda j : cp.array(j)+1
-        GPU_curry(function, arr, ax = 0, batch_size = 20
+        GPU_curry(function, arr, axis = 0, batch_size = 20
 
     """
     assert len(arr.shape) == 3, "Must be 3D array"
@@ -39,17 +39,17 @@ def GPU_curry(function ,arr : np.array, ax : int = 0 ,batch_size : int = 20) -> 
     slice_y_rem = slice_y_(0)
     slice_z_rem = slice_z_(0)
     slice_batch = lambda j : slice(j*batch_size,(j+1)*batch_size,1)
-    if ax == 0:
+    if axis == 0:
         slice_x_ = slice_batch
         remainder = nx % batch_size
         slice_x_rem = slice(nx-remainder,nx,1)
         iterator = range(nx//batch_size)
-    elif ax == 1:
+    elif axis == 1:
         slice_y_ = slice_batch
         remainder = ny % batch_size
         slice_y_rem = slice(ny-remainder,ny,1)
         iterator = range(ny//batch_size)
-    elif ax == 2:
+    elif axis == 2:
         slice_z_ = slice_batch
         remainder = nz % batch_size
         slice_z_rem = slice(nz-remainder,nz,1)

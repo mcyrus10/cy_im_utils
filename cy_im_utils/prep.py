@@ -13,6 +13,7 @@ from tqdm import tqdm
 import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
+from .gpu_utils import GPU_curry
 
 
 def imstack_read(files : list, dtype = np.float32) -> np.array: 
@@ -72,7 +73,7 @@ def field(files, median_spatial = 3, dtype = np.float32):
 
     return median_filter(np.median(temp,axis = 0),median_spatial).astype(dtype)
         
-def field_gpu(files, median_spatial = 3, dtype = cp.float32): 
+def field_gpu(files, median_spatial = 3, dtype = np.float32): 
     """
     parameters
     ----------
@@ -85,23 +86,29 @@ def field_gpu(files, median_spatial = 3, dtype = cp.float32):
 
     returns
     -------
-        cupy array (2D) of the spatial median of the z-median of the images
+        numpy array (2D) of the spatial median of the z-median of the images
     """
-    ext = files[0].split(".")[-1]
-    if ext == 'tif':
+    if '.tif' in files[0].suffix:
         read_fcn = Image.open
-    elif ext == 'fit':
+    elif '.fit' in files[0].suffix:
         read_fcn = imread_fit
 
     im0 = np.asarray(read_fcn(files[0]))
     shape = im0.shape
-    temp = cp.zeros([len(files),shape[0],shape[1]])
+    temp = np.zeros([len(files),shape[0],shape[1]])
     # Determine the file extension
 
-    for i,f in tqdm(enumerate(files)):
-        temp[i,:,:] = cp.asarray(read_fcn(f))
-
-    return median_filter_gpu(cp.median(temp,axis = 0),median_spatial).astype(dtype)
+    tqdm_file_read = tqdm(enumerate(files), desc = "reading images")
+    for i,f in tqdm_file_read:
+        temp[i,:,:] = np.asarray(read_fcn(f))
+    
+    # median along main axis
+    z_median = cp.zeros(shape, dtype = dtype)
+    for elem in range(shape[0]):
+        med_temp = cp.median(cp.array(temp[:,elem,:]), axis = 0)
+        z_median[elem] = med_temp
+   
+    return median_filter_gpu(z_median,median_spatial).get()
         
 def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float32]): 
     """
@@ -141,24 +148,25 @@ def get_y_vec(img : np.array, axis = 0) -> np.array:
     i = np.arange(n).reshape(s)
     return np.round(np.sum(img * i, axis = axis) / np.sum(img, axis = axis), 1)
 
-def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True): 
+def center_of_rotation(image : np.array ,coord_0 : int, coord_1 : int, ax : plt.axis = [], image_center : bool = True): 
     """
     Parameters
     ----------
     image : 2D numpy array
         (ATTENUATION IMAGE) Opposing (0-180 degree) images summed
 
-    y0 : int
+    coord_0 : int
         Lower bounds (row-wise) for curve fitting
 
-    y1 : int
+    coord_1 : int
         Upper bounds (row-wise) for curve fitting
 
-    axis: int
+    ax: int
         axis which y0 and y1 belong to
 
-    ax: axis handle
-        For visual inspection of the fit
+    image_center: bool
+        For visual inspection of the fit (shows where the center of the image
+        is relative to the calculated center of mass and curve fit
     
     Returns
     -------
@@ -186,7 +194,7 @@ def center_of_rotation(image,coord_0,coord_1, ax = [], image_center = True):
             ax.plot([width//2,width//2],[0,height-1],color = 'w', linestyle = (0,(5,5)),label = 'Center of image')
 
 
-        ax.imshow(combined, cmap = 'gist_ncar')
+        ax.imshow(combined)
         ax.set_title("Center of Rotation")
         ax.legend()
     return com_fit
