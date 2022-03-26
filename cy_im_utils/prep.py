@@ -8,11 +8,13 @@ from PIL import Image
 from astropy.io import fits
 from cupyx.scipy.ndimage import median_filter as median_filter_gpu
 from cupyx.scipy import ndimage as gpu_ndimage
-from scipy.ndimage import median_filter
+from scipy.ndimage import median_filter,gaussian_filter
 from tqdm import tqdm
+from numba import njit
 import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
+import logging
 from .gpu_utils import GPU_curry
 
 
@@ -58,11 +60,11 @@ def field(files, median_spatial = 3, dtype = np.float32):
     -------
     numpy array (2D) of the spatial median of the z-median of the images
     """
-    ext = files[0].split(".")[-1]
-    if ext == 'tif':
+    if '.tif' in files[0].suffix:
         read_fcn = Image.open
-    elif ext == 'fit':
+    elif '.fit' in files[0].suffix:
         read_fcn = imread_fit
+
 
     im0 = np.asarray(read_fcn(files[0]))
     shape = im0.shape
@@ -71,9 +73,15 @@ def field(files, median_spatial = 3, dtype = np.float32):
     for i,f in tqdm(enumerate(files)):
         temp[i,:,:] = np.asarray(read_fcn(f))
 
-    return median_filter(np.median(temp,axis = 0),median_spatial).astype(dtype)
+    temp = np.median(temp,axis = 0)
+    print(temp.shape)
+    med = int(median_spatial)
+    delete_me = gaussian_filter(temp, sigma = 1)
+    print(delete_me.shape)
+    print(med)
+    return median_filter(temp , size = med).astype(dtype)
         
-def field_gpu(files, median_spatial = 3, dtype = np.float32): 
+def field_gpu(files, median_spatial : int = 3, dtype = np.float32): 
     """
     parameters
     ----------
@@ -108,7 +116,8 @@ def field_gpu(files, median_spatial = 3, dtype = np.float32):
         med_temp = cp.median(cp.array(temp[:,elem,:]), axis = 0)
         z_median[elem] = med_temp
    
-    return median_filter_gpu(z_median,median_spatial).get()
+    logging.info(f"z_median shape = {z_median.shape}")
+    return median_filter_gpu(z_median,size = median_spatial).get()
         
 def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float32]): 
     """
@@ -334,3 +343,27 @@ def GPU_rotate_inplace(volume : np.array , plane : str, theta : float, batch_siz
         volume_gpu = cp.array(volume[slice_x_rem,slice_y_rem,slice_z_rem])
         volume[slice_x_rem,slice_y_rem,slice_z_rem] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = axes, reshape = False))
     del volume_gpu
+
+@njit
+def radial_zero(arr : np.array) -> None:
+    """
+    This function is for making values outside the radius of a circle at the
+    center of the image to have a value of 0 so their noise is not incorporated
+    into any calculations or predictions
+    Args:
+    -----
+    arr : np.array
+        input image (must be square)
+
+    Returns:
+    --------
+    None (operates in-place)
+    """
+    nx,ny = arr.shape
+    assert nx == ny, "This function only accepts square images"
+    radius = nx//2
+    for i in range(nx):
+        for j in range(ny):
+            r = ((i-nx//2)**2+(j-ny//2)**2)**(1./2.)
+            if r > radius:
+                arr[i,j] = 0

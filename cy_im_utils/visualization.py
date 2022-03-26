@@ -1,19 +1,18 @@
 """
 
-To do:
-    - change COR_interact to create just one figure then use plt.cla() to clear
-      the axes so it does not make a new figure every time
 
 """
 from glob import glob
 from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual
 from matplotlib.gridspec import GridSpec
-from scipy.ndimage import rotate as rotate_cpu
+from scipy.ndimage import rotate as rotate_cpu, median_filter
+from cupyx.scipy.ndimage import median_filter as median_gpu
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import logging
 import numpy as np
 
+from .sarepy_cuda import remove_all_stripe_GPU
 from .prep import *
 from .prep import center_of_rotation
 from .recon_utils import *
@@ -210,7 +209,6 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
     display(ui,out)
 
 def COR_interact(   data_dict : dict,
-                    projections: np.array,
                     ff : np.array, 
                     df : np.array,
                     angles : list = [0,180],
@@ -221,22 +219,35 @@ def COR_interact(   data_dict : dict,
     to act like ReconstructCT's GUI to help find the crop boundaries and
     normalization patch coordinates. It will modify in-place the input
     dictionary so that the output will be a dictionary with the correct
-    cropping coordinates and 
+    cropping coordinates,
 
-    Parameters:
+    WARNING :   The way matplotlib renders images is not intuitive x and y are
+                flipped, so all references to cropping, etc. can become very
+                confusing. proceed with caution.
+
+    Args:
     -----------
     data_dict: dictionary
         dictionary with projection path , read_fcn, etc. this gets its
         crop_patch and norm_patch overwritten
+
+    ff : np.array
+        flat field
+
+    df : np.array
+        dark field
+
     angles: list
         Which angles to show projections (this can be important if the object
         is not cylindrical)
+
     figsize: tuple of ints
         figure size
     """
-    proj_files = data_dict['projection path'].glob("*.tif")
+    proj_files = list(data_dict['projection path'].glob(f"*.{data_dict['extension']}"))
     dtype = data_dict['dtype']
     Transpose = data_dict['transpose']
+
 
     if data_dict['COR rows']:
         cor_y0,cor_y1 = data_dict['COR rows']
@@ -244,20 +255,24 @@ def COR_interact(   data_dict : dict,
         cor_y0,cor_y1 = 0,ff.shape[-1]
 
 
-    n_proj,_,_ = projections.shape
+    n_proj = len(proj_files)
+    print(n_proj)
     # Create the combined image in attenuation space to determine center of rotation
     n_angles = len(angles)
     projection_indices = [np.round(a/(360/n_proj)).astype(int) for a in angles]
     combined = np.zeros([n_angles,ff.shape[0],ff.shape[1]])
+    med_kernel = data_dict['median spatial']
+    df_ = cp.asarray(df)
+    ff_ = cp.asarray(ff)
     for i,angle_index in tqdm(enumerate(projection_indices)):
-        #f = proj_files[angle_index]
-        im_temp = projections[i]
-        #logging.debug(f"df shape = {df.shape}")
-        #logging.debug(f"ff shape = {ff.shape}")
-        #logging.debug(f"image shape = {np.asarray(im_temp).shape}")
-        temp = -np.log((np.asarray(im_temp, dtype = dtype)-df)/(ff-df))
-        temp[~np.isfinite(temp)] = 0
-        combined[i,:,:] = temp
+        f = proj_files[angle_index]
+        im_temp = cp.asarray(data_dict['imread function'](f), dtype = np.float32)
+        if data_dict['transpose']:
+            im_temp = im_temp.T
+        temp = -cp.log((im_temp-df_)/(ff_-df_))
+        temp = median_gpu(cp.array(temp), (med_kernel,med_kernel))
+        temp[~cp.isfinite(temp)] = 0
+        combined[i,:,:] = cp.asnumpy(temp)
 
     # TRANSPOSE IF THE COR IS NOT VERTICAL!!
     combined = np.sum(combined, axis = 0)
@@ -272,10 +287,11 @@ def COR_interact(   data_dict : dict,
     fig,ax = plt.subplots(1,2, figsize = figsize)
     plt.show()
 
-    def inner(crop_y0,crop_y1,crop_x0,crop_x1,norm_x0,norm_x1,norm_y0,norm_y1,cor_y0,cor_y1):
+    #def inner(crop_y0,crop_y1,crop_x0,crop_x1,norm_x0,norm_x1,norm_y0,norm_y1,cor_y0,cor_y1):
+    def inner(crop_y0,crop_dy,crop_x0,crop_dx,norm_x0,norm_dx,norm_y0,norm_dy,cor_y0,cor_y1):
         l,h = np.quantile(distribution,dist),np.quantile(distribution,1.0-dist)
-        crop_patch = [crop_y0,crop_y1,crop_x0,crop_x1]
-        norm_patch = [norm_y0,norm_y1,norm_x0,norm_x1]
+        crop_patch = [crop_y0,crop_y0+crop_dy,crop_x0,crop_x0+crop_dx]
+        norm_patch = [norm_y0,norm_y0+norm_dy,norm_x0,norm_x0+norm_dx]
         y0,y1 = cor_y0,cor_y1
 
         
@@ -357,36 +373,55 @@ def COR_interact(   data_dict : dict,
     #   fixing the problem of plt.imshow transposing the image
     #---------------------------------------------------------------------------
     crop_x0 = IntSlider(description = "crop x0", continuous_update = False, min=0,max=y_max)
-    crop_x1 = IntSlider(description = "crop x1", continuous_update = False, min=0,max=y_max)
+    crop_dx = IntSlider(description = "crop dx", continuous_update = False, min=0,max=y_max)
     crop_y0 = IntSlider(description = "crop y0", continuous_update = False, min=0,max=x_max)
-    crop_y1 = IntSlider(description = "crop y1", continuous_update = False, min=0,max=x_max)
+    crop_dy = IntSlider(description = "crop dy", continuous_update = False, min=0,max=x_max)
     norm_x0 = IntSlider(description = "norm x0", continuous_update = False, min=0,max=y_max)
-    norm_x1 = IntSlider(description = "norm x1", continuous_update = False, min=0,max=y_max)
+    norm_dx = IntSlider(description = "norm dx", continuous_update = False, min=0,max=y_max)
     norm_y0 = IntSlider(description = "norm y0", continuous_update = False, min=0,max=x_max)
-    norm_y1 = IntSlider(description = "norm y1", continuous_update = False, min=0,max=x_max)
+    norm_dy = IntSlider(description = "norm dy", continuous_update = False, min=0,max=x_max)
     cor_y0  = IntSlider(description = "COR y0",  continuous_update = False, min=0,max=x_max)
     cor_y1  = IntSlider(description = "COR y1",  continuous_update = False, min=0,max=x_max)
 
-    row1 = HBox([crop_x0,crop_x1,crop_y0,crop_y1])
-    row2 = HBox([norm_x0,norm_x1,norm_y0,norm_y1])
+    row1 = HBox([crop_x0,crop_dx,crop_y0,crop_dy])
+    row2 = HBox([norm_x0,norm_dx,norm_y0,norm_dy])
     row3 = HBox([cor_y0,cor_y1])
     ui = VBox([row1,row2,row3])
+
     control_dict = {
                 'crop_y0':crop_x0,
-                'crop_y1':crop_x1,
+                'crop_dy':crop_dx,
                 'crop_x0':crop_y0,
-                'crop_x1':crop_y1,
+                'crop_dx':crop_dy,
                 'norm_x0':norm_y0,
-                'norm_x1':norm_y1,
+                'norm_dx':norm_dy,
                 'norm_y0':norm_x0,
-                'norm_y1':norm_x1,
+                'norm_dy':norm_dx,
                 'cor_y0':cor_y0,
                 'cor_y1':cor_y1
                     }
+
     out = interactive_output(inner, control_dict)
     display(ui,out)
-    
-def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_size_max = 51): 
+
+def attn_express(image, df, ff, med_kernel, crop_patch, norm_patch):
+    norm_x = slice(norm_patch[2],norm_patch[3])
+    norm_y = slice(norm_patch[0],norm_patch[1])
+    crop_x = slice(crop_patch[2],crop_patch[3])
+    crop_y = slice(crop_patch[0],crop_patch[1])
+    temp = image.copy()
+    patch = temp[norm_x,norm_y]
+    temp -= df
+    temp /= (ff-df)
+    temp = median_gpu()
+
+def SAREPY_interact(data_dict : dict,
+                    input_array : np.array,
+                    figsize : tuple  = (10,5),
+                    snr_max : float = 3.0,
+                    sm_size_max : int = 51,
+                    sino_row_col : str = 'row',
+                    ) -> None: 
     """
     Interactive inspection of remove_all_stripe with sliders to control the
     arguments. It overwrites the values in data_dict so they can be unpacked
@@ -395,7 +430,10 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
     Parameters:
     -----------
     input_array: 3d numpy array
-        array of attenuation values
+        array of attenuation values of shape: 
+            axis 0 : projection,
+            axis 1 : sinogram,
+            axis 2 : detector column slice
 
     figsize: tuple
         
@@ -410,28 +448,34 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
     path.append("C:\\Users\\mcd4\\Documents\\vo_filter_source\\sarepy")
     from sarepy.prep.stripe_removal_original import remove_all_stripe as remove_all_stripe_CPU
 
-    gs = GridSpec(1,5)
-    fig = plt.figure(figsize = figsize)
-    ax = []
-    ax.append(fig.add_subplot(gs[0]))
-    ax.append(fig.add_subplot(gs[1], sharex = ax[0], sharey = ax[0]))
-    ax.append(fig.add_subplot(gs[2], sharex = ax[0], sharey = ax[0]))
-    ax.append(fig.add_subplot(gs[3:]))
-    ax[1].yaxis.set_ticklabels([])
-    ax[2].yaxis.set_ticklabels([])
-    ax[3].yaxis.tick_right()
-    ax[0].set_title("unfiltered")
-    ax[1].set_title("filtered")
-    ax[2].set_title("diff")
-    ax[3].set_title("recon (FBP)")
+    if 'row' in sino_row_col:
+        gs = GridSpec(1,5)
+        fig = plt.figure(figsize = figsize)
+        ax = []
+        ax.append(fig.add_subplot(gs[0]))
+        ax.append(fig.add_subplot(gs[1], sharex = ax[0], sharey = ax[0]))
+        ax.append(fig.add_subplot(gs[2], sharex = ax[0], sharey = ax[0]))
+        ax.append(fig.add_subplot(gs[3:]))
+        ax[1].yaxis.set_ticklabels([])
+        ax[2].yaxis.set_ticklabels([])
+        ax[3].yaxis.tick_right()
+        ax[0].set_title("unfiltered")
+        ax[1].set_title("filtered")
+        ax[2].set_title("diff")
+        ax[3].set_title("recon (FBP)")
+    elif 'col' in sino_row_col:
+        gs = GridSpec(5,5)
     n_proj,n_sino,detector_width = input_array.shape
     def inner(frame,snr,la_size,sm_size):
-        temp = input_array[:,frame,:]
+        plt.cla()
+        temp = input_array[:,frame,:].copy()
         try:
-            filtered = remove_all_stripe_CPU(temp,snr,la_size,sm_size)
+            filtered = remove_all_stripe_GPU(cp.array(temp[:,None,:]),snr,la_size,sm_size)
+            filtered = cp.asnumpy(filtered[:,0,:])
             reco = astra_2d_simple(filtered)
-            ax[0].imshow(temp.T)
-            ax[1].imshow(filtered.T)
+            l,h = contrast(temp)
+            ax[0].imshow(temp.T, vmin = l, vmax = h)
+            ax[1].imshow(filtered.T, vmin = l, vmax = h)
             ax[2].imshow(temp.T-filtered.T)
             ax[3].imshow(reco)
         except:
@@ -440,10 +484,30 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
         data_dict['large filter'] = la_size
         data_dict['small filter'] = sm_size
         
-    frame = IntSlider(description = "row", continuous_update = False, min = 0, max = n_sino)
-    snr = FloatSlider(description = "snr", continuous_update = False, min = 0, max = snr_max)
-    la_size = IntSlider(description = "la_size", continuous_update = False, min = 1, max = detector_width//2, step = 2)
-    sm_size = IntSlider(description = "sm_size", continuous_update = False, min = 1, max = sm_size_max, step = 2)
+    frame = IntSlider(
+                        description = "row",
+                        continuous_update = False,
+                        min = 0,
+                        max = n_sino
+                        )
+    snr = FloatSlider(  
+                        description = "snr",
+                        continuous_update = False,
+                        min = 0,
+                        max = snr_max
+                        )
+    la_size = IntSlider(
+                        description = "la_size",
+                        continuous_update = False,
+                        min = 1,
+                        max = detector_width//2,
+                        step = 2
+                        )
+    sm_size = IntSlider(description = "sm_size",
+                        continuous_update = False,
+                        min = 1,
+                        max = sm_size_max,
+                        step = 2)
     
     control_dict = {
                     'frame':frame,
@@ -456,8 +520,15 @@ def SAREPY_interact(data_dict, input_array, figsize = (10,5), snr_max = 3.0, sm_
     out = interactive_output(inner, control_dict)
     display(ui,out)
     
-def dynamic_thresh_plot(im, im_filtered, step = 0.05, alpha = 0.9, fix_upper = True, 
-        n_interval = 2, hist_width = 2, cmap = 'gist_ncar', figsize = (10,5)):
+def dynamic_thresh_plot(im,
+                        im_filtered,
+                        step = 0.05,
+                        alpha = 0.9,
+                        fix_upper = True, 
+                        n_interval = 2,
+                        hist_width = 2,
+                        cmap = 'gist_ncar',
+                        figsize = (10,5)) -> None:
     """
     This is still a work in progress, I can't figure out how to curry the interactive plot... :(
 

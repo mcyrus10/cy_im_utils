@@ -2,6 +2,7 @@ from .prep import imread_fit,field_gpu
 from .visualization import COR_interact,SAREPY_interact
 from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
+from .sarepy_cuda import *
 from pathlib import Path
 from tqdm import tqdm
 import astra
@@ -22,21 +23,47 @@ class tomo_dataset:
         logging.info("-"*80)
         logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
         logging.info("-"*80)
+        self.previous_settings = {}
         self.settings = data_dict
         self.update_members()
 
     #---------------------------------------------------------------------------
     #                       UTILS
     #---------------------------------------------------------------------------
-    def update_members(self) -> None:
+    def attenuation_transpose(self) -> None:
+        """
+        Just a wrapper to transpose attenuation to be the correct shape for
+        ASTRA 
+        """
+        logging.info("Transposing Attenuation Array so Sinograms Are Axis 0, projections are Axis 1")
+        self.attenuation = np.transpose(self.attenuation,(1,0,2))
+
+    def update_members(self, dump_file : str = ".settings_dump.txt") -> None:
         """
         This updates all the members of tomo_dataset so when the dictionary
         changes everything will be updated
+
+        args:
+        -----
+            dump_file : str
+                file name for dumping the text values
         """
-        for key,val in self.settings.items():
-            key_ = key.replace(" ","_")
-            logging.info(f"{key_} : {val}")
-            setattr(self,key_,val)
+        with open(dump_file, 'w') as f:
+            for key,val in self.settings.items():
+                key_ = key.replace(" ","_")
+                f.write(f"{key_} : {val}\n")
+                setattr(self,key_,val)
+                # This Conditional Branch Checks if values have been updated
+                # and prints them to logging
+                if key in self.previous_settings:
+                    if val != self.previous_settings[key]:
+                        logging.info(f"UPDATED: - {key_} : {val}")
+                    else:
+                        continue
+                else:
+                    logging.info(f"UPDATED NEW ITEM : - {key_} : {val}")
+
+        self.previous_settings = self.settings.copy()
 
     def is_jupyter(self) -> bool:
         """
@@ -110,12 +137,14 @@ class tomo_dataset:
             logging.info(f"remainder = {remainder}")
             function(ax_length-remainder,ax_length)
 
+
+
     #---------------------------------------------------------------------------
     #                       PRE PROCESSING
     #---------------------------------------------------------------------------
     def load_field(self, mode : str) -> None:
         """
-        wrapper for "field_GPU" in prep.py
+        wrapper for "field_GPU" in prep.py for loading in flat and dark fields
 
         args:
             mode : str
@@ -128,16 +157,21 @@ class tomo_dataset:
         """
         field_path = self.settings[f'{mode} path']
         logging.info(f"Reading {mode} field from {field_path}")
-        files = list(field_path.glob("*.tif"))
+        files = list(field_path.glob(f"*.{self.extension}"))
         nx,ny = np.asarray(self.imread_function(files[0])).shape
         field = field_gpu(files, self.median_spatial)
         if self.transpose:
             field = field.T
         setattr(self,mode,field)
 
-    def load_projections(self, mode : str = 'read', truncate_dataset : int = 1) -> np.array:
+    def load_projections(   self,
+                            mode : str = 'read',
+                            truncate_dataset : int = 1
+                            ) -> np.array:
         """
+
         """
+        logging.warning("This function is deprecated. Use load_projection_to_attn ")
         if 'serialized' in mode:
             logging.info(f"Reading Serialized Dataset ({self.serialized_path})")
             self.projections = np.load(self.serialized_path)[::truncate_dataset]
@@ -153,21 +187,80 @@ class tomo_dataset:
                 logging.info("Transposing images")
                 self.projections = np.transpose(self.projections,(0,2,1))
 
+    def load_projections_to_attn(self,
+                                truncate_dataset : int = 1
+                                ) -> None:
+        """
+        Testing if its faster to load the images in straight to attenuation
+        space
+
+        Args:
+            truncate_dataset : int
+                If you want to load in a datset faster this factor downsamples
+                the dataset by (every other {truncate_dataset} value
+        returns:
+            None (operates in-place)
+
+        """
+        logging.info(f"Reading Images From {self.projection_path}")
+        files = list(self.projection_path.glob(f"*.{self.extension}"))[::truncate_dataset]
+        nx,ny = np.asarray(self.imread_function(files[0])).shape
+
+        crop_patch = self.settings['crop patch']
+        norm_patch = self.settings['norm patch']
+        self.crop_x = slice(crop_patch[0],crop_patch[1])
+        self.crop_y = slice(crop_patch[2],crop_patch[3])
+        self.norm_x = slice(norm_patch[0],norm_patch[1])
+        self.norm_y = slice(norm_patch[2],norm_patch[3])
+
+        attn_ny = crop_patch[1]-crop_patch[0]
+        attn_nx = crop_patch[3]-crop_patch[2]
+        n_proj = len(files)
+        self.attenuation = np.empty([n_proj,attn_nx,attn_ny], dtype = self.dtype)
+        self.dark = cp.array(self.dark)
+        self.flat = cp.array(self.flat)
+        logging.info(f"attenuation shape = {self.attenuation.shape}")
+        logging.info(f"crop_y = {self.crop_y}")
+        logging.info(f"crop_x = {self.crop_x}")
+
+        load_im = lambda f :  cp.asarray(self.imread_function(f), dtype = self.dtype)
+        if self.transpose:
+            load_im = lambda f :  cp.asarray(self.imread_function(f), dtype = self.dtype).T
+
+        for i in tqdm(range(n_proj)):
+            im = load_im(files[i])
+            patch = cp.mean(im[self.norm_y,self.norm_x])
+            im -= self.dark
+            im /= (self.flat - self.dark)
+            im = median_gpu(im,(self.median_spatial, self.median_spatial))
+            im = im[self.crop_y,self.crop_x]
+            im = rotate_gpu(im, -self.theta, reshape = False)
+            im = -cp.log(im)
+            im[~cp.isfinite(im)] = 0
+            self.attenuation[i] = cp.asnumpy(im)
+
+
     def COR_interact(self, d_theta : int = 60, angles : list = []) -> None:
         """
         Wrapper for COR_interact in visualization
+
+        This visualization tool helps you to find the Center of rotation of an
+        image stack
         """
         if self.is_jupyter():
             logging.info("COR Interact Started")
             if not angles:
                 angles = [j*d_theta for j in range(360//d_theta)]
-            COR_interact(self.settings, self.projections, self.flat, self.dark, angles)
+            COR_interact(self.settings, self.flat, self.dark, angles)
         else:
             logging.warning("Interact needs to be executed in a Notebook Environment - This method is not being executed")
 
     def SARE_interact(self, figsize : tuple = (12,5)) -> None:
         """
         Wrapper for SAREPY Interact in visualization
+
+        This visualization tool helps to determine the best settings for the
+        SARE filter
         """
         if self.is_jupyter():
             logging.info("Stripe Artifact Interact Started")
@@ -179,6 +272,7 @@ class tomo_dataset:
     #---------------------------------------------------------------------------
     #                       PROCESSING
     #---------------------------------------------------------------------------
+
     def gpu_ops(self,x0 : int,x1 : int) -> None:
         """
         In-Place Operations to populate self.attenuation; 
@@ -199,19 +293,24 @@ class tomo_dataset:
                 index 2 for the slice
 
         """
+        logging.warning("THIS METHOD IS DEPRECATED, USE 'load_projections_to_attn'")
+        logging.warning("MAKE SURE ORDER OF OPERATIONS IS CORRECT -> CROP BEFORE ROTATING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        """
         _,height,width = self.attenuation.shape
         slice_ = slice(x0,x1)
         batch_size = x1-x0
         projection_gpu = cp.asarray(self.projections[slice_], dtype = self.dtype)
-        projection_gpu = rotate_gpu(projection_gpu, -self.theta, axes = (1,2), reshape = False)
+        patch = cp.mean(projection_gpu[:,self.norm_y,self.norm_x], axis = (1,2), dtype = self.dtype)
         projection_gpu -= cp.asarray(self.dark[None,:,:])
         projection_gpu /= cp.asarray(self.flat[None,:,:]-self.dark[None,:,:])
-        patch = cp.mean(projection_gpu[:,self.norm_x,self.norm_y], axis = (1,2), dtype = self.dtype)
         projection_gpu /= patch.reshape(batch_size,1,1)
         projection_gpu = median_gpu(projection_gpu,(1,self.median_spatial,self.median_spatial))
-        projection_gpu -= cp.log(projection_gpu)
+        projection_gpu = -cp.log(projection_gpu)
         projection_gpu[~cp.isfinite(projection_gpu)] = 0
+        projection_gpu = rotate_gpu(projection_gpu, -self.theta, axes = (1,2), reshape = False)
         self.attenuation[slice_,:,:] = cp.asnumpy(projection_gpu[:,self.crop_y,self.crop_x])
+
+        """
 
     def attenuation_GPU(self, batch_size : int = 20) -> None:
         """
@@ -223,6 +322,7 @@ class tomo_dataset:
             batch_size : int
                 size of mini batches for GPU
         """
+        logging.warning("THIS METHOD IS DEPRECATED, USE 'load_projections_to_attn'")
         # in case these have been updated by COR Interact
         crop_patch = self.settings['crop patch']
         norm_patch = self.settings['norm patch']
@@ -230,7 +330,6 @@ class tomo_dataset:
         self.crop_y = slice(crop_patch[2],crop_patch[3])
         self.norm_x = slice(norm_patch[0],norm_patch[1])
         self.norm_y = slice(norm_patch[2],norm_patch[3])
-        self.theta = self.settings['theta']
 
         attn_nx = crop_patch[1]-crop_patch[0]
         attn_ny = crop_patch[3]-crop_patch[2]
@@ -254,17 +353,23 @@ class tomo_dataset:
 
         """
         slice_ = slice(id0,id1)
+        logging.debug(f"indices for slice = {id0},{id1}")
         vol_gpu = cp.asarray(self.attenuation[:,slice_,:], dtype = self.dtype)
-        vol_gpu = remove_all_stripe_GPU(vol_gpu,self.snr,self.la_size,self.sm_size)
+        vol_gpu = remove_all_stripe_GPU(vol_gpu,
+                                        self.signal_to_noise_ratio,
+                                        self.large_filter,
+                                        self.small_filter)
         self.attenuation[:,slice_,:] = cp.asnumpy(vol_gpu)
 
-    def remove_all_stripe(  self, batch_size : int = 50) -> None:
+    def remove_all_stripe(  self,
+                            batch_size : int = 50,
+                            ) -> None:
         """
         operates in-place
 
         """
-        _,n_row,_ = self.attenuation.shape
-        gpu_curry_loop(self.remove_all_stripe_ops, n_row, batch_size)
+        _,n_sino,_ = self.attenuation.shape
+        self.gpu_curry_loop(self.remove_all_stripe_ops, n_sino, batch_size)
 
     def reconstruct(self):
         self.reconstruction = ASTRA_General(self.attenuation, self.settings)
@@ -283,7 +388,7 @@ class tomo_dataset:
 
             path : path_like (string or pathlib.Path)
         """
-        f_name = path / f"{arr_name}.npy"
+        f_name = path / f"{self.Name}_{arr_name}.npy"
         logging.info(f"Saving {arr_name} to {f_name}")
         np.save(f_name, getattr(self, arr_name))
 
@@ -335,7 +440,7 @@ def ASTRA_General(  attn : np.array, data_dict : dict  ) -> np.array:
     alg_cfg = astra.astra_dict(algorithm)
     alg_cfg['ProjectionDataId'] = projections_id
     alg_cfg['ReconstructionDataId'] = reconstruction_id
-    alg_cfg['option'] = {'FilterType': 'ram-lak'}
+    alg_cfg['option'] = {'Filtertype': 'ram-lak'}
     algorithm_id = astra.algorithm.create(alg_cfg)
     
     #-------------------------------------------------
