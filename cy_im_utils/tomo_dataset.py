@@ -1,9 +1,11 @@
 from .prep import imread_fit,field_gpu
+from .prep import radial_zero
+from .recon_utils import ASTRA_General
+from .sarepy_cuda import *
 from .visualization import COR_interact,SAREPY_interact
 from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
-from .sarepy_cuda import *
-from pathlib import Path
+from numba import njit,cuda
 from tqdm import tqdm
 import astra
 import cupy as cp
@@ -16,10 +18,12 @@ import shutil
 
 class tomo_dataset:
     """
-    This is the big boy: it holds the projections and can facilitate all the
-    recon operations
+    This is the big boy: it holds the projections and can facilitate the recon
+    operations
     """
-    def __init__(self, data_dict):
+    def __init__(   self, 
+                    data_dict: dict, 
+                    ) -> None:
         logging.info("-"*80)
         logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
         logging.info("-"*80)
@@ -35,7 +39,8 @@ class tomo_dataset:
         Just a wrapper to transpose attenuation to be the correct shape for
         ASTRA 
         """
-        logging.info("Transposing Attenuation Array so Sinograms Are Axis 0, projections are Axis 1")
+        logging.info("Transposing Attenuation Array so Sinograms Are Axis 0," 
+                                                    " projections are Axis 1")
         self.attenuation = np.transpose(self.attenuation,(1,0,2))
 
     def update_members(self, dump_file : str = ".settings_dump.txt") -> None:
@@ -64,6 +69,11 @@ class tomo_dataset:
                     logging.info(f"UPDATED NEW ITEM : - {key_} : {val}")
 
         self.previous_settings = self.settings.copy()
+    def update_patch(self) -> None:
+        """
+        """
+        pass
+
 
     def is_jupyter(self) -> bool:
         """
@@ -109,15 +119,20 @@ class tomo_dataset:
         ax[0].set_title("Sinogram - (Axis : 0)")
         ax[2].imshow(self.attenuation[:,ny//2,:])
         ax[2].set_title("Projection (Axis : 1)")
-        ax[2].plot([0,nx-1],[nz//2,nz//2],'w--')
-        ax[2].plot([nx//2,nx//2],[0,nz-1],'w--')
+        ax[2].plot([0,nz-1],[nx//2,nx//2],'k--')
+        ax[2].plot([nz//2,nz//2],[0,nx-1],'k--')
         ax[3].imshow(self.attenuation[:,:,nz//2])
         ax[3].set_title("Detector Col Slice (Axis : 2)")
         [a.axis(False) for a in ax]
         fig.tight_layout()
         fig.suptitle("Astra Expected - (Attenuation Array)")
 
-    def gpu_curry_loop(self, function, ax_length : int, batch_size : int) -> None:
+    def gpu_curry_loop( self,
+                        function,
+                        ax_length : int,
+                        batch_size : int,
+                        tqdm_string : str = ""
+                        ) -> None:
         """
         this is a generic method for currying functions to the GPU
 
@@ -130,14 +145,22 @@ class tomo_dataset:
                 length of the axis along which the operations are being
                 executed (to determine remainder)
         """
-        for j in tqdm(range(ax_length//batch_size)):
+        for j in tqdm(range(ax_length//batch_size), desc = tqdm_string):
             function(j*batch_size,(j+1)*batch_size)
         remainder = ax_length % batch_size
         if remainder > 0:
             logging.info(f"remainder = {remainder}")
             function(ax_length-remainder,ax_length)
 
-
+        
+    def recon_radial_zero(self, radius_offset: int = 0) -> None:
+        """
+        this function makes all the values outside the radius eq
+        """
+        n_frame,detector_width,_ = self.reconstruction.shape
+        tqdm_zeroing = tqdm(range(n_frame), desc = "zeroing outisde crop radius")
+        for f in tqdm_zeroing:
+            radial_zero(self.reconstruction[f], radius_offset = radius_offset)
 
     #---------------------------------------------------------------------------
     #                       PRE PROCESSING
@@ -171,7 +194,8 @@ class tomo_dataset:
         """
 
         """
-        logging.warning("This function is deprecated. Use load_projection_to_attn ")
+        logging.warning("This function is deprecated. Use "
+                                                    "load_projection_to_attn ")
         if 'serialized' in mode:
             logging.info(f"Reading Serialized Dataset ({self.serialized_path})")
             self.projections = np.load(self.serialized_path)[::truncate_dataset]
@@ -182,7 +206,10 @@ class tomo_dataset:
             tqdm_imread = enumerate(tqdm(files, desc = "reading images"))
             self.projections = np.zeros([len(files),nx,ny], dtype = self.dtype)
             for i,f in tqdm_imread:
-                self.projections[i] = np.asarray(self.imread_function(f), dtype = self.dtype)
+                self.projections[i] = np.asarray(
+                                                self.imread_function(f),
+                                                dtype = self.dtype
+                                                )
             if self.transpose:
                 logging.info("Transposing images")
                 self.projections = np.transpose(self.projections,(0,2,1))
@@ -203,7 +230,9 @@ class tomo_dataset:
 
         """
         logging.info(f"Reading Images From {self.projection_path}")
-        files = list(self.projection_path.glob(f"*.{self.extension}"))[::truncate_dataset]
+        files = list(
+                        self.projection_path.glob(f"*.{self.extension}")
+                    )[::truncate_dataset]
         nx,ny = np.asarray(self.imread_function(files[0])).shape
 
         crop_patch = self.settings['crop patch']
@@ -227,7 +256,8 @@ class tomo_dataset:
         if self.transpose:
             load_im = lambda f :  cp.asarray(self.imread_function(f), dtype = self.dtype).T
 
-        for i in tqdm(range(n_proj)):
+        tqdm_imread = tqdm(range(n_proj), desc = "Projection -> Attenuation Ops")
+        for i in tqdm_imread:
             im = load_im(files[i])
             patch = cp.mean(im[self.norm_y,self.norm_x])
             im -= self.dark
@@ -253,7 +283,8 @@ class tomo_dataset:
                 angles = [j*d_theta for j in range(360//d_theta)]
             COR_interact(self.settings, self.flat, self.dark, angles)
         else:
-            logging.warning("Interact needs to be executed in a Notebook Environment - This method is not being executed")
+            logging.warning("Interact needs to be executed in a Notebook" 
+                            "Environment - This method is not being executed")
 
     def SARE_interact(self, figsize : tuple = (12,5)) -> None:
         """
@@ -266,7 +297,8 @@ class tomo_dataset:
             logging.info("Stripe Artifact Interact Started")
             SAREPY_interact(self.settings, self.attenuation, figsize = figsize)
         else:
-            logging.warning("Interact needs to be executed in a Notebook Environment - This method is not being executed")
+            logging.warning("Interact needs to be executed in a Notebook"
+                            "Environment - This method is not being executed")
 
 
     #---------------------------------------------------------------------------
@@ -294,7 +326,9 @@ class tomo_dataset:
 
         """
         logging.warning("THIS METHOD IS DEPRECATED, USE 'load_projections_to_attn'")
-        logging.warning("MAKE SURE ORDER OF OPERATIONS IS CORRECT -> CROP BEFORE ROTATING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        logging.warning("MAKE SURE ORDER OF OPERATIONS IS CORRECT -> "
+                "CROP BEFORE ROTATING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         """
         _,height,width = self.attenuation.shape
         slice_ = slice(x0,x1)
@@ -340,7 +374,10 @@ class tomo_dataset:
 
     def remove_all_stripe_ops(  self, id0 : int, id1 : int) -> None:
         """
+        SAREPY_CUDA takes sinogram as the index 1 (of 0,1,2) right now!!
+
         operates in-place
+
         this is meant to be called by gpu_curry_loop
 
         args:
@@ -361,18 +398,30 @@ class tomo_dataset:
                                         self.small_filter)
         self.attenuation[:,slice_,:] = cp.asnumpy(vol_gpu)
 
-    def remove_all_stripe(  self,
-                            batch_size : int = 50,
-                            ) -> None:
+    def remove_all_stripe(self) -> None:
         """
         operates in-place
 
         """
         _,n_sino,_ = self.attenuation.shape
-        self.gpu_curry_loop(self.remove_all_stripe_ops, n_sino, batch_size)
+        self.gpu_curry_loop(self.remove_all_stripe_ops,
+                            n_sino,
+                            self.gpu_batch_size,
+                            tqdm_string = "Stripe Artifact Removal")
 
-    def reconstruct(self):
-        self.reconstruction = ASTRA_General(self.attenuation, self.settings)
+    def reconstruct(self, ds_interval: int = 1) -> None:
+        """
+        this just translates all the properties over to ASTRA
+
+        Args:
+        ----
+            ds_interval: int
+                downsampling interval default is 1 -> no Downsampling
+        """
+        self.reconstruction = ASTRA_General(
+                                            self.attenuation[:,::ds_interval,:],
+                                            self.settings
+                                            )
 
     #--------------------------------------------------------------------------
     #                       POST PROCESSING
@@ -392,9 +441,25 @@ class tomo_dataset:
         logging.info(f"Saving {arr_name} to {f_name}")
         np.save(f_name, getattr(self, arr_name))
 
-    def write_im_stack(self, arr_name : str, directory : pathlib.Path) -> None:
+    def write_im_stack( self,
+                        arr_name : str,
+                        directory : pathlib.Path,
+                        ds_interval: int = 1,
+                        ) -> None:
         """
         Save Array as Image stack
+
+        Args:
+        ----
+            arr_name : str
+                'attenuation' or 'reconstruction'
+            
+            directory : pathlib.Path
+                path where the image stack will be saved to
+
+            ds_interval : int
+                integer by which to downsample the sinograms
+
         """
         if directory.is_dir():
             logging.warning(f"Deleting {directory}")
@@ -402,7 +467,7 @@ class tomo_dataset:
 
         os.mkdir(directory)
         logging.info(f"Saving {arr_name} to {directory}")
-        arr_handle = getattr(self,arr_name)
+        arr_handle = getattr(self,arr_name)[:,::ds_interval,:]
         arr_shape = arr_handle.shape
         assert len(arr_shape) == 3, "This function operates on volumes"
         nx,ny,nz = arr_shape
@@ -411,46 +476,3 @@ class tomo_dataset:
             im = Image.fromarray(arr_handle[i,:,:])
             f_name = directory / f"{arr_name}_{i:06}.tif"
             im.save(f_name)
-
-def ASTRA_General(  attn : np.array, data_dict : dict  ) -> np.array:
-    """
-    algorithm for cone -> FDK_CUDA
-    algorithms for Parallel -> SIRT3D_CUDA, FP3D_CUDA, BP3D_CUDA
-    """
-    detector_rows,n_projections,detector_cols = attn.shape
-    distance_source_origin = data_dict['source to origin distance']
-    distance_origin_detector = data_dict['origin to detector distance']
-    detector_pixel_size = data_dict['camera pixel size']*data_dict['reproduction ratio']
-    algorithm = data_dict['recon algorithm']
-    geometry = data_dict['recon geometry']
-    angles = np.linspace(0, 2 * np.pi, num = n_projections, endpoint=False)
-    #  ---------    PARALLEL BEAM    --------------
-    if geometry.lower() == 'parallel':
-        proj_geom = astra.create_proj_geom('parallel3d', 1, 1, detector_rows, detector_cols, angles)
-        projections_id = astra.data3d.create('-sino', proj_geom, attn)
-
-    #  ---------    CONE BEAM    --------------
-    elif geometry.lower() == 'cone':
-        proj_geom = astra.create_proj_geom('cone', 1, 1, detector_rows, detector_cols, angles,
-                (distance_source_origin + distance_origin_detector) / detector_pixel_size, 0)
-        projections_id = astra.data3d.create('-sino', proj_geom, attn)
-        
-    vol_geom = astra.creators.create_vol_geom(detector_cols, detector_cols, detector_rows)
-    reconstruction_id = astra.data3d.create('-vol', vol_geom, data=0)
-    alg_cfg = astra.astra_dict(algorithm)
-    alg_cfg['ProjectionDataId'] = projections_id
-    alg_cfg['ReconstructionDataId'] = reconstruction_id
-    alg_cfg['option'] = {'Filtertype': 'ram-lak'}
-    algorithm_id = astra.algorithm.create(alg_cfg)
-    
-    #-------------------------------------------------
-    astra.algorithm.run(algorithm_id)  # This is slow
-    #-------------------------------------------------
-
-    reconstruction = astra.data3d.get(reconstruction_id)
-    reconstruction /= detector_pixel_size
-
-    # DELETE OBJECTS TO RELEASE MEMORY
-    astra.algorithm.delete(algorithm_id)
-    astra.data2d.delete([projections_id,reconstruction_id])
-    return reconstruction

@@ -315,7 +315,7 @@ def COR_interact(   data_dict : dict,
                         rotation = 90)
             ax[1].axis(False)
         elif y0 != y1 and crop_patch[0] != crop_patch[1] and crop_patch[2] != crop_patch[3]:
-            if y1 > crop_patch[1]-crop_patch[0]:
+            if y1 > crop_patch[3]-crop_patch[2]:
                 print("COR y1 exceeds window size")
             else:
                 #--------------------------------------------------------------

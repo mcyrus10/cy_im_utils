@@ -1,7 +1,9 @@
 """
+
 -------------------------------------------------------------------------------
                      Data Reduction Prep Utilities
 -------------------------------------------------------------------------------
+
 """
 
 from PIL import Image
@@ -10,7 +12,7 @@ from cupyx.scipy.ndimage import median_filter as median_filter_gpu
 from cupyx.scipy import ndimage as gpu_ndimage
 from scipy.ndimage import median_filter,gaussian_filter
 from tqdm import tqdm
-from numba import njit
+from numba import njit,cuda
 import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,7 +20,7 @@ import logging
 from .gpu_utils import GPU_curry
 
 
-def imstack_read(files : list, dtype = np.float32) -> np.array: 
+def imstack_read(files: list, dtype = np.float32) -> np.array: 
     """
     Boilerplate image stack reader: takes a list of file names and writes the
     images to a 3D array (image stack)
@@ -81,7 +83,7 @@ def field(files, median_spatial = 3, dtype = np.float32):
     print(med)
     return median_filter(temp , size = med).astype(dtype)
         
-def field_gpu(files, median_spatial : int = 3, dtype = np.float32): 
+def field_gpu(files, median_spatial: int = 3, dtype = np.float32): 
     """
     parameters
     ----------
@@ -119,8 +121,17 @@ def field_gpu(files, median_spatial : int = 3, dtype = np.float32):
     logging.info(f"z_median shape = {z_median.shape}")
     return median_filter_gpu(z_median,size = median_spatial).get()
         
-def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float32]): 
+def imread_fit(file_name,
+        axis = 0,
+        device = 'gpu',
+        dtype = np.float32
+        ) -> np.array: 
     """
+    This function reads in a 'fit' file (which has an odd number of frames
+    stacked in a 3d array), and it takes the median along the 0 axis to return
+    a single 2D array
+
+
     Parameters:
     -----------
     file_name: string
@@ -144,10 +155,10 @@ def imread_fit(file_name, axis = 0, device = 'gpu', dtype = [np.float32,cp.float
     if device == 'gpu':
         im = cp.array(im, dtype = dtype[1])
         return cp.asnumpy(cp.median(im, axis = axis))
-    elif device == 'cpu':
+    else:
         return np.median(im, axis = axis)
     
-def get_y_vec(img : np.array, axis = 0) -> np.array:
+def get_y_vec(img: np.array, axis = 0) -> np.array:
     """
     Snagged this from a stack overflow post
     """
@@ -157,7 +168,11 @@ def get_y_vec(img : np.array, axis = 0) -> np.array:
     i = np.arange(n).reshape(s)
     return np.round(np.sum(img * i, axis = axis) / np.sum(img, axis = axis), 1)
 
-def center_of_rotation(image : np.array ,coord_0 : int, coord_1 : int, ax : plt.axis = [], image_center : bool = True): 
+def center_of_rotation( image: np.array ,
+                        coord_0 : int,
+                        coord_1 : int,
+                        ax : plt.axis = [],
+                        image_center : bool = True): 
     """
     Parameters
     ----------
@@ -180,7 +195,8 @@ def center_of_rotation(image : np.array ,coord_0 : int, coord_1 : int, ax : plt.
     Returns
     -------
     numpy array:
-       polynomial coefficients for linear fit of the center ofzc rotation as a function of row index
+       polynomial coefficients for linear fit of the center ofzc rotation as a
+       function of row index
     """
     combined = image.copy()
     combined[combined < 0] = 0               #<-----------------------------------
@@ -193,14 +209,23 @@ def center_of_rotation(image : np.array ,coord_0 : int, coord_1 : int, ax : plt.
     com_fit = np.polyfit(y,subset2,1)
     # Plotting
     if ax:
-        ax.plot(np.polyval(com_fit,[0,height-1]),[0,height-1],'k-', linewidth = 1, label = 'Curve Fit')
+        ax.plot(np.polyval(com_fit,[0,height-1]),[0,height-1],
+                                                        'k-',
+                                                        linewidth = 1,
+                                                        label = 'Curve Fit')
         ax.plot([0,width],[coord_0,coord_0],'k--', linewidth = 0.5)
         ax.plot([0,width],[coord_1,coord_1],'k--', linewidth = 0.5)
-        ax.annotate("",xy = (width//4,coord_0), xytext = (width//4,coord_1), arrowprops = dict(arrowstyle="<->"))
-        ax.text(width//10,(coord_1-coord_0)/2+coord_0,"fit\nROI", verticalalignment = 'center', color = 'w')
+        ax.annotate("",xy = (width//4,coord_0), xytext = (width//4,coord_1), 
+                                        arrowprops = dict(arrowstyle="<->"))
+        ax.text(width//10,(coord_1-coord_0)/2+coord_0,"fit\nROI", 
+                                        verticalalignment = 'center',
+                                        color = 'w')
         ax.scatter(COM,range(height),color = 'r', s = 0.5, label = 'Center of mass')
         if image_center:
-            ax.plot([width//2,width//2],[0,height-1],color = 'w', linestyle = (0,(5,5)),label = 'Center of image')
+            ax.plot([width//2,width//2],[0,height-1],
+                                                    color = 'w',
+                                                    linestyle = (0,(5,5)),
+                                                    label = 'Center of image')
 
 
         ax.imshow(combined)
@@ -208,63 +233,11 @@ def center_of_rotation(image : np.array ,coord_0 : int, coord_1 : int, ax : plt.
         ax.legend()
     return com_fit
     
-def attenuation_gpu_batch(input_arr,ff,df,output_arr,id0,id1,batch_size,norm_patch, crop_patch, theta, kernel = 3, dtype = np.float32):
-    """
-    This is a monster (and probably will need some modifications)
-    1) upload batch to GPU
-    2) rotate
-    3) transpose <------------ NOT NECESSARY SINCE YOU KNOW THE BLOCK STRUCTURE NOW
-    4) convert image to transmission space
-    5) extract normalization patches
-    6) normalize transmission images
-    7) spatial median (kernel x kernel) -> improves nans when you take -log
-    8) lambert beer
-    9) reverse the transpose from 3
-    10) crop
-    11) insert batch into output array
-    Parameters:
-    -----------
-    input_arr: 3D numpy array 
-        input volume array
-    ff: 2D cupy array 
-        flat field
-    df: 2D cupy array 
-        dark field
-    output_arr: 3D numpy array 
-        array to output into
-    id0: int
-        first index of batch
-    id1: int
-        final index of batch
-    batch_size: int
-        size of batch
-    norm_patch: list
-        list of coordinates of normalization patch (x0,x1,y0,y1)
-    crop_patch: list
-        list of coordinates of crop patch (x0,x1,y0,y1)
-    theta: float
-        angle to rotate the volume through
-    kernel: int (odd number)
-        size of median kernel
-    dtype: numpy data type
-        data type of all arrays
-    """
-    n_proj,height,width = input_arr.shape
-    projection_gpu = cp.asarray(input_arr[id0:id1], dtype = dtype)
-    projection_gpu = rotate_gpu(projection_gpu,theta, axes = (1,2), reshape = False)
-    projection_gpu -= df.reshape(1,height,width)
-    projection_gpu /= (ff-df).reshape(1,height,width)
-    patch = cp.mean(projection_gpu[:,norm_patch[0]:norm_patch[1],norm_patch[2]:norm_patch[3]], axis = (1,2), dtype = dtype)
-    projection_gpu /= patch.reshape(batch_size,1,1)
-    projection_gpu = median_gpu(projection_gpu, (1,kernel,kernel))
-    projection_gpu = -cp.log(projection_gpu)
-    #-----------------------------------------------
-    #---      make all non-finite values 0?      ---
-    projection_gpu[~cp.isfinite(projection_gpu)] = 0
-    #-----------------------------------------------
-    output_arr[id0:id1] = cp.asnumpy(projection_gpu[:,crop_patch[0]:crop_patch[1],crop_patch[2]:crop_patch[3]])
-    
-def GPU_rotate_inplace(volume : np.array , plane : str, theta : float, batch_size : int) -> None:
+def GPU_rotate_inplace( volume: np.array ,
+                        plane : str,
+                        theta : float,
+                        batch_size : int
+                        ) -> None:
     """
     Note: if you are unsure which plane to rotate about refer to
     visualization.orthogonal_plot which will show the planes labeled
@@ -338,14 +311,24 @@ def GPU_rotate_inplace(volume : np.array , plane : str, theta : float, batch_siz
         slice_y = slice_y_(j)
         slice_z = slice_z_(j)
         volume_gpu = cp.array(volume[slice_x,slice_y,slice_z])
-        volume[slice_x,slice_y,slice_z] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = axes, reshape = False))
+        volume[slice_x,slice_y,slice_z] = cp.asnumpy(gpu_ndimage.rotate(
+                                                            volume_gpu,
+                                                            theta,
+                                                            axes = axes,
+                                                            reshape = False)
+                                                            )
     if remainder > 0:
         volume_gpu = cp.array(volume[slice_x_rem,slice_y_rem,slice_z_rem])
-        volume[slice_x_rem,slice_y_rem,slice_z_rem] = cp.asnumpy(gpu_ndimage.rotate(volume_gpu, theta, axes = axes, reshape = False))
+        volume[slice_x_rem,slice_y_rem,slice_z_rem] = cp.asnumpy(gpu_ndimage.rotate(
+                                                            volume_gpu,
+                                                            theta,
+                                                            axes = axes,
+                                                            reshape = False)
+                                                            )
     del volume_gpu
 
 @njit
-def radial_zero(arr : np.array) -> None:
+def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
     """
     This function is for making values outside the radius of a circle at the
     center of the image to have a value of 0 so their noise is not incorporated
@@ -354,6 +337,10 @@ def radial_zero(arr : np.array) -> None:
     -----
     arr : np.array
         input image (must be square)
+
+    radius_offset : int
+        this makes the radius smaller if you want to remove some more of the
+        edge
 
     Returns:
     --------
@@ -365,5 +352,5 @@ def radial_zero(arr : np.array) -> None:
     for i in range(nx):
         for j in range(ny):
             r = ((i-nx//2)**2+(j-ny//2)**2)**(1./2.)
-            if r > radius:
+            if r > radius-radius_offset:
                 arr[i,j] = 0

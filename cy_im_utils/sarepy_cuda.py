@@ -1,7 +1,5 @@
 #============================================================================
 # Copyright (c) 2018 Diamond Light Source Ltd. All rights reserved.
-# Copyright 2021 Michael Daugherty.
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -22,12 +20,11 @@
 # Express 26, 28396-28412 (2018).
 # https://doi.org/10.1364/OE.26.028396
 #============================================================================
-# Author: M. Cyrus Daugherty
+# Translation to Python GPU (Cuda-enabled )
+# Translator: M. Cyrus Daugherty
 # E-mail: michael.daugherty@nist.gov
-# Description: GPU adaptation of Vo's SAREPY
-#
-#               Adapted from https://github.com/nghia-vo/sarepy
-#
+# Description: GPU adaptation of Vo et al.'s SAREPY
+# Required Libraries: numba, cupy
 #------------------------------------------------------------------------------
 #
 #                       SAREPY GPU FUNCTIONS
@@ -38,7 +35,10 @@ from numba import cuda
 import cupy as cp
 
 @cuda.jit('void(float32[:,:,:],int32[:,:,:],float32[:,:,:])')
-def invert_sort_GPU(input_arr : cp.array,index_arr : cp.array,output_arr : cp.array) -> None:
+def invert_sort_GPU(input_arr : cp.array,
+                    index_arr : cp.array,
+                    output_arr : cp.array
+                    ) -> None:
     """
     This function reverses? (inverts?) the sort after the median
     
@@ -61,7 +61,10 @@ def invert_sort_GPU(input_arr : cp.array,index_arr : cp.array,output_arr : cp.ar
         val = input_arr[i,j,k]
         output_arr[proj_index,j,k] = val
 
-def remove_stripe_based_normalization(sinogram : cp.array, sigma, in_place = False) -> cp.array:
+def remove_stripe_based_normalization(  sinogram: cp.array,
+                                        sigma: float,
+                                        in_place: bool = False
+                                        ) -> cp.array:
     """
     Still needs testing for robustness
     This is from SAREPY
@@ -84,7 +87,12 @@ def remove_stripe_based_normalization(sinogram : cp.array, sigma, in_place = Fal
         sinogram[bindex:eindex, :] = sinogram[bindex:eindex,:] + matcoe
     return sinogram
 
-def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, threads_per_block = (8,8,8)) -> cp.array:
+def remove_stripe_based_sorting_GPU(sinogram,
+                                    size,
+                                    dim = 1,
+                                    in_place = False,
+                                    threads_per_block = (8,8,8)
+                                    ) -> cp.array:
     """
     This is from SAREPY but modified a little bit since the syntax becomes a
     little unwieldy with 3D arrays.  Greatest inefficiency, I assume, comes
@@ -143,7 +151,13 @@ def remove_stripe_based_sorting_GPU(sinogram, size, dim = 1, in_place = False, t
 
     return mat_sort_back
 
-def remove_large_stripe_GPU(sinogram : cp.array, snr : float, size : int, drop_ratio : cp.array = cp.array(0.1), norm : bool = True, threads_per_block : tuple = (8,8,8)) -> cp.array:
+def remove_large_stripe_GPU(sinogram : cp.array,
+                            snr : float,
+                            size : int,
+                            drop_ratio : cp.array = cp.array(0.1),
+                            norm : bool = True,
+                            threads_per_block : tuple = (8,8,8)
+                            ) -> cp.array:
     """
 
     Parameters:
@@ -211,7 +225,11 @@ def remove_large_stripe_GPU(sinogram : cp.array, snr : float, size : int, drop_r
 
     return sinogram
 
-def remove_stripe_based_filtering_sorting(sinogram, window, size, dim = 1, in_place = True): 
+def remove_stripe_based_filtering_sorting(  sinogram,
+                                            window,
+                                            size,
+                                            dim = 1,
+                                            in_place = True): 
     """
     UNTESTED !!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
@@ -238,7 +256,9 @@ def remove_stripe_based_filtering_sorting(sinogram, window, size, dim = 1, in_pl
     sino_smooth_cor = cp.transpose(remove_stripe_based_sorting(cp.transpose(sino_smooth),(0,2,1)))
     return cp.transpose(sino_smooth_cor + sino_sharp)
 
-def detect_stripe_GPU(list_data : cp.array ,snr : float) -> cp.array:
+def detect_stripe_GPU( list_data : cp.array ,
+                        snr : float
+                        ) -> cp.array:
     """
     .... deeper down the rabbit hole 
     (slightly slower than cpu version, probably not worth worrying about)
@@ -278,7 +298,10 @@ def detect_stripe_GPU(list_data : cp.array ,snr : float) -> cp.array:
             list_mask[i,list_data[i] <= lower_thresh] = 1.0
     return list_mask
 
-def nd_interp2d(input_arr : cp.array, live_rows : cp.array, dead_rows : cp.array) -> None:
+def nd_interp2d(input_arr : cp.array,
+                live_rows : cp.array,
+                dead_rows : cp.array
+                ) -> None:
     """
     POSSIBLY CONVERT TO CUDA JIT IF THIS GIVES YOU A PROBLEM WITH BOTTLENECKING
 
@@ -286,6 +309,7 @@ def nd_interp2d(input_arr : cp.array, live_rows : cp.array, dead_rows : cp.array
     case where y is constant
 
     Parameters:
+    -----------
     input_arr: 3d cupy array
         input sinogram stack with the shape n_projections, n_sinograms,
         detector_width
@@ -298,6 +322,7 @@ def nd_interp2d(input_arr : cp.array, live_rows : cp.array, dead_rows : cp.array
         output of cp.where to determine which rows are 'dead' (see above)
 
     Returns:
+    --------
         None -> writes input_arr in place
 
     """
@@ -311,12 +336,18 @@ def nd_interp2d(input_arr : cp.array, live_rows : cp.array, dead_rows : cp.array
             input_arr[:,sino,c] = input_arr[:,sino,below] + (c-below) *\
                     (input_arr[:,sino,above]-input_arr[:,sino,below])/(above-below)
 
-def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, size, residual = False): 
+def remove_unresponsive_and_fluctuating_stripe_GPU( sinogram,
+                                                    snr: float,
+                                                    size: int,
+                                                    residual: bool = False
+                                                    ): 
     """
     """
     n_proj,n_sino,detector_width = sinogram.shape
-    # Vo used the function np.apply_along_axis when calling uniform_filter1d, but this is redundant
-    # as uniform_filter1d takes an axis as an argument. THIS IS ALSO MUCH SLOWER THAN JUST CALLING
+    # Vo used the function np.apply_along_axis when calling uniform_filter1d,
+    # but this is redundant
+    # as uniform_filter1d takes an axis as an argument. THIS IS ALSO MUCH
+    # SLOWER THAN JUST CALLING
     # uniform_filter1d!
     #sino_smooth = cp.apply_along_axis(uniform_filter1d, 0, sinogram, 10)     
     sino_smooth = uniform_filter1d(sinogram, 10, axis = 0)
@@ -335,7 +366,13 @@ def remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, size, residual
     nd_interp2d(output_mat,listx,listx_miss)
     return output_mat
 
-def remove_all_stripe_GPU(sinogram,snr,la_size,sm_size,drop_ratio = cp.array(0.1),norm = True, dim = 1):
+def remove_all_stripe_GPU(  sinogram: cp.array,
+                            snr: float,
+                            la_size: int,
+                            sm_size: int,
+                            drop_ratio = cp.array(0.1),
+                            norm: bool = True,
+                            dim: int = 1):
     sinogram = remove_unresponsive_and_fluctuating_stripe_GPU(sinogram, snr, la_size)
     sinogram = remove_large_stripe_GPU(sinogram, snr, la_size, drop_ratio, norm)
     sinogram = remove_stripe_based_sorting_GPU(sinogram,sm_size, dim = dim)

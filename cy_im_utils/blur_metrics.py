@@ -1,8 +1,10 @@
 import numpy as np
 from scipy import ndimage
+import cupyx.scipy.ndimage as ndimage_GPU
 import logging
+import cupy as cp
 
-def crete_blur_metric(F : str,h : int = 9):
+def crete_blur_metric(F: np.array, h: int = 9) -> float:
     """
     Crete, F., Dolmiere, T., Ladret, P., & Nicolas, M. (2007). The blur effect:
     perception and estimation with a new no-reference perceptual blur metric.
@@ -49,6 +51,56 @@ def crete_blur_metric(F : str,h : int = 9):
     logging.debug(f'Crete blur metric = {blur}')
     logging.debug(f'Crete blur metric (normalized) = {1.0 - blur}')
     return blur
+
+def crete_blur_metric_GPU(F: cp.array, h: int = 9) -> np.array:
+    """
+
+    this is intended to operate on 3D arrays (stack of 2D images) instead of
+    single images with 
+        index 0 : image 
+        index 1 : rows 
+        index 2 : columns
+
+    """
+
+    nx,ny,nz = F.shape
+
+    h_v = (1/h)*cp.ones(h).reshape(1,1,h)                       # equation 1
+    h_h = cp.transpose(h_v,(0,2,1))                             # equation 1
+
+    B_ver = ndimage_GPU.convolve(F, h_v)                        # equation 1
+    B_hor = ndimage_GPU.convolve(F, h_h)                        # equation 1
+
+    D_F_ver = cp.abs(cp.diff(F,1,2))                            # equation 2
+    D_F_hor = cp.abs(cp.diff(F,1,1))                            # equation 2
+                                                                             
+    D_B_ver = cp.abs(cp.diff(B_ver,1,2))                        # equation 2
+    D_B_hor = cp.abs(cp.diff(B_hor,1,1))                        # equation 2
+
+    blur = np.zeros([nx], dtype = np.float32)
+    for j in range(nx):
+        V_ver = cp.maximum(0,D_F_ver[j,1:-1,1:-1]-D_B_ver[j,1:-1,1:-1])
+        V_hor = cp.maximum(0,D_F_hor[j,1:-1,1:-1]-D_B_hor[j,1:-1,1:-1])
+
+        s_F_ver = cp.sum(D_F_ver[j,1:-1,1:-1])                  # equation 4
+        s_F_hor = cp.sum(D_F_hor[j,1:-1,1:-1])                  # equation 4
+
+        s_V_ver = cp.sum(V_ver[1:-1,1:-1])                      # equation 4
+        s_V_hor = cp.sum(V_hor[1:-1,1:-1])                      # equation 4
+
+        b_F_ver = (s_F_ver-s_V_ver)/s_F_ver                     # equation 5
+        b_F_hor = (s_F_hor-s_V_hor)/s_F_hor                     # equation 5
+
+        for v in [s_F_ver,s_F_hor,s_V_ver,s_V_hor]:
+            logging.debug(v)
+
+        for v in [b_F_ver,b_F_hor]:
+            logging.debug(v)
+
+        blur[j] = np.max([b_F_ver.get(),b_F_hor.get()]) # equation 6
+    #logging.debug(f'Crete blur metric = {blur}')
+    #logging.debug(f'Crete blur metric (normalized) = {1.0 - blur}')
+    return np.array(blur)
 
 def diagonal_laplacian(F : str, s : int = 1):
     """

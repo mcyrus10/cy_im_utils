@@ -86,3 +86,59 @@ def ASTRA_FDK_batch( attn,
         astra.data3d.delete([projections_id,reconstruction_id])
         
     return reconstruction/detector_pixel_size
+
+def ASTRA_General(  attn: np.array, 
+                    data_dict: dict,
+                    iterations: int = 1
+                    ) -> np.array:
+    """
+    algorithm for cone -> FDK_CUDA
+    algorithms for Parallel -> SIRT3D_CUDA, FP3D_CUDA, BP3D_CUDA
+    """
+    detector_rows,n_projections,detector_cols = attn.shape
+    distance_source_origin = data_dict['source to origin distance']
+    distance_origin_detector = data_dict['origin to detector distance']
+    detector_pixel_size = data_dict['camera pixel size']*data_dict['reproduction ratio']
+    algorithm = data_dict['recon algorithm']
+    geometry = data_dict['recon geometry']
+    angles = np.linspace(0, 2 * np.pi, num = n_projections, endpoint=False)
+    #  ---------    PARALLEL BEAM    --------------
+    if geometry.lower() == 'parallel':
+        proj_geom = astra.create_proj_geom( 'parallel3d',
+                                            1,
+                                            1,
+                                            detector_rows,
+                                            detector_cols,
+                                            angles)
+        projections_id = astra.data3d.create('-sino', proj_geom, attn)
+
+    #  ---------    CONE BEAM    --------------
+    elif geometry.lower() == 'cone':
+        proj_geom = astra.create_proj_geom('cone',
+                                            1,
+                                            1,
+                                            detector_rows, detector_cols, angles,
+            (distance_source_origin + distance_origin_detector) / detector_pixel_size, 0)
+        projections_id = astra.data3d.create('-sino', proj_geom, attn)
+        
+    vol_geom = astra.creators.create_vol_geom(  detector_cols,
+                                                detector_cols,
+                                                detector_rows)
+    reconstruction_id = astra.data3d.create('-vol', vol_geom, data=0)
+    alg_cfg = astra.astra_dict(algorithm)
+    alg_cfg['ProjectionDataId'] = projections_id
+    alg_cfg['ReconstructionDataId'] = reconstruction_id
+    alg_cfg['option'] = {'Filtertype': 'ram-lak'}
+    algorithm_id = astra.algorithm.create(alg_cfg)
+    
+    #-------------------------------------------------
+    astra.algorithm.run(algorithm_id, iterations = iterations)  # This is slow
+    #-------------------------------------------------
+
+    reconstruction = astra.data3d.get(reconstruction_id)
+    reconstruction /= detector_pixel_size
+
+    # DELETE OBJECTS TO RELEASE MEMORY
+    astra.algorithm.delete(algorithm_id)
+    astra.data2d.delete([projections_id,reconstruction_id])
+    return reconstruction
