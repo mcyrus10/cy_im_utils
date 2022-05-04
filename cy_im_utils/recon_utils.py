@@ -22,11 +22,11 @@ def astra_2d_simple(sinogram : np.array,
     cfg = astra.astra_dict(algorithm)
     cfg['ReconstructionDataId'] = reconstruction_id
     cfg['ProjectionDataId'] = sino_id
-    cfg['option'] = {'Filtertype':'ram-lak'}
+    cfg['option'] = {'FilterType':'ram-lak'}
     alg_id = astra.algorithm.create(cfg)
     astra.algorithm.run(alg_id)
     reconstruction = astra.data2d.get(reconstruction_id)
-    reconstruction/=pixel_size
+    reconstruction /= pixel_size
     astra.data2d.delete([sino_id,reconstruction_id])
     astra.algorithm.delete(alg_id)
     return reconstruction
@@ -72,7 +72,7 @@ def ASTRA_FDK_batch( attn,
         alg_cfg = astra.astra_dict(algorithm)
         alg_cfg['ProjectionDataId'] = projections_id
         alg_cfg['ReconstructionDataId'] = reconstruction_id
-        alg_cfg['option'] = {'Filtertype': 'ram-lak'}
+        alg_cfg['option'] = {'FilterType': 'ram-lak'}
         algorithm_id = astra.algorithm.create(alg_cfg)
     
         #-------------------------------------------------
@@ -89,11 +89,12 @@ def ASTRA_FDK_batch( attn,
 
 def ASTRA_General(  attn: np.array, 
                     data_dict: dict,
-                    iterations: int = 1
+                    iterations: int = 1,
+                    seed = 0,
                     ) -> np.array:
     """
-    algorithm for cone -> FDK_CUDA
-    algorithms for Parallel -> SIRT3D_CUDA, FP3D_CUDA, BP3D_CUDA
+    Hopefully this is sufficiently generic to handle arbitrariness...
+    
     """
     detector_rows,n_projections,detector_cols = attn.shape
     distance_source_origin = data_dict['source to origin distance']
@@ -117,18 +118,24 @@ def ASTRA_General(  attn: np.array,
         proj_geom = astra.create_proj_geom('cone',
                                             1,
                                             1,
-                                            detector_rows, detector_cols, angles,
-            (distance_source_origin + distance_origin_detector) / detector_pixel_size, 0)
+                                            detector_rows,
+                                            detector_cols,
+                                            angles,
+                                distance_source_origin/detector_pixel_size,
+                                distance_origin_detector /detector_pixel_size)
         projections_id = astra.data3d.create('-sino', proj_geom, attn)
         
     vol_geom = astra.creators.create_vol_geom(  detector_cols,
                                                 detector_cols,
                                                 detector_rows)
-    reconstruction_id = astra.data3d.create('-vol', vol_geom, data=0)
+
+    reconstruction_id = astra.data3d.create('-vol',
+                                            vol_geom,
+                                            data = seed)
     alg_cfg = astra.astra_dict(algorithm)
     alg_cfg['ProjectionDataId'] = projections_id
     alg_cfg['ReconstructionDataId'] = reconstruction_id
-    alg_cfg['option'] = {'Filtertype': 'ram-lak'}
+    alg_cfg['option'] = {'FilterType': 'ram-lak'}
     algorithm_id = astra.algorithm.create(alg_cfg)
     
     #-------------------------------------------------
@@ -140,5 +147,6 @@ def ASTRA_General(  attn: np.array,
 
     # DELETE OBJECTS TO RELEASE MEMORY
     astra.algorithm.delete(algorithm_id)
-    astra.data2d.delete([projections_id,reconstruction_id])
+    astra.data3d.delete(projections_id)
+    astra.data3d.delete(reconstruction_id)
     return reconstruction

@@ -118,13 +118,13 @@ def field_gpu(files, median_spatial: int = 3, dtype = np.float32):
         med_temp = cp.median(cp.array(temp[:,elem,:]), axis = 0)
         z_median[elem] = med_temp
    
-    logging.info(f"z_median shape = {z_median.shape}")
+    logging.debug(f"z_median shape = {z_median.shape}")
     return median_filter_gpu(z_median,size = median_spatial).get()
         
 def imread_fit(file_name,
         axis = 0,
         device = 'gpu',
-        dtype = np.float32
+        dtype = [np.float32,cp.float32],
         ) -> np.array: 
     """
     This function reads in a 'fit' file (which has an odd number of frames
@@ -152,11 +152,16 @@ def imread_fit(file_name,
         2D numpy array of median along specified axis (should be 0)
     """
     im = np.asarray(fits.open(file_name)[0].data.astype(dtype[0]))
-    if device == 'gpu':
-        im = cp.array(im, dtype = dtype[1])
-        return cp.asnumpy(cp.median(im, axis = axis))
+    if im.ndim == 3:
+        if device == 'gpu':
+            im = cp.array(im, dtype = dtype[1])
+            return cp.asnumpy(cp.median(im, axis = axis))
+        else:
+            return np.median(im, axis = axis)
+    elif im.ndim == 2:
+        return im
     else:
-        return np.median(im, axis = axis)
+        assert False,"Unknown Shape of image (should be 2D or 3D"
     
 def get_y_vec(img: np.array, axis = 0) -> np.array:
     """

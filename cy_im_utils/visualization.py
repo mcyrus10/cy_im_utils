@@ -133,51 +133,58 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
     """
     volume = volume
     shape = volume.shape
-    if refresh == 'constant':
-        if view == 'all':
-            fig,ax = plt.subplots(2,2, figsize = figsize)
-            ax = ax.flatten()
-        if view == 'yz' or view == 'xz' or view == 'xy':
-            fig = plt.figure(figsize = figsize)
-            ax = [plt.gca(),plt.gca(),plt.gca()]
+    plt.close('all')
+    if view == 'all':
+        fig,ax = plt.subplots(2,2, figsize = figsize)
+        ax = ax.flatten()
+    elif view == 'yz' or view == 'xz' or view == 'xy':
+        fig = plt.figure(figsize = figsize)
+        ax = [plt.gca(),plt.gca(),plt.gca()]
+    else:
+        assert False, f"unkown view config: {view}"
+
+    plt.show()
 
     def inner(x,y,z,xz,yz):
-        if refresh == 'refresh':
-            if view == 'all':
-                fig,ax = plt.subplots(2,2, figsize = figsize)
-                ax = ax.flatten()
-            if view == 'yz' or view == 'xz' or view == 'xy':
-                fig = plt.figure(figsize = figsize)
-                ax = [plt.gca(),plt.gca(),plt.gca()]
+        #if refresh == 'refresh':
+        #    if view == 'all':
+        #        fig,ax = plt.subplots(2,2, figsize = figsize)
+        #        ax = ax.flatten()
+        #    if view == 'yz' or view == 'xz' or view == 'xy':
+        #        fig = plt.figure(figsize = figsize)
+        #        ax = [plt.gca(),plt.gca(),plt.gca()]
 
+        [a.clear() for a in ax]
         shape = volume.shape
-
         if not cbar_range:
             l,h = nif_99to01contrast(volume[:,:,z])
         else:
             l,h = cbar_range
 
+        line_kwargs = {'color': line_color, 'linewidth' : lw, 'linestyle':ls}
+        im_kwargs = {'cmap':cmap, 'vmin':l, 'vmax':h}
         if view == 'xy' or view == 'all':
-            im = ax[0].imshow(volume[:,:,z].T, cmap = cmap, vmin = l, vmax = h)
+            im = ax[0].imshow(volume[:,:,z].T, **im_kwargs)
             ax[0].set_title("x-y plane")
             if crosshairs:
-                ax[0].plot([0,shape[0]-1],[y,y],color = line_color, linewidth = lw, linestyle = ls)
-                ax[0].plot([x,x],[0,shape[1]-1],color = line_color, linewidth = lw, linestyle = ls)
+                ax[0].plot([0,shape[0]-1],[y,y],**line_kwargs)
+                ax[0].plot([x,x],[0,shape[1]-1],**line_kwargs)
 
         if view == 'yz' or view == 'all':
-            ax[1].imshow(rotate_cpu(volume[x,:,:], yz, reshape = False), cmap = cmap, vmin = l, vmax = h)
+            ax[1].imshow(rotate_cpu(volume[x,:,:], yz, reshape = False),
+                                                                **im_kwargs)
             ax[1].set_title("y-z plane")
             if crosshairs:
-                ax[1].plot([z,z],[0,shape[1]-1],color = line_color, linewidth = lw, linestyle = ls)
-                ax[1].plot([0,shape[2]-1],[y,y],color = line_color, linewidth = lw, linestyle = ls)
+                ax[1].plot([z,z],[0,shape[1]-1],**line_kwargs)
+                ax[1].plot([0,shape[2]-1],[y,y],**line_kwargs)
 
         if view == 'xz' or view == 'all':
             rotated_image = rotate_cpu(volume[:,y,:], xz, reshape = False)
-            ax[2].imshow(rotated_image.T, cmap = cmap, vmin = l, vmax = h, origin = 'upper')
+            ax[2].imshow(rotated_image.T, origin = 'upper', **im_kwargs)
             ax[2].set_title("x-z plane")
             if crosshairs:
-                ax[2].plot([0,shape[0]-1],[z,z],color = line_color, linewidth = lw, linestyle = ls)
-                ax[2].plot([x,x],[0,shape[2]-1],color = line_color, linewidth = lw, linestyle = ls)
+                ax[2].plot([0,shape[0]-1],[z,z],**line_kwargs)
+                ax[2].plot([x,x],[0,shape[2]-1],**line_kwargs)
  
         if view == 'all':
             ax[3].axis('off')
@@ -403,6 +410,7 @@ def COR_interact(   data_dict : dict,
 
     out = interactive_output(inner, control_dict)
     display(ui,out)
+    z
 
 def attn_express(image, df, ff, med_kernel, crop_patch, norm_patch):
     norm_x = slice(norm_patch[2],norm_patch[3])

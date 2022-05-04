@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 def write_volume(   volume : np.array,
-                    path : str,
+                    path : Path,
                     prefix : str,
                     extension : str = 'tif'
                     ) -> None:
@@ -25,7 +25,8 @@ def write_volume(   volume : np.array,
         extension of the output files
     """
     nz,nx,ny = volume.shape
-    for j in tqdm(range(nz)):
+    tqdm_writer = tqdm(range(nz), desc = "writing images")
+    for j in tqdm_writer:
         im = Image.fromarray(volume[j,:,:])
         im_path= path / f"{prefix}_{j:05d}.{extension}"
         im.save(im_path)

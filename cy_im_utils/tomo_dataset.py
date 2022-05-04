@@ -2,7 +2,7 @@ from .prep import imread_fit,field_gpu
 from .prep import radial_zero
 from .recon_utils import ASTRA_General
 from .sarepy_cuda import *
-from .visualization import COR_interact,SAREPY_interact
+from .visualization import COR_interact,SAREPY_interact,orthogonal_plot
 from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
 from numba import njit,cuda
@@ -156,6 +156,12 @@ class tomo_dataset:
     def recon_radial_zero(self, radius_offset: int = 0) -> None:
         """
         this function makes all the values outside the radius eq
+
+        args:
+        -----
+            radius_offset: int (optional)
+                how much more than the radius should be zeroed out
+
         """
         n_frame,detector_width,_ = self.reconstruction.shape
         tqdm_zeroing = tqdm(range(n_frame), desc = "zeroing outisde crop radius")
@@ -181,6 +187,9 @@ class tomo_dataset:
         field_path = self.settings[f'{mode} path']
         logging.info(f"Reading {mode} field from {field_path}")
         files = list(field_path.glob(f"*.{self.extension}"))
+        logging.info(f"\tnum files = {len(files)}")
+        logging.info("\tshape files = "
+                          f"{np.array(self.imread_function(files[0])).shape}")
         nx,ny = np.asarray(self.imread_function(files[0])).shape
         field = field_gpu(files, self.median_spatial)
         if self.transpose:
@@ -252,9 +261,11 @@ class tomo_dataset:
         logging.info(f"crop_y = {self.crop_y}")
         logging.info(f"crop_x = {self.crop_x}")
 
-        load_im = lambda f :  cp.asarray(self.imread_function(f), dtype = self.dtype)
+        load_im = lambda f :  cp.asarray(self.imread_function(f),
+                                                        dtype = self.dtype)
         if self.transpose:
-            load_im = lambda f :  cp.asarray(self.imread_function(f), dtype = self.dtype).T
+            load_im = lambda f :  cp.asarray(self.imread_function(f),
+                                                        dtype = self.dtype).T
 
         tqdm_imread = tqdm(range(n_proj), desc = "Projection -> Attenuation Ops")
         for i in tqdm_imread:
@@ -270,6 +281,9 @@ class tomo_dataset:
             self.attenuation[i] = cp.asnumpy(im)
 
 
+    #--------------------------------------------------------------------------
+    #                   Interactive Visualization
+    #--------------------------------------------------------------------------
     def COR_interact(self, d_theta : int = 60, angles : list = []) -> None:
         """
         Wrapper for COR_interact in visualization
@@ -281,6 +295,8 @@ class tomo_dataset:
             logging.info("COR Interact Started")
             if not angles:
                 angles = [j*d_theta for j in range(360//d_theta)]
+            mods = np.array([360%a for a in angles])
+            assert sum(mods) == 0, "all angles must be factors of 360"
             COR_interact(self.settings, self.flat, self.dark, angles)
         else:
             logging.warning("Interact needs to be executed in a Notebook" 
@@ -298,6 +314,20 @@ class tomo_dataset:
             SAREPY_interact(self.settings, self.attenuation, figsize = figsize)
         else:
             logging.warning("Interact needs to be executed in a Notebook"
+                            "Environment - This method is not being executed")
+
+    def ORTHO_interact(self, **kwargs) -> None:
+        """
+        Wrapper for COR_interact in visualization
+
+        This visualization tool helps you to find the Center of rotation of an
+        image stack
+        """
+        if self.is_jupyter():
+            logging.info("Orthogonal Plot Interact Started")
+            orthogonal_plot(np.transpose(self.reconstruction,(2,1,0)), **kwargs)
+        else:
+            logging.warning("Interact needs to be executed in a Notebook" 
                             "Environment - This method is not being executed")
 
 
@@ -398,7 +428,7 @@ class tomo_dataset:
                                         self.small_filter)
         self.attenuation[:,slice_,:] = cp.asnumpy(vol_gpu)
 
-    def remove_all_stripe(self) -> None:
+    def remove_all_stripe(self, batch_size: int = 10) -> None:
         """
         operates in-place
 
@@ -406,10 +436,14 @@ class tomo_dataset:
         _,n_sino,_ = self.attenuation.shape
         self.gpu_curry_loop(self.remove_all_stripe_ops,
                             n_sino,
-                            self.gpu_batch_size,
+                            batch_size,
                             tqdm_string = "Stripe Artifact Removal")
 
-    def reconstruct(self, ds_interval: int = 1) -> None:
+    def reconstruct(self, 
+                    ds_interval: int = 1,
+                    iterations: int = 1,
+                    seed = 0
+                    ) -> None:
         """
         this just translates all the properties over to ASTRA
 
@@ -417,10 +451,16 @@ class tomo_dataset:
         ----
             ds_interval: int
                 downsampling interval default is 1 -> no Downsampling
+            iterations: int
+                only for iterative methods
+            seed: scalar or np.array
+                this is the seed for iterative methods                
         """
         self.reconstruction = ASTRA_General(
                                             self.attenuation[:,::ds_interval,:],
-                                            self.settings
+                                            self.settings,
+                                            iterations = iterations,
+                                            seed = seed
                                             )
 
     #--------------------------------------------------------------------------
