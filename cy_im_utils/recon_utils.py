@@ -18,7 +18,7 @@ def astra_2d_simple(sinogram : np.array,
     proj_geom = astra.create_proj_geom('parallel',1.0, detector_width,angles)
     sino_id = astra.data2d.create('-sino', proj_geom, sinogram)
     reconstruction_id = astra.data2d.create('-vol',vol_geom)
-    algorithm = 'FBP_CUDA'
+    algorithm = algorithm
     cfg = astra.astra_dict(algorithm)
     cfg['ReconstructionDataId'] = reconstruction_id
     cfg['ProjectionDataId'] = sino_id

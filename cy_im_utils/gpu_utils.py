@@ -1,8 +1,14 @@
 from tqdm import tqdm
 import cupy as cp
+from cupyx.scipy.ndimage import median_filter
+import logging
 import numpy as np
 
-def GPU_curry(function ,arr : np.array, axis : int = 0 ,batch_size : int = 20) -> None:
+def GPU_curry(  function ,
+                arr : np.array,
+                axis : int = 0 ,
+                batch_size : int = 20
+                ) -> None:
     """
     This is a generic template for dispatching a function over a GPU array that
     won't fit on the GPU ram
@@ -63,6 +69,87 @@ def GPU_curry(function ,arr : np.array, axis : int = 0 ,batch_size : int = 20) -
     if remainder > 0:
         arr[slice_x_rem,slice_y_rem,slice_z_rem] = cp.asnumpy(function(cp.array(arr[slice_x_rem,slice_y_rem,slice_z_rem])))
 
+def z_median(   arr: np.array,
+                median_size: int = 11
+                ) -> np.array:
+    """
+    Apply median filter in z-direction for de-noising a volume...
+
+    Don't execute this function in-place since it is sliding over the array it
+    at least needs a buffer to execute on that is separate from the full array 
+
+    """
+    logging.warning("-"*80)
+    logging.warning("THIS MEDIAN FILTER IS DEPRECATED AND SLOW DON'T USE")
+    logging.warning("-"*80)
+    #return None
+    nz,nx,ny = arr.shape
+    assert median_size % 2 == 1, "median_size must be odd"
+    lower_bound = median_size//2
+    out = np.zeros([nz-median_size+1,nx,ny])
+    #print("output_shape = ",out.shape)
+    tqdm_z_med = tqdm(enumerate(range(lower_bound,nz-lower_bound)), 
+                                            desc = "applying z-median filter")
+    for i,j in tqdm_z_med:
+        z0 = j-lower_bound
+        z1 = j+lower_bound+1
+        #print(f"z0 = {z0}, z1 = {z1}, diff = {z1-z0}")
+        slice_ = slice(z0,z1)
+        out[i] = cp.median(cp.array(arr[slice_]), axis = 0).get()
+        #out[i] = np.median(np.array(arr[slice_]), axis = 0)
+    return out
+
+def z_median_GPU(   input_arr: np.array,
+                    batch_size: int = 100,
+                    median_size: int = 11
+                    ) -> np.array:
+    """
+    Z median filter (0th axis) -> does not operate in-place since it is
+    modifying values as it slides
+    it has three slices:
+        1) input array slice (slice_input)
+        2) output array slice (filtered array)
+        3) inner slice (slice of the input array that is not corrupted by the
+            edges)
+    
+    Args:
+    -----
+        input_arr: np.array
+        batch_size: int
+            size of batches to execute on GPU
+        median_size: int
+
+    Returns:
+    --------
+        output_arr: np.array
+            filtered array with z shape lowered by median_size+1
+    """
+    med_kernel = (median_size,1,1)
+    nz_,nx,ny = input_arr.shape
+    # output array has half median chopped off either side
+    nz = nz_-median_size+1
+    output_arr = np.zeros([nz,nx,ny], dtype = np.float32)
+    lower_bound = median_size//2
+    assert median_size % 2 == 1, "median_size must be odd"
+    
+    n_batch = nz // batch_size
+    remainder = nz % batch_size
+    # this slice gets taken out of the median you have calculated
+    slice_inner = slice(lower_bound,batch_size+lower_bound)
+    for j in tqdm(range(n_batch)):
+        slice_input = slice(j*batch_size,(j+1)*batch_size+lower_bound*2)
+        slice_output = slice(j*batch_size,(j+1)*batch_size)
+        temp_median = median_filter(cp.array(input_arr[slice_input]),med_kernel)
+        output_arr[slice_output] = temp_median[slice_inner].get()
+
+    if remainder > 0:
+        slice_input = slice(nz_-remainder-lower_bound*2,nz_)
+        slice_output = slice(nz-remainder,nz)
+        slice_inner = slice(lower_bound,remainder+lower_bound)
+        temp_median = median_filter(cp.array(input_arr[slice_input]),med_kernel)
+        output_arr[slice_output] = temp_median[slice_inner].get()
+    return output_arr
+
 def test(N : int = 1000) -> None:
     arr = np.ones(N**3).reshape(N,N,N)
     fun = lambda j : cp.array(j)+1
@@ -70,3 +157,4 @@ def test(N : int = 1000) -> None:
 
 if __name__ == "__main__":
     test()
+

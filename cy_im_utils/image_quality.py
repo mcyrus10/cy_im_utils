@@ -12,6 +12,7 @@ import cupyx.scipy.ndimage as ndimage_GPU
 import numpy as np
 import numpy as np
 import torch
+import logging
 
 def crete_blur_metric_GPU(  im_stack: cp.array,
                             h: int = 9
@@ -190,8 +191,9 @@ def iou_calculate(  im0: np.array,
     for i in range(n_im):
         im0_h = im0[i]
         im1_h = im1[i]
-        if im0_h.max() == im0_h.min():
+        if (im0_h.max() == im0_h.min()) or (im1_h.max() == im1_h.min()):
             iou[i] = np.nan
+            logging.warning(f"Blank Image IOU -> returning index {i} = np.nan")
         else:
             thresh_0 = threshold_multiotsu(im0_h, classes = classes, nbins = nbins)
             regions_0 = np.digitize(im0_h, bins = thresh_0)
@@ -211,4 +213,7 @@ def laplacian_blur_GPU(im_stack: cp.array) -> cp.array:
                         [0,1,0]
                         ]], dtype = cp.float32)
     conv = ndimage_GPU.convolve(im_stack,kernel)
+    #print("cupy conv shape = ",conv.shape)
+    #print("cupy kern shape = ",kernel.shape)
+    #print("--->\n",conv)
     return cp.std(conv, axis = (1,2))**2

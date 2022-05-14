@@ -103,29 +103,6 @@ class tomo_dataset:
         """
         setattr(self,field,None)
 
-    def check_astra_shape(self) -> None:
-        """
-        This creates a figure to help confirm that your input to ASTRA has the
-        correct shape:
-            1) Sinogram is axis 0
-            2) Projection is axis 1
-            3) Detector col slice is axis 2
-        
-        """
-        nx,ny,nz = self.attenuation.shape
-        fig,ax = plt.subplots(2,2)
-        ax = ax.flatten()
-        ax[0].imshow(self.attenuation[nx//2,:,:])
-        ax[0].set_title("Sinogram - (Axis : 0)")
-        ax[2].imshow(self.attenuation[:,ny//2,:])
-        ax[2].set_title("Projection (Axis : 1)")
-        ax[2].plot([0,nz-1],[nx//2,nx//2],'k--')
-        ax[2].plot([nz//2,nz//2],[0,nx-1],'k--')
-        ax[3].imshow(self.attenuation[:,:,nz//2])
-        ax[3].set_title("Detector Col Slice (Axis : 2)")
-        [a.axis(False) for a in ax]
-        fig.tight_layout()
-        fig.suptitle("Astra Expected - (Attenuation Array)")
 
     def gpu_curry_loop( self,
                         function,
@@ -230,6 +207,22 @@ class tomo_dataset:
         Testing if its faster to load the images in straight to attenuation
         space
 
+        Operations:
+            1) flat_ = flat-dark
+            2) flat_scale = sum norm_patch pixels in flat_ 
+            3) loop over all images : Normalize + Lambert Beer + Crop + Rotate
+                a) load image
+                b) subtract dark field (in-place operation)
+                c) scale of image-dark (sum over norm patch)
+                d) divide by flat_ (in-place)
+                e) multiply by flat_scale/scale (mean of norm patch --> ~1)
+                f) spatial median  (3x3 by default)
+                g) crop
+                h) rotate
+                i) -log(image)
+                j) remove non-finite
+                k) assign to self.attenuation array
+
         Args:
             truncate_dataset : int
                 If you want to load in a datset faster this factor downsamples
@@ -267,12 +260,16 @@ class tomo_dataset:
             load_im = lambda f :  cp.asarray(self.imread_function(f),
                                                         dtype = self.dtype).T
 
+        flat_ = self.flat-self.dark
+        flat_scale = cp.sum(flat_[self.norm_y,self.norm_x])
+        logging.info(f"flat patch magnitude = {flat_scale}")
         tqdm_imread = tqdm(range(n_proj), desc = "Projection -> Attenuation Ops")
         for i in tqdm_imread:
             im = load_im(files[i])
-            patch = cp.mean(im[self.norm_y,self.norm_x])
             im -= self.dark
-            im /= (self.flat - self.dark)
+            scale = cp.sum(im[self.norm_y,self.norm_x])
+            im /= flat_
+            im *= flat_scale/scale
             im = median_gpu(im,(self.median_spatial, self.median_spatial))
             im = im[self.crop_y,self.crop_x]
             im = rotate_gpu(im, -self.theta, reshape = False)
@@ -282,8 +279,32 @@ class tomo_dataset:
 
 
     #--------------------------------------------------------------------------
-    #                   Interactive Visualization
+    #                    VISUALIZATION
     #--------------------------------------------------------------------------
+    def check_astra_shape(self) -> None:
+        """
+        This creates a figure to help confirm that your input to ASTRA has the
+        correct shape:
+            1) Sinogram is axis 0
+            2) Projection is axis 1
+            3) Detector col slice is axis 2
+        
+        """
+        nx,ny,nz = self.attenuation.shape
+        fig,ax = plt.subplots(2,2)
+        ax = ax.flatten()
+        ax[0].imshow(self.attenuation[nx//2,:,:])
+        ax[0].set_title("Sinogram - (Axis : 0)")
+        ax[2].imshow(self.attenuation[:,ny//2,:])
+        ax[2].set_title("Projection (Axis : 1)")
+        ax[2].plot([0,nz-1],[nx//2,nx//2],'k--')
+        ax[2].plot([nz//2,nz//2],[0,nx-1],'k--')
+        ax[3].imshow(self.attenuation[:,:,nz//2])
+        ax[3].set_title("Detector Col Slice (Axis : 2)")
+        [a.axis(False) for a in ax]
+        fig.tight_layout()
+        fig.suptitle("Astra Expected - (Attenuation Array)")
+
     def COR_interact(self, d_theta : int = 60, angles : list = []) -> None:
         """
         Wrapper for COR_interact in visualization
@@ -293,10 +314,9 @@ class tomo_dataset:
         """
         if self.is_jupyter():
             logging.info("COR Interact Started")
+            assert 360 % d_theta== 0, "all angles must be factors of 360"
             if not angles:
                 angles = [j*d_theta for j in range(360//d_theta)]
-            mods = np.array([360%a for a in angles])
-            assert sum(mods) == 0, "all angles must be factors of 360"
             COR_interact(self.settings, self.flat, self.dark, angles)
         else:
             logging.warning("Interact needs to be executed in a Notebook" 

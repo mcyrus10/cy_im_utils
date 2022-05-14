@@ -68,7 +68,11 @@ def contrast(image , low : float  = 0.01, high : float = 0.99) -> tuple:
     temp = image.flatten()
     return np.quantile(temp,low),np.quantile(temp,high)
     
-def plot_patch(patch : list, ax , color = 'k', linestyle = '-' , linewidth  = 0.5):
+def plot_patch( patch : list,
+                ax ,
+                color:str = 'k',
+                linestyle: str = '-' ,
+                linewidth:float = 0.5) -> None:
     """
     This is just a hack to make a rectangular patch for matplotlib
     Parameters
@@ -80,15 +84,12 @@ def plot_patch(patch : list, ax , color = 'k', linestyle = '-' , linewidth  = 0.
     color: string
         color of box
 
-    returns
-    -------
-    None
     """
-    ax.plot([patch[0],patch[1]],[patch[2],patch[2]],color = color, linestyle = linestyle, linewidth = linewidth)
-    ax.plot([patch[0],patch[1]],[patch[3],patch[3]],color = color, linestyle = linestyle, linewidth = linewidth)
-    ax.plot([patch[0],patch[0]],[patch[2],patch[3]],color = color, linestyle = linestyle, linewidth = linewidth)
-    ax.plot([patch[1],patch[1]],[patch[2],patch[3]],color = color, linestyle = linestyle, linewidth = linewidth)
-    return None 
+    kwargs = {'color':color,'linestyle':linestyle,'linewidth':linewidth}
+    ax.plot([patch[0],patch[1]],[patch[2],patch[2]],**kwargs)
+    ax.plot([patch[0],patch[1]],[patch[3],patch[3]],**kwargs)
+    ax.plot([patch[0],patch[0]],[patch[2],patch[3]],**kwargs)
+    ax.plot([patch[1],patch[1]],[patch[2],patch[3]],**kwargs)
     
 def plot_circle(coords, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):
     """
@@ -109,10 +110,20 @@ def plot_circle(coords, ax, color = 'k', linestyle = '-' , linewidth  = 0.5):
     
     return None 
     
-def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
-        figsize = (10,10), cmap = 'gray', colorbar = False, grid = False,
-        crosshairs = True, view = 'all', refresh = 'refresh', cbar_range = [], 
-        theta_max = 15.0): 
+def orthogonal_plot(volume: np.array,
+                    step: int = 1,
+                    line_color: str = 'k',
+                    lw: float = 1,
+                    ls = (0,(5,5)),
+                    figsize: tuple = (10,10),
+                    cmap: str = 'gray',
+                    colorbar: bool = False,
+                    grid: bool = False,
+                    crosshairs: bool = True,
+                    view: str = 'all',
+                    cbar_range: list = [], 
+                    theta_max: float = 15.0
+                    ) -> None: 
     
     """
     This is my ripoff of ImageJ orthogonal views, you can change x,y,z slice
@@ -123,12 +134,21 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
     ----------
         volume : 3D array
         step : controls the interactive interval for stepping through volume
+        lw: line width of crosshairs
+        ls: line style - string or tuple
         figsize: figure size
         cmap: colormap
+        colorbar: 
+        grid: 
+        crosshairs: suppress or show
+        view: str .... can't rememer how this was working
+        cbar_range: manually set colorbar range
+        theta_max: this controls how far the sliders for rotation will allow
 
     Example
     -------
-        interactive_plot(electrode['A']['cropped'], figsize = (12,4), cmap = 'hsv')
+        interactive_plot(electrode['A']['cropped'], figsize = (12,4),
+                                                                cmap = 'hsv')
 
     """
     volume = volume
@@ -141,18 +161,12 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
         fig = plt.figure(figsize = figsize)
         ax = [plt.gca(),plt.gca(),plt.gca()]
     else:
-        assert False, f"unkown view config: {view}"
+        assert False, f"unknown view config: {view}"
 
+    fig.tight_layout()
     plt.show()
 
     def inner(x,y,z,xz,yz):
-        #if refresh == 'refresh':
-        #    if view == 'all':
-        #        fig,ax = plt.subplots(2,2, figsize = figsize)
-        #        ax = ax.flatten()
-        #    if view == 'yz' or view == 'xz' or view == 'xy':
-        #        fig = plt.figure(figsize = figsize)
-        #        ax = [plt.gca(),plt.gca(),plt.gca()]
 
         [a.clear() for a in ax]
         shape = volume.shape
@@ -202,11 +216,14 @@ def orthogonal_plot(volume, step = 1, line_color = 'k', lw = 1, ls = (0,(5,5)),
     x_max = volume.shape[0]-1
     y_max = volume.shape[1]-1
     z_max = volume.shape[2]-1
-    x = IntSlider(description = "x", continuous_update = False, min=0, max=x_max)
-    y = IntSlider(description = "y", continuous_update = False, min=0, max=y_max)
-    z = IntSlider(description = "z", continuous_update = False, min=0, max=z_max)
-    xz = FloatSlider(description = r"$\theta_{xz}$", continuous_update = False, min=-theta_max,max=theta_max)
-    yz = FloatSlider(description = r"$\theta_{yz}$", continuous_update = False, min=-theta_max,max=theta_max)
+    kwargs = {'continuous_update':False,'min':0}
+    x = IntSlider(description = "x",  max=x_max, **kwargs)
+    y = IntSlider(description = "y",  max=y_max, **kwargs)
+    z = IntSlider(description = "z",  max=z_max, **kwargs)
+    xz = FloatSlider(description = r"$\theta_{xz}$", continuous_update = False,
+            min=-theta_max,max=theta_max)
+    yz = FloatSlider(description = r"$\theta_{yz}$", continuous_update = False,
+            min=-theta_max,max=theta_max)
 
     row1 = HBox([x,y,z])
     row2 = HBox([xz,yz])
@@ -294,8 +311,8 @@ def COR_interact(   data_dict : dict,
     fig,ax = plt.subplots(1,2, figsize = figsize)
     plt.show()
 
-    #def inner(crop_y0,crop_y1,crop_x0,crop_x1,norm_x0,norm_x1,norm_y0,norm_y1,cor_y0,cor_y1):
-    def inner(crop_y0,crop_dy,crop_x0,crop_dx,norm_x0,norm_dx,norm_y0,norm_dy,cor_y0,cor_y1):
+    def inner(crop_y0,crop_dy,crop_x0,crop_dx,norm_x0,norm_dx,norm_y0,norm_dy,
+                            cor_y0,cor_y1):
         l,h = np.quantile(distribution,dist),np.quantile(distribution,1.0-dist)
         crop_patch = [crop_y0,crop_y0+crop_dy,crop_x0,crop_x0+crop_dx]
         norm_patch = [norm_y0,norm_y0+norm_dy,norm_x0,norm_x0+norm_dx]
@@ -313,15 +330,21 @@ def COR_interact(   data_dict : dict,
         #plt.show()
         if y0==y1:
             ax[0].imshow(combined, vmin = l, vmax = h)
-            plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--', linewidth = 2)
-            plot_patch(norm_patch, ax[0], color = 'k')
-            # Visualize 0 and 180 degrees with crop patch and normalization patch highlighted
+            plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--',
+                                                            linewidth = 2)
+            plot_patch(norm_patch, ax[0], color = 'w')
+            # Visualize 0 and 180 degrees with crop patch and normalization
+            # patch highlighted
             if norm_patch[0] != norm_patch[1] and norm_patch[2] != norm_patch[3]:
-                ax[0].text(norm_patch[0],norm_patch[2],'Norm Patch',
-                        verticalalignment = 'bottom', horizontalalignment = 'left',
-                        rotation = 90)
+                ax[0].text(norm_patch[0],norm_patch[2],
+                                                'Norm Patch',
+                                                verticalalignment = 'bottom',
+                                                horizontalalignment = 'left',
+                                                color = 'w',
+                                                rotation = 90)
             ax[1].axis(False)
-        elif y0 != y1 and crop_patch[0] != crop_patch[1] and crop_patch[2] != crop_patch[3]:
+        elif (y0 != y1 and crop_patch[0] != crop_patch[1] and 
+                                               crop_patch[2] != crop_patch[3]):
             if y1 > crop_patch[3]-crop_patch[2]:
                 print("COR y1 exceeds window size")
             else:
@@ -330,12 +353,16 @@ def COR_interact(   data_dict : dict,
                 #--------------------------------------------------------------
                 ax[0].imshow(combined,  vmin = l, vmax = h)
                 plot_patch(crop_patch, ax[0], color = 'r', linestyle = '--')
-                plot_patch(norm_patch, ax[0], color = 'k')
+                plot_patch(norm_patch, ax[0], color = 'w')
 
-                if norm_patch[0] != norm_patch[1] and norm_patch[2] != norm_patch[3]:
-                    ax[0].text(norm_patch[0],norm_patch[2],'Norm Patch',
-                            verticalalignment = 'bottom', horizontalalignment = 'left',
-                            rotation = 90)
+                if (norm_patch[0] != norm_patch[1] and 
+                                            norm_patch[2] != norm_patch[3]):
+                    ax[0].text(norm_patch[0],norm_patch[2],
+                                            'Norm Patch',
+                                            color = 'w',
+                                            verticalalignment = 'bottom',
+                                            horizontalalignment = 'left',
+                                            rotation = 90)
 
 
                 slice_x = slice(crop_patch[0],crop_patch[1])
@@ -361,10 +388,16 @@ def COR_interact(   data_dict : dict,
                 cor_image2 = combined[slice_y_corr,slice_x_corr]
                 cor_image2[~np.isfinite(cor_image2)] = 0
                 cor_image2 = rotate_cpu(cor_image2,-theta,reshape=False)
-                cor3 = center_of_rotation(cor_image2, y0, y1, ax = ax[1], image_center = True)
+                cor3 = center_of_rotation(cor_image2, y0, y1, ax = ax[1],
+                                            image_center = True)
                 plot_patch(crop_patch,ax[0], color = 'b')
                 ax[1].set_title(f"Rotated ({theta:.3f} deg) and Cropped")
-                ax[0].text(crop_patch[1],crop_patch[2],'Crop Patch Centered', verticalalignment = 'bottom', horizontalalignment = 'left',color = 'b', rotation = 90)
+                ax[0].text(crop_patch[1],crop_patch[2],
+                                    'Crop Patch Centered',
+                                    verticalalignment = 'bottom',
+                                    horizontalalignment = 'left',
+                                    color = 'b',
+                                    rotation = 90)
                 fig.tight_layout()
                 data_dict['crop patch'] = crop_patch
                 data_dict['norm patch'] = norm_patch
@@ -379,16 +412,17 @@ def COR_interact(   data_dict : dict,
     #   These assignements look backward (x0, 0 -> y_max, etc.) but they are
     #   fixing the problem of plt.imshow transposing the image
     #---------------------------------------------------------------------------
-    crop_x0 = IntSlider(description = "crop x0", continuous_update = False, min=0,max=y_max)
-    crop_dx = IntSlider(description = "crop dx", continuous_update = False, min=0,max=y_max)
-    crop_y0 = IntSlider(description = "crop y0", continuous_update = False, min=0,max=x_max)
-    crop_dy = IntSlider(description = "crop dy", continuous_update = False, min=0,max=x_max)
-    norm_x0 = IntSlider(description = "norm x0", continuous_update = False, min=0,max=y_max)
-    norm_dx = IntSlider(description = "norm dx", continuous_update = False, min=0,max=y_max)
-    norm_y0 = IntSlider(description = "norm y0", continuous_update = False, min=0,max=x_max)
-    norm_dy = IntSlider(description = "norm dy", continuous_update = False, min=0,max=x_max)
-    cor_y0  = IntSlider(description = "COR y0",  continuous_update = False, min=0,max=x_max)
-    cor_y1  = IntSlider(description = "COR y1",  continuous_update = False, min=0,max=x_max)
+    kwargs = {'continuous_update':False,'min':0}
+    crop_x0 = IntSlider(description = "crop x0", max=y_max, **kwargs)
+    crop_dx = IntSlider(description = "crop dx", max=y_max, **kwargs)
+    crop_y0 = IntSlider(description = "crop y0", max=x_max, **kwargs)
+    crop_dy = IntSlider(description = "crop dy", max=x_max, **kwargs)
+    norm_x0 = IntSlider(description = "norm x0", max=y_max, **kwargs)
+    norm_dx = IntSlider(description = "norm dx", max=y_max, **kwargs)
+    norm_y0 = IntSlider(description = "norm y0", max=x_max, **kwargs)
+    norm_dy = IntSlider(description = "norm dy", max=x_max, **kwargs)
+    cor_y0  = IntSlider(description = "COR y0",  max=x_max, **kwargs)
+    cor_y1  = IntSlider(description = "COR y1",  max=x_max, **kwargs)
 
     row1 = HBox([crop_x0,crop_dx,crop_y0,crop_dy])
     row2 = HBox([norm_x0,norm_dx,norm_y0,norm_dy])
@@ -410,7 +444,6 @@ def COR_interact(   data_dict : dict,
 
     out = interactive_output(inner, control_dict)
     display(ui,out)
-    z
 
 def attn_express(image, df, ff, med_kernel, crop_patch, norm_patch):
     norm_x = slice(norm_patch[2],norm_patch[3])
@@ -473,12 +506,14 @@ def SAREPY_interact(data_dict : dict,
         ax[3].set_title("recon (FBP)")
     elif 'col' in sino_row_col:
         gs = GridSpec(5,5)
+    fig.tight_layout()
     n_proj,n_sino,detector_width = input_array.shape
     def inner(frame,snr,la_size,sm_size):
         plt.cla()
         temp = input_array[:,frame,:].copy()
         try:
-            filtered = remove_all_stripe_GPU(cp.array(temp[:,None,:]),snr,la_size,sm_size)
+            filtered = remove_all_stripe_GPU(cp.array(temp[:,None,:]),
+                                                        snr,la_size,sm_size)
             filtered = cp.asnumpy(filtered[:,0,:])
             reco = astra_2d_simple(filtered)
             l,h = contrast(temp)
