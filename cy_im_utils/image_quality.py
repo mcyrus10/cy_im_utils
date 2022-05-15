@@ -6,12 +6,10 @@ NEED TO ADD SCIPY LICENSE FOR SSIM AND PSNR!!
 from cupyx.scipy.ndimage.filters import uniform_filter
 from cupyx.scipy.signal import convolve
 from skimage.filters import threshold_multiotsu
-from torch import tensor
 import cupy as cp
 import cupyx.scipy.ndimage as ndimage_GPU
 import numpy as np
 import numpy as np
-import torch
 import logging
 
 def crete_blur_metric_GPU(  im_stack: cp.array,
