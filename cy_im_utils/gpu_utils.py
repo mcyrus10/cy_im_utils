@@ -150,6 +150,74 @@ def z_median_GPU(   input_arr: np.array,
         output_arr[slice_output] = temp_median[slice_inner].get()
     return output_arr
 
+def median_GPU_batch( input_arr: np.array,
+                median_: tuple,
+                batch_size: int = 100,
+                ) -> np.array:
+    """
+    For applying arbitrary median shape with the GPU it has three slices:
+        1) input array slice (slice_input)
+        2) output array slice (filtered array)
+        3) inner slice (slice of the input array that is not corrupted by the
+            edges)
+    
+    Args:
+    -----
+        input_arr: np.array
+        median_: tuple (of ints)
+            median kernel in each direction (z,x,y)
+        batch_size: int
+            size of batches to execute on GPU
+
+    Returns:
+    --------
+        output_arr: np.array
+            filtered array with:
+                - z shape lowered by median_[0]+1
+                - x shape lowered by median_[1]+1
+                - y shape lowered by median_[2]+1
+    """
+    assert median_[0] % 2 == 1, "median_size must be odd"
+    assert median_[1] % 2 == 1, "median_size must be odd"
+    assert median_[2] % 2 == 1, "median_size must be odd"
+
+    med_kernel = median_
+    nz_,nx_,ny_ = input_arr.shape
+    # output array has half median chopped off either side
+    nz = nz_ - median_[0]+1
+    nx = nx_ - median_[1]+1
+    ny = ny_ - median_[2]+1
+    output_arr = np.zeros([nz,nx,ny], dtype = np.float32)
+
+    z_bound = median_[0] // 2
+    x_bound = median_[1] // 2
+    y_bound = median_[2] // 2
+    
+    n_batch = nz // batch_size
+    remainder = nz % batch_size
+    # These slices get taken from the median you have calculated, if edge
+    # effects are small these slices could be the whole length of nx and ny
+    slice_z_inner = slice(z_bound,batch_size+z_bound)
+    slice_x_inner = slice(x_bound,nx+x_bound)
+    slice_y_inner = slice(y_bound,ny+y_bound)
+    for j in tqdm(range(n_batch)):
+        slice_input = slice(j*batch_size,(j+1)*batch_size+z_bound*2)
+        slice_output = slice(j*batch_size,(j+1)*batch_size)
+        temp_median = median_filter(cp.array(input_arr[slice_input]),med_kernel)
+        output_arr[slice_output] = \
+                temp_median[slice_z_inner,slice_x_inner,slice_y_inner].get()
+
+    if remainder > 0:
+        slice_input = slice(nz_-remainder-z_bound*2,nz_)
+        slice_output = slice(nz-remainder,nz)
+        slice_z_inner = slice(z_bound,remainder+z_bound)
+        temp_median = median_filter(cp.array(input_arr[slice_input]),med_kernel)
+        output_arr[slice_output] = \
+                temp_median[slice_z_inner,slice_x_inner,slice_y_inner].get()
+    return output_arr
+
+
+
 def test(N : int = 1000) -> None:
     arr = np.ones(N**3).reshape(N,N,N)
     fun = lambda j : cp.array(j)+1

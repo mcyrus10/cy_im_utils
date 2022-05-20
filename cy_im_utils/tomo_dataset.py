@@ -201,7 +201,7 @@ class tomo_dataset:
                 self.projections = np.transpose(self.projections,(0,2,1))
 
     def load_projections_to_attn(self,
-                                truncate_dataset : int = 1
+                                truncate_dataset : int = 1,
                                 ) -> None:
         """
         Testing if its faster to load the images in straight to attenuation
@@ -277,6 +277,22 @@ class tomo_dataset:
             im[~cp.isfinite(im)] = 0
             self.attenuation[i] = cp.asnumpy(im)
 
+
+    def resize(self, resize_factor: int) -> None:
+        """
+        This is for binning, just taking every nth row, col , etc., but not
+        down sampling projections
+
+        Args:
+        -----
+            resize_factor: int
+                factor by which to downsample the images...
+        """
+        logging.info(f"Binning Pixels by every {resize_factor}th element, NOT\
+                BINNING ALONG PROJECTIONS AXIS!")
+        self.flat = self.flat[::resize_factor,::resize_factor]
+        self.dark = self.dark[::resize_factor,::resize_factor]
+        self.attenuation = self.attenuation[:,::resize_factor,::resize_factor]
 
     #--------------------------------------------------------------------------
     #                    VISUALIZATION

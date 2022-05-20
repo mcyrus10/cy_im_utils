@@ -563,10 +563,12 @@ def SAREPY_interact(data_dict : dict,
     out = interactive_output(inner, control_dict)
     display(ui,out)
 
-def z_median_interact(data_dict : dict,
+def median_interact(data_dict : dict,
                     input_array : np.array,
                     figsize : tuple  = (8,8),
-                    max_median: int = 101,
+                    max_z: int = 101,
+                    max_x: int = 41,
+                    max_y: int = 41,
                     ) -> None: 
     """
     Interactive inspection of Z-median with sliders to control the
@@ -595,20 +597,22 @@ def z_median_interact(data_dict : dict,
 
     fig.tight_layout()
     nz,nx,ny = input_array.shape
-    def inner(frame,median_size,row):
+    def inner(frame,median_z,median_x,median_y,row):
         plt.cla()
         [a.clear() for a in ax]
         temp = input_array[frame].copy()
-        median_stride = median_size//2
+        median_z_stride = median_z//2
 
-        if frame - median_stride <= 0:
+        if frame - median_z_stride <= 0:
             print("Median Overlapping Edge of Volume")
         else:
-            slice_ = slice(frame-median_stride,frame+median_stride+1)
-            med_kernel = (median_size,1,1)
+            slice_z = slice(frame-median_z_stride,frame+median_z_stride+1)
+            #slice_x = slice(frame-median_x//2,frame+median_x//2+1)
+            #slice_y = slice(frame-median_y//2,frame+median_y//2+1)
+            med_kernel = (median_z,median_x,median_y)
             filtered = median_gpu(
-                                cp.array(input_array[slice_].copy()),med_kernel
-                                )[median_stride,:,:].get()
+                                cp.array(input_array[slice_z].copy()),med_kernel
+                                )[median_z_stride,:,:].get()
             
             l,h = contrast(temp)
             ax[0].imshow(temp, vmin = l, vmax = h)
@@ -619,10 +623,12 @@ def z_median_interact(data_dict : dict,
             ax[3].plot(filtered[row])
             ax[3].plot(temp[row],alpha = 0.3)
             ax[0].set_title("Unfiltered")
-            ax[1].set_title("Z Median Filtered")
+            ax[1].set_title("Median Filtered")
          
           
-            data_dict['z median'] = median_size
+            data_dict['x median'] = median_x
+            data_dict['y median'] = median_y
+            data_dict['z median'] = median_z
         
     frame = IntSlider(
                         description = "frame",
@@ -630,13 +636,30 @@ def z_median_interact(data_dict : dict,
                         min = 0,
                         max = nz-1
                         )
-    median_size = IntSlider(
-                        description = "median size",
+    median_z = IntSlider(
+                        description = "median z",
                         continuous_update = False,
                         min = 1,
-                        max = max_median,
+                        max = max_z,
                         step = 2
                         )
+    median_x = IntSlider(
+                        description = "median x",
+                        continuous_update = False,
+                        min = 1,
+                        max = max_x,
+                        step = 2
+                        )
+
+    median_y = IntSlider(
+                        description = "median y",
+                        continuous_update = False,
+                        min = 1,
+                        max = max_y,
+                        step = 2
+                        )
+
+
     row = IntSlider(description = "row slice",
                         continuous_update = False,
                         min = 0,
@@ -647,13 +670,21 @@ def z_median_interact(data_dict : dict,
     
     control_dict = {
                     'frame':frame,
-                    'median_size':median_size,
+                    'median_z':median_z,
+                    'median_x':median_x,
+                    'median_y':median_y,
                     'row':row,
                    }
     
-    ui = HBox([frame,median_size,row])
+    row1 = HBox([frame,row])
+    row2 = HBox([median_z,median_x,median_y])
+    ui = VBox([row1,row2])
+
+    #ui = HBox([frame,median_z,median_x,median_y,row])
     out = interactive_output(inner, control_dict)
     display(ui,out)
+
+
 
     
 def dynamic_thresh_plot(im,

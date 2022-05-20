@@ -2,6 +2,7 @@ import astra
 import numpy as np
 import pathlib
 from tqdm import tqdm
+import logging
 
 def astra_2d_simple(sinogram : np.array,
                     algorithm : str = 'FBP_CUDA',
@@ -121,8 +122,8 @@ def ASTRA_General(  attn: np.array,
                                             detector_rows,
                                             detector_cols,
                                             angles,
-                                distance_source_origin/detector_pixel_size,
-                                distance_origin_detector /detector_pixel_size)
+        (distance_source_origin + distance_origin_detector )/detector_pixel_size,
+                                            0)
         projections_id = astra.data3d.create('-sino', proj_geom, attn)
         
     vol_geom = astra.creators.create_vol_geom(  detector_cols,
