@@ -2,11 +2,13 @@
 
 
 """
+from cupyx.scipy.ndimage import median_filter as median_gpu
 from glob import glob
 from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual
 from matplotlib.gridspec import GridSpec
+from matplotlib.transforms import Affine2D
+from skimage.transform import warp
 from scipy.ndimage import rotate as rotate_cpu, median_filter
-from cupyx.scipy.ndimage import median_filter as median_gpu
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import logging
@@ -14,7 +16,6 @@ import numpy as np
 
 from .sarepy_cuda import remove_all_stripe_GPU
 from .prep import *
-from .prep import center_of_rotation
 from .recon_utils import *
 
 
@@ -233,10 +234,12 @@ def orthogonal_plot(volume: np.array,
     display(ui,out)
 
 def COR_interact(   data_dict : dict,
+                    imread_fcn,
                     ff : np.array, 
                     df : np.array,
                     angles : list = [0,180],
-                    figsize : tuple = (10,5)
+                    figsize : tuple = (10,5),
+                    apply_thresh: float = None
                     ) -> None:
     """
     This is still a work in progress. The goal is to have a minimal interface
@@ -248,6 +251,11 @@ def COR_interact(   data_dict : dict,
     WARNING :   The way matplotlib renders images is not intuitive x and y are
                 flipped, so all references to cropping, etc. can become very
                 confusing. proceed with caution.
+
+    WARNING2:   all the try - except statements for KeyErrors are from when I
+                changed from using a data dictionary to using a config file so
+                this is a bit deprecated. All the updated versions should just
+                use the version with KeyError (dict is paired with config) 
 
     Args:
     -----------
@@ -267,31 +275,44 @@ def COR_interact(   data_dict : dict,
 
     figsize: tuple of ints
         figure size
+
+    apply_thresh: float
+        this will apply a threshold to the combined image (sum of attenuation)
+        so the background can be removed if it is uneven
     """
-    proj_files = list(data_dict['projection path'].glob(f"*.{data_dict['extension']}"))
-    dtype = data_dict['dtype']
-    Transpose = data_dict['transpose']
+    keys = list(data_dict.keys())
+    if 'crop' not in keys and 'norm' not in keys:
+        assert False, "use the new config - dict coupling format"
 
+    proj_path = data_dict['paths']['projection_path']
+    ext = data_dict['pre_processing']['extension']
+    proj_files = list(proj_path.glob(f"*.{ext}"))
 
-    if data_dict['COR rows']:
-        cor_y0,cor_y1 = data_dict['COR rows']
+    Transpose = data_dict['pre_processing']['transpose']
+
+    if data_dict['COR']:
+        cor_y0,cor_y1 = data_dict['COR']['y0'],data_dict['COR']['y1']
     else:
         cor_y0,cor_y1 = 0,ff.shape[-1]
 
 
     n_proj = len(proj_files)
-    print(n_proj)
+    logging.info(f"COR -> num_projection files = {n_proj}")
     # Create the combined image in attenuation space to determine center of rotation
     n_angles = len(angles)
     projection_indices = [np.round(a/(360/n_proj)).astype(int) for a in angles]
     combined = np.zeros([n_angles,ff.shape[0],ff.shape[1]])
-    med_kernel = data_dict['median spatial']
+    med_kernel = data_dict['pre_processing']['median_spatial']
     df_ = cp.asarray(df)
     ff_ = cp.asarray(ff)
     for i,angle_index in tqdm(enumerate(projection_indices)):
         f = proj_files[angle_index]
-        im_temp = cp.asarray(data_dict['imread function'](f), dtype = np.float32)
-        if data_dict['transpose']:
+        im_temp = cp.asarray(imread_fcn(f), dtype = np.float32)
+        try:
+            transpose = data_dict['transpose']
+        except KeyError as ke: 
+            transpose = data_dict['pre_processing']['transpose']
+        if transpose:
             im_temp = im_temp.T
         temp = -cp.log((im_temp-df_)/(ff_-df_))
         temp = median_gpu(cp.array(temp), (med_kernel,med_kernel))
@@ -300,6 +321,10 @@ def COR_interact(   data_dict : dict,
 
     # TRANSPOSE IF THE COR IS NOT VERTICAL!!
     combined = np.sum(combined, axis = 0)
+    if apply_thresh is not None:
+        logging.info(f"Applying threshold to combined image ({apply_thresh})")
+        combined[combined < apply_thresh] = 0
+    #combined = np.abs(np.round(10*np.diff(combined, axis = 0)))
 
     x_max,y_max = combined.shape
 
@@ -399,10 +424,21 @@ def COR_interact(   data_dict : dict,
                                     color = 'b',
                                     rotation = 90)
                 fig.tight_layout()
-                data_dict['crop patch'] = crop_patch
-                data_dict['norm patch'] = norm_patch
-                data_dict['theta'] = theta
-                data_dict['COR rows'] = [cor_y0,cor_y1]
+                data_dict['crop']['x0'] = crop_patch[0]
+                data_dict['crop']['x1'] = crop_patch[1]
+                data_dict['crop']['y0'] = crop_patch[2]
+                data_dict['crop']['y1'] = crop_patch[3]
+                data_dict['crop']['dx'] = crop_patch[1]-crop_patch[0]
+                data_dict['crop']['dy'] = crop_patch[3]-crop_patch[2]
+                data_dict['norm']['x0'] = norm_patch[0]
+                data_dict['norm']['x1'] = norm_patch[1]
+                data_dict['norm']['y0'] = norm_patch[2]
+                data_dict['norm']['y1'] = norm_patch[3]
+                data_dict['norm']['dx'] = norm_patch[1]-norm_patch[0]
+                data_dict['norm']['dy'] = norm_patch[3]-norm_patch[2]
+                data_dict['COR']['y0'] = cor_y0
+                data_dict['COR']['y1'] = cor_y1
+                data_dict['COR']['theta'] = theta
         ax[0].set_title("$\Sigma_{{i=0}}^{{{}}}$ Projection[i$\pi / {{{}}}]$".format(len(angles),len(angles)))
         plt.show()
 
@@ -484,6 +520,8 @@ def SAREPY_interact(data_dict : dict,
     sm_size_max: int
         (odd number) maximum value for sm_size slider to take
     """
+    if "SARE" not in data_dict.keys():
+        assert False, "Use the updated config-data_dict method"
     # Importing the regular sarepy for 2d images for interactive
     from sys import path
     path.append("C:\\Users\\mcd4\\Documents\\vo_filter_source\\sarepy")
@@ -523,9 +561,9 @@ def SAREPY_interact(data_dict : dict,
             ax[3].imshow(reco)
         except:
             print("SVD did not converge")
-        data_dict['signal to noise ratio'] = snr
-        data_dict['large filter'] = la_size
-        data_dict['small filter'] = sm_size
+        data_dict['SARE']['snr'] = snr
+        data_dict['SARE']['la_filter'] = la_size
+        data_dict['SARE']['sm_filter'] = sm_size
         
     frame = IntSlider(
                         description = "row",
@@ -684,9 +722,6 @@ def median_interact(data_dict : dict,
     out = interactive_output(inner, control_dict)
     display(ui,out)
 
-
-
-    
 def dynamic_thresh_plot(im,
                         im_filtered,
                         step = 0.05,
@@ -771,3 +806,157 @@ def dynamic_thresh_plot(im,
         ax[0].plot([thresh[-1],thresh[-1]],[0,m],'r--', linewidth = 1)
 
     return innermost
+
+def volume_register_interact(static : np.array,
+                            moving: np.array,
+                            extension: str = "tif",
+                            figsize: tuple = (15,5),
+                            down_sample: int = 5,
+                            cmap_static: str = 'Spectral',
+                            cmap_moving: str = 'rainbow',
+                            alpha = 0.5
+                            ) -> None: 
+    """
+    Interactive inspection of Z-median with sliders to control the
+    arguments. It overwrites the values in data_dict so they can be unpacked
+    and used for the Vo filter batch.
+
+    Parameters:
+    -----------
+        static_files: list
+            list of files for the reconstructed static volume
+
+        moving_files: list
+            list of files for the reconstructed moving volume
+
+        extension: string
+            extension for image files
+
+        downsample: int
+            down sample factor to make the volume transformations faster
+
+    """
+    fig,ax = plt.subplots(1,3, figsize = figsize)
+    fig.tight_layout()
+    nz,nx,ny = static.shape
+    nz2,nx2,ny2 = moving.shape
+    def inner(  x_coord,y_coord,z_coord, 
+            x_shift, y_shift, z_shift,
+            theta_yz,theta_xz,theta_xy,
+            scale,alpha):
+        plt.cla()
+        [a.clear() for a in ax]
+        ax[0].imshow(static[:,x_coord,:], cmap = cmap_static)
+        ax[1].imshow(static[:,:,y_coord], cmap = cmap_static)
+        ax[2].imshow(static[z_coord,:,:], cmap = cmap_static)
+        
+        tform_x = Affine2D().translate(tx = y_shift, ty = z_shift).rotate(np.deg2rad(theta_yz)).scale(scale)
+        tform_y = Affine2D().translate(tx = x_shift, ty = z_shift).rotate(np.deg2rad(theta_xz)).scale(scale)
+        tform_z = Affine2D().translate(tx = x_shift, ty = y_shift).rotate(np.deg2rad(theta_xy)).scale(scale)
+        x_moving = warp(moving[:,x_coord-x_shift,:],np.linalg.inv(tform_x))
+        y_moving = warp(moving[:,:,y_coord-y_shift], np.linalg.inv(tform_y))
+        z_moving = warp(moving[z_coord-z_shift,:,:], np.linalg.inv(tform_z))
+        ax[0].imshow(x_moving, cmap = cmap_moving, alpha = alpha)
+        ax[1].imshow(y_moving, cmap = cmap_moving, alpha = alpha)
+        ax[2].imshow(z_moving, cmap = cmap_moving, alpha = alpha)
+
+    x_coord = IntSlider(
+                        description = "x_coord",
+                        continuous_update = False,
+                        min = 0,
+                        max = nx-1
+                        )
+    y_coord = IntSlider(
+                        description = "y_coord",
+                        continuous_update = False,
+                        min = 0,
+                        max = ny-1
+                        )
+
+    z_coord = IntSlider(
+                        description = "z_coord",
+                        continuous_update = False,
+                        min = 0,
+                        max = nz-1
+                        )
+
+    x_shift = IntSlider(
+                        description = "x_shift",
+                        continuous_update = False,
+                        min = -nx2//2,
+                        max = nx2//2
+                        )
+
+    y_shift = IntSlider(
+                        description = "y_shift",
+                        continuous_update = False,
+                        min = -ny2//2,
+                        max = ny2//2
+                        )
+
+    z_shift = IntSlider(
+                        description = "z_shift",
+                        continuous_update = False,
+                        min = -nz2//2,
+                        max = nz2//2
+                        )
+    theta_yz = FloatSlider(
+                        description = "theta_yz",
+                        continuous_update = False,
+                        min = -15,
+                        max = 15
+                        )
+
+    theta_xz = FloatSlider(
+                        description = "theta_xz",
+                        continuous_update = False,
+                        min = -15,
+                        max = 15
+                        )
+
+    theta_xy = FloatSlider(
+                        description = "theta_xy",
+                        continuous_update = False,
+                        min = -15,
+                        max = 15
+                        )
+
+    scale = FloatSlider(
+                        description = "scale",
+                        continuous_update = False,
+                        min = 0.01,
+                        max = 2
+                        )
+
+    alpha = FloatSlider(
+                        description = "alpha",
+                        continuous_update = False,
+                        min = 0.01,
+                        max = 1.0
+                        )
+
+   
+    control_dict = {
+                    'x_coord':x_coord,
+                    'y_coord':y_coord,
+                    'z_coord':z_coord,
+                    'x_shift':x_shift,
+                    'y_shift':y_shift,
+                    'z_shift':z_shift,
+                    'theta_yz':theta_yz,
+                    'theta_xz':theta_xz,
+                    'theta_xy':theta_xy,
+                    'scale':scale,
+                    'alpha':alpha,
+                   }
+    
+    row1 = HBox([x_coord,y_coord,z_coord])
+    row2 = HBox([x_shift,y_shift,z_shift])
+    row3 = HBox([theta_yz,theta_xz,theta_xy])
+    row4 = HBox([scale,alpha])
+    ui = VBox([row1,row2,row3,row4])
+
+    out = interactive_output(inner, control_dict)
+    display(ui,out)
+
+

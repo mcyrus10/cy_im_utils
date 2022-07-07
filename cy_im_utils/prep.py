@@ -12,7 +12,7 @@ from cupyx.scipy.ndimage import median_filter as median_filter_gpu
 from cupyx.scipy import ndimage as gpu_ndimage
 from scipy.ndimage import median_filter,gaussian_filter
 from tqdm import tqdm
-from numba import njit,cuda
+from numba import njit,cuda,prange
 import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -332,7 +332,7 @@ def GPU_rotate_inplace( volume: np.array ,
                                                             )
     del volume_gpu
 
-@njit
+@njit(parallel = True)
 def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
     """
     This function is for making values outside the radius of a circle at the
@@ -354,8 +354,8 @@ def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
     nx,ny = arr.shape
     assert nx == ny, "This function only accepts square images"
     radius = nx//2
-    for i in range(nx):
-        for j in range(ny):
+    for i in prange(nx):
+        for j in prange(ny):
             r = ((i-nx//2)**2+(j-ny//2)**2)**(1./2.)
             if r > radius-radius_offset:
                 arr[i,j] = 0

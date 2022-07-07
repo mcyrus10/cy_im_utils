@@ -63,11 +63,13 @@ def peak_signal_noise_ratio_GPU(image_ref,
     assert image_ref.dtype == image_test.dtype == 'float32', "must use 32 bit float"
     if data_range is None:
         dmin, dmax = -1,1
-        true_min, true_max = cp.min(image_ref, axis = (1,2)), cp.max(image_ref, axis = (1,2))
+        true_min = cp.min(image_ref, axis = (1,2))
+        true_max = cp.max(image_ref, axis = (1,2))
+
         if (true_max > dmax).any() or (true_min < dmin).any():
             raise ValueError(
-              "reference image has intensity values outside the range expeted for "
-              "its data type. Please manually speify the data_range"
+              "reference image has intensity values outside the range expeted"
+              "for its data type. Please manually speify the data_range"
             )
         if (true_min >= 0).any():
             data_range = dmax

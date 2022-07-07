@@ -8,6 +8,7 @@ from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gp
 from numba import njit,cuda
 from tqdm import tqdm
 import astra
+import configparser
 import cupy as cp
 import logging
 import matplotlib.pyplot as plt
@@ -16,20 +17,144 @@ import os
 import pathlib
 import shutil
 
+class tomo_config_handler:
+    """
+    This is intended to be able to read/write the config file so that you don't
+    have to copy/paste any text but just use the interactive functions to
+    update the configuration
+
+    This class expects that the name of the dataset, the paths to the
+    projections dark and flat are declared and the pre-processing options are
+    filled in
+    """
+    def __init__(self, config_file: str):
+        self.config_file = config_file
+        self.config = configparser.ConfigParser()
+        self.config.read(config_file)
+        self.write_data_dict()
+    
+    def write_data_dict(self) -> None:
+        """
+        Unpacking config into a single dictionary
+        """
+        self.data_dict = {}
+        for key,val in self.config.items():
+            self.data_dict[key] = {}
+            for sub_key,sub_val in val.items():
+                # Numeric Parsing
+                if sub_val.replace(".","1").lstrip("-").isnumeric():
+                    sub_val = self.float_int(sub_val)
+                # Boolean Parsing
+                elif sub_val in ['True','False']:
+                    sub_val = self.config.getboolean(key,sub_key)
+                # Potentially empty fields
+                elif sub_val == 'None':
+                    sub_val = None
+                # Path Parsing
+                elif 'paths' in key:
+                    sub_val = pathlib.Path(sub_val)
+                self.data_dict[key][sub_key] = sub_val
+
+    def float_int(self, value: str):
+        """
+        Hack for returning float or integer numbers
+        """
+        try:
+            out = int(value)
+        except ValueError as ve:
+            out = float(value)
+        return out
+
+    def write(self) -> None:
+        """
+        Wrapper for re-writing the config file after it's updated
+        """
+        with open(self.config_file,'w') as config_file:
+            self.config.write(config_file)
+
+    def conditional_add_field(self, field: str) -> None:
+        """
+        Wrapper for adding fields if they do not exist, if they do then this
+        will do nothing
+
+        Args:
+        -----
+            field: str
+                name of field to test / add
+        """
+        if field not in self.config.sections():
+            self.config.add_section(field)
+
+    def log_field(self,field) -> None:
+        """
+        wrapper for 
+        """
+        logging.info(f"Updating {field} parameters ")
+        for key,val in self.config[field].items():
+            logging.info(f"\t {key} : {val}")
+
+    def update_COR(self) -> None:
+        """
+        This method updates the config after the center of rotation has been
+        applied so it modifies COR, crop, norm and theta of the config
+
+        """
+        # COR and theta
+        field = "COR"
+        self.conditional_add_field(field)
+        self.config[field]['y0'] = str(self.data_dict['COR']['y0'])
+        self.config[field]['y1'] = str(self.data_dict['COR']['y1'])
+        self.config[field]['theta'] = str(self.data_dict['COR']['theta'])
+
+        self.log_field("COR")
+
+        # Crop and Norm
+        for field in ['crop','norm']:
+            self.conditional_add_field(field)
+            for sub_key in ['x0','x1','y0','y1','dx','dy']:
+                sub_val = str(self.data_dict[field][sub_key])
+                self.config[field][sub_key] = sub_val
+
+        self.log_field("crop")
+        self.log_field("norm")
+
+        self.write()
+
+    def update_SARE(self) -> None:
+        """
+        This method updates the SARE parameters
+        """
+        self.conditional_add_field("SARE")
+        self.config["SARE"]['snr'] = str(self.data_dict['SARE']['snr'])
+        self.config["SARE"]['la_size'] = str(self.data_dict['SARE']['la_size'])
+        self.config["SARE"]['sm_size'] = str(self.data_dict['SARE']['sm_size'])
+
+        self.log_field("SARE")
+        self.write()
+
 class tomo_dataset:
     """
     This is the big boy: it holds the projections and can facilitate the recon
     operations
     """
     def __init__(   self, 
-                    data_dict: dict, 
+                    #data_dict: dict, 
+                    config_file: str, 
                     ) -> None:
         logging.info("-"*80)
         logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
         logging.info("-"*80)
         self.previous_settings = {}
-        self.settings = data_dict
-        self.update_members()
+        self.config = tomo_config_handler(config_file)
+        self.settings = self.config.data_dict
+        logging.info(f"{'='*20} SETTINGS: {'='*20}")
+        for key,val in self.settings['pre_processing'].items():
+            setattr(self,key,val)
+        for key,val in self.settings.items():
+            logging.info(f"{key}:")
+            for sub_key,sub_val in val.items():
+                logging.info(f"\t{sub_key} : {sub_val}")
+        logging.info(f"{'='*20} End SETTINGS {'='*20}")
 
     #---------------------------------------------------------------------------
     #                       UTILS
@@ -43,32 +168,6 @@ class tomo_dataset:
                                                     " projections are Axis 1")
         self.attenuation = np.transpose(self.attenuation,(1,0,2))
 
-    def update_members(self, dump_file : str = ".settings_dump.txt") -> None:
-        """
-        This updates all the members of tomo_dataset so when the dictionary
-        changes everything will be updated
-
-        args:
-        -----
-            dump_file : str
-                file name for dumping the text values
-        """
-        with open(dump_file, 'w') as f:
-            for key,val in self.settings.items():
-                key_ = key.replace(" ","_")
-                f.write(f"{key_} : {val}\n")
-                setattr(self,key_,val)
-                # This Conditional Branch Checks if values have been updated
-                # and prints them to logging
-                if key in self.previous_settings:
-                    if val != self.previous_settings[key]:
-                        logging.info(f"UPDATED: - {key_} : {val}")
-                    else:
-                        continue
-                else:
-                    logging.info(f"UPDATED NEW ITEM : - {key_} : {val}")
-
-        self.previous_settings = self.settings.copy()
     def update_patch(self) -> None:
         """
         """
@@ -145,6 +244,17 @@ class tomo_dataset:
         for f in tqdm_zeroing:
             radial_zero(self.reconstruction[f], radius_offset = radius_offset)
 
+    def return_imread_fcn(self, extension: str):
+        """
+        Ultra obnoxiousness
+        """
+        if 'fit' in  extension:
+            return imread_fit
+        elif 'tif' in extension or 'tiff' in extension:
+            return lambda x: np.asarray(Image.open(x))
+        else:
+            assert False, "unknown image extension for imread"
+
     #---------------------------------------------------------------------------
     #                       PRE PROCESSING
     #---------------------------------------------------------------------------
@@ -161,44 +271,70 @@ class tomo_dataset:
             tomo_recon.load_field("flat")
             tomo_recon.load_field("dark")
         """
-        field_path = self.settings[f'{mode} path']
-        logging.info(f"Reading {mode} field from {field_path}")
-        files = list(field_path.glob(f"*.{self.extension}"))
-        logging.info(f"\tnum files = {len(files)}")
-        logging.info("\tshape files = "
-                          f"{np.array(self.imread_function(files[0])).shape}")
-        nx,ny = np.asarray(self.imread_function(files[0])).shape
-        field = field_gpu(files, self.median_spatial)
+        field_path = self.settings['paths'][f'{mode}_path']
+
+        # This conditional is for the case of no field existing
+        if field_path is None:
+            logging.info(f"{mode} field is None -> returning 2D array of zeros")
+            proj_path = self.settings['paths'][f'projection_path']
+            ext_projections = self.settings['pre_processing']['extension']
+            proj_files = list(proj_path.glob(f"*{ext_projections}*"))
+            imread_fcn = self.return_imread_fcn(ext_projections)
+            proj_image = imread_fcn(proj_files[0])
+            field = np.zeros_like(proj_image, dtype = np.float32)
+
+        # Field does exist
+        else:
+
+            keys = list(self.settings['pre_processing'].keys())
+
+            # find the right image reading function
+            if f'extension_{mode}' in keys:
+                ext = self.settings['pre_processing'][f'extension_{mode}']
+            else:
+                ext = self.settings['pre_processing']['extension']
+            imread_fcn = self.return_imread_fcn(ext)
+
+
+            logging.info(f"Reading {mode} field from {field_path}")
+            files = list(field_path.glob(f"*{ext}*"))
+            logging.info(f"\tnum files = {len(files)}")
+            logging.info("\tshape files = "
+                              f"{np.array(imread_fcn(files[0])).shape}")
+            nx,ny = np.asarray(imread_fcn(files[0])).shape
+            field = field_gpu(files, self.median_spatial)
+
         if self.transpose:
             field = field.T
         setattr(self,mode,field)
 
-    def load_projections(   self,
-                            mode : str = 'read',
-                            truncate_dataset : int = 1
-                            ) -> np.array:
-        """
+    ## Commented this function out on June 18,2022, pretty sure its deprecated
+    #def load_projections(   self,
+    #                        mode : str = 'read',
+    #                        truncate_dataset : int = 1
+    #                        ) -> np.array:
+    #    """
 
-        """
-        logging.warning("This function is deprecated. Use "
-                                                    "load_projection_to_attn ")
-        if 'serialized' in mode:
-            logging.info(f"Reading Serialized Dataset ({self.serialized_path})")
-            self.projections = np.load(self.serialized_path)[::truncate_dataset]
-        elif 'read' in mode:
-            logging.info(f"Reading Images From {self.projection_path}")
-            files = list(self.projection_path.glob("*.tif"))[::truncate_dataset]
-            nx,ny = np.asarray(self.imread_function(files[0])).shape
-            tqdm_imread = enumerate(tqdm(files, desc = "reading images"))
-            self.projections = np.zeros([len(files),nx,ny], dtype = self.dtype)
-            for i,f in tqdm_imread:
-                self.projections[i] = np.asarray(
-                                                self.imread_function(f),
-                                                dtype = self.dtype
-                                                )
-            if self.transpose:
-                logging.info("Transposing images")
-                self.projections = np.transpose(self.projections,(0,2,1))
+    #    """
+    #    logging.warning("This function is deprecated. Use "
+    #                                                "load_projection_to_attn ")
+    #    if 'serialized' in mode:
+    #        logging.info(f"Reading Serialized Dataset ({self.serialized_path})")
+    #        self.projections = np.load(self.serialized_path)[::truncate_dataset]
+    #    elif 'read' in mode:
+    #        logging.info(f"Reading Images From {self.projection_path}")
+    #        files = list(self.projection_path.glob("*.tif"))[::truncate_dataset]
+    #        nx,ny = np.asarray(self.imread_function(files[0])).shape
+    #        tqdm_imread = enumerate(tqdm(files, desc = "reading images"))
+    #        self.projections = np.zeros([len(files),nx,ny], dtype = self.dtype)
+    #        for i,f in tqdm_imread:
+    #            self.projections[i] = np.asarray(
+    #                                            self.imread_function(f),
+    #                                            dtype = self.dtype
+    #                                            )
+    #        if self.transpose:
+    #            logging.info("Transposing images")
+    #            self.projections = np.transpose(self.projections,(0,2,1))
 
     def load_projections_to_attn(self,
                                 truncate_dataset : int = 1,
@@ -231,18 +367,25 @@ class tomo_dataset:
             None (operates in-place)
 
         """
-        logging.info(f"Reading Images From {self.projection_path}")
+        proj_path = self.settings['paths']['projection_path']
+        logging.info(f"Reading Images From {proj_path}")
+        ext = self.settings['pre_processing']['extension']
+        imread_fcn = self.return_imread_fcn(ext)
         files = list(
-                        self.projection_path.glob(f"*.{self.extension}")
+                        proj_path.glob(f"*{ext}*")
                     )[::truncate_dataset]
-        nx,ny = np.asarray(self.imread_function(files[0])).shape
+        nx,ny = np.asarray(imread_fcn(files[0])).shape
 
-        crop_patch = self.settings['crop patch']
-        norm_patch = self.settings['norm patch']
+        #crop_patch = self.settings['crop patch']
+        #norm_patch = self.settings['norm patch']
+        # new way 
+        crop_patch = [self.settings['crop'][k] for k in ['x0','x1','y0','y1']]
+        norm_patch = [self.settings['norm'][k] for k in ['x0','x1','y0','y1']]
         self.crop_x = slice(crop_patch[0],crop_patch[1])
         self.crop_y = slice(crop_patch[2],crop_patch[3])
         self.norm_x = slice(norm_patch[0],norm_patch[1])
         self.norm_y = slice(norm_patch[2],norm_patch[3])
+        theta = self.settings['COR']['theta']
 
         attn_ny = crop_patch[1]-crop_patch[0]
         attn_nx = crop_patch[3]-crop_patch[2]
@@ -254,10 +397,10 @@ class tomo_dataset:
         logging.info(f"crop_y = {self.crop_y}")
         logging.info(f"crop_x = {self.crop_x}")
 
-        load_im = lambda f :  cp.asarray(self.imread_function(f),
+        load_im = lambda f :  cp.asarray(imread_fcn(f),
                                                         dtype = self.dtype)
         if self.transpose:
-            load_im = lambda f :  cp.asarray(self.imread_function(f),
+            load_im = lambda f :  cp.asarray(imread_fcn(f),
                                                         dtype = self.dtype).T
 
         flat_ = self.flat-self.dark
@@ -272,7 +415,7 @@ class tomo_dataset:
             im *= flat_scale/scale
             im = median_gpu(im,(self.median_spatial, self.median_spatial))
             im = im[self.crop_y,self.crop_x]
-            im = rotate_gpu(im, -self.theta, reshape = False)
+            im = rotate_gpu(im, -theta, reshape = False)
             im = -cp.log(im)
             im[~cp.isfinite(im)] = 0
             self.attenuation[i] = cp.asnumpy(im)
@@ -321,7 +464,11 @@ class tomo_dataset:
         fig.tight_layout()
         fig.suptitle("Astra Expected - (Attenuation Array)")
 
-    def COR_interact(self, d_theta : int = 60, angles : list = []) -> None:
+    def COR_interact(self,
+                    d_theta : int = 60,
+                    angles : list = [],
+                    apply_thresh: float = None
+                    ) -> None:
         """
         Wrapper for COR_interact in visualization
 
@@ -330,10 +477,17 @@ class tomo_dataset:
         """
         if self.is_jupyter():
             logging.info("COR Interact Started")
+            ext = self.settings['pre_processing']['extension']
+            imread_fcn = self.return_imread_fcn(ext)
             assert 360 % d_theta== 0, "all angles must be factors of 360"
             if not angles:
                 angles = [j*d_theta for j in range(360//d_theta)]
-            COR_interact(self.settings, self.flat, self.dark, angles)
+            COR_interact(   self.settings,
+                            imread_fcn,
+                            self.flat,
+                            self.dark,
+                            angles,
+                            apply_thresh = apply_thresh)
         else:
             logging.warning("Interact needs to be executed in a Notebook" 
                             "Environment - This method is not being executed")
@@ -459,9 +613,9 @@ class tomo_dataset:
         logging.debug(f"indices for slice = {id0},{id1}")
         vol_gpu = cp.asarray(self.attenuation[:,slice_,:], dtype = self.dtype)
         vol_gpu = remove_all_stripe_GPU(vol_gpu,
-                                        self.signal_to_noise_ratio,
-                                        self.large_filter,
-                                        self.small_filter)
+                                        self.settings['SARE']['snr'],
+                                        self.settings['SARE']['la_size'],
+                                        self.settings['SARE']['sm_size'])
         self.attenuation[:,slice_,:] = cp.asnumpy(vol_gpu)
 
     def remove_all_stripe(self, batch_size: int = 10) -> None:
@@ -469,6 +623,7 @@ class tomo_dataset:
         operates in-place
 
         """
+        logging.info("REMOVING STRIPE ARTIFACTS")
         _,n_sino,_ = self.attenuation.shape
         self.gpu_curry_loop(self.remove_all_stripe_ops,
                             n_sino,
@@ -494,7 +649,7 @@ class tomo_dataset:
         """
         self.reconstruction = ASTRA_General(
                                             self.attenuation[:,::ds_interval,:],
-                                            self.settings,
+                                            self.settings['recon'],
                                             iterations = iterations,
                                             seed = seed
                                             )
