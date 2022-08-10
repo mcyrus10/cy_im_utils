@@ -1,5 +1,6 @@
 """
 
+the hits
 
 """
 from cupyx.scipy.ndimage import median_filter as median_gpu
@@ -7,13 +8,13 @@ from glob import glob
 from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual
 from matplotlib.gridspec import GridSpec
 from matplotlib.transforms import Affine2D
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 from skimage.transform import warp
 from scipy.ndimage import rotate as rotate_cpu, median_filter
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import logging
 import numpy as np
-
 from .sarepy_cuda import remove_all_stripe_GPU
 from .prep import *
 from .recon_utils import *
@@ -562,8 +563,8 @@ def SAREPY_interact(data_dict : dict,
         except:
             print("SVD did not converge")
         data_dict['SARE']['snr'] = snr
-        data_dict['SARE']['la_filter'] = la_size
-        data_dict['SARE']['sm_filter'] = sm_size
+        data_dict['SARE']['la_size'] = la_size
+        data_dict['SARE']['sm_size'] = sm_size
         
     frame = IntSlider(
                         description = "row",
@@ -717,6 +718,101 @@ def median_interact(data_dict : dict,
     row1 = HBox([frame,row])
     row2 = HBox([median_z,median_x,median_y])
     ui = VBox([row1,row2])
+
+    #ui = HBox([frame,median_z,median_x,median_y,row])
+    out = interactive_output(inner, control_dict)
+    display(ui,out)
+
+def TV_interact(    data_dict : dict,
+                    input_array : np.array,
+                    figsize : tuple  = (8,8),
+                    max_iter: int = 100,
+                    max_ng: int = 100,
+                    ) -> None: 
+    """
+    Interactive inspection of TV-median with sliders to control the
+    arguments. It overwrites the values in data_dict so they can be unpacked
+    and used for the Vo filter batch.
+
+    Parameters:
+    -----------
+    input_array: 3d numpy array
+        Reconstructed Volume
+            axis 0 : z-axis,
+            axis 1 : x-axis,
+            axis 2 : y-axis
+
+    figsize: tuple
+        
+    max_median: float
+        maximum value for median slider to take
+
+    """
+    fig,ax = plt.subplots(1,2)
+
+    fig.tight_layout()
+    nz,nx,ny = input_array.shape
+    def inner(frame,num_iter,ng,alpha):
+        plt.cla()
+        [a.clear() for a in ax]
+        temp = input_array[frame].copy()
+        filtered,_ = TV_POCS(
+                            input_array[frame].copy(),
+                            alpha = alpha,
+                            ng = ng,
+                            num_iter = num_iter,
+                            )
+        
+        l,h = contrast(temp)
+        ax[0].imshow(temp, vmin = l, vmax = h)
+        ax[1].imshow(filtered, vmin = l, vmax = h)
+
+        data_dict['ng'] = ng
+        data_dict['num_iter'] = num_iter
+        data_dict['alpha'] = alpha
+      
+    frame = IntSlider(
+                        description = "frame",
+                        continuous_update = False,
+                        min = 0,
+                        max = nz-1
+                        )
+
+    num_iter = IntSlider(
+                        description = "num_iter",
+                        continuous_update = False,
+                        min = 1,
+                        max = max_iter,
+                        step = 1
+                        )
+
+    ng = IntSlider(
+                        description = "ng",
+                        continuous_update = False,
+                        min = 1,
+                        max = max_ng,
+                        step = 1
+                        )
+
+    alpha = FloatSlider(
+                        description = "alpha",
+                        continuous_update = False,
+                        min = 0,
+                        max = 1,
+                        step = 0.01
+                        )
+
+
+    
+    control_dict = {
+                    'frame':frame,
+                    'num_iter':num_iter,
+                    'ng':ng,
+                    'alpha':alpha,
+                   }
+    
+    row1 = HBox([frame,num_iter,ng,alpha])
+    ui = VBox([row1])
 
     #ui = HBox([frame,median_z,median_x,median_y,row])
     out = interactive_output(inner, control_dict)
@@ -959,4 +1055,104 @@ def volume_register_interact(static : np.array,
     out = interactive_output(inner, control_dict)
     display(ui,out)
 
+def add_scalebar(ax,
+                 pixel_to_length: float,
+                 label_factor: int = 1,
+                 label:str = None,
+                 unit:str = 'mm',
+                 loc: str = 'lower left',
+                 color:str = 'black',
+                 pad: float = 0.2,
+                 frameon: bool = True,
+                 size_vertical:float = 1
+                ) -> None:
+    """
+    This is just a basic wrapper for the scalebar so you don't have to put all
+    the arguments in and add it to the axis with another call
 
+    Args:
+    -----
+        ax - Axis for adding scalebar
+        pixel_to_length - conversion factor pixels per unit length
+        label_factor - int for scaling the scalebar (e.g. 2 mm instead of 1 mm)
+        label - hard code the label bypasses any logic to construct the label
+        unit - units for label if label is not hard coded
+        loc - location of scalebar
+        color 
+        pad - padding around label
+        frameon - draws box around label
+        size_vertical
+        
+    """
+    if label is None:
+        label = f'{label_factor} {unit}'
+    scalebar = AnchoredSizeBar(ax.transData,
+                               size = pixel_to_length*label_factor,
+                               label = label,
+                               loc = loc,
+                               pad = pad,
+                               color = color,
+                               frameon = frameon,
+                               size_vertical = size_vertical
+                               )
+    ax.add_artist(scalebar)
+
+def fetch_coords(   fig_: plt.figure,
+                    ax_: plt.axis,
+                    offset_x: float = 0.24,
+                    offset_y: float = 0.012
+                    ) -> tuple:
+    """
+    For evenly distributing text over subplots, this function returns the x and
+    y coordinates for each axis in a figure to position the text at the same
+    relative location. 
+
+    Note: If you modify the layout (e.g., fig.tight_layout(),
+    fig.subplots_adjust...) after finding these coordinates, they will be
+    offset, so any calls of that type should happen prior to calling
+    fetch_coords
+
+    Args:
+    -----
+        fig_ : matplotlib figure handle (defines global coordinates)
+        ax_ : matplotlib axis handle (defines local coordinates)
+        offset_x : float (0-1) distance to offset in x-direction (from right)
+        offset_y : float (0-1) distance to offset in y-direction (from top)
+
+    Returns:
+    --------
+        tuple of x_coordinate and y_coordinate (0 and 1)
+    """
+    total_width = fig_.get_window_extent().x1
+    total_height = fig_.get_window_extent().y1
+    right = ax_.get_window_extent().x1
+    top = ax_.get_window_extent().y1
+    x_coord = right / total_width - offset_x
+    y_coord = top / total_height - offset_y
+    return x_coord,y_coord
+
+def plot_crop_template( ax: plt.axis,
+                        crop_size: int,
+                        nx: int,
+                        ny: int,
+                        color:str = 'w'
+                        ) -> None:
+    """
+    This function will plot an even cropping template over a figure to see how
+    large the cropped field is
+
+    Args:
+    -----
+        ax: axis handle for the plot
+        crop_size: int 
+        nx: int - number of pixels in x-direction
+        ny: int - number of pixels in y-direction
+        color: str - color of lines
+        
+    """
+    for i in range(nx//crop_size+1):
+        x_coord = crop_size*i
+        ax.plot([x_coord,x_coord],[0,ny-1], color = color)
+    for i in range(ny//crop_size+1):
+        y_coord = crop_size*i
+        ax.plot([0,nx-1],[y_coord,y_coord], color = color)

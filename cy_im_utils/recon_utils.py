@@ -241,7 +241,7 @@ def astra_back_projec_local_function(   sinogram : np.array,
     cfg = astra.astra_dict(algorithm)
     cfg['ReconstructionDataId'] = reconstruction_id
     cfg['ProjectionDataId'] = sino_id
-    cfg['option'] = {'FilterType':'ram-lak'}
+    #cfg['option'] = {'FilterType':'ram-lak'}
     alg_id = astra.algorithm.create(cfg)
     astra.algorithm.run(alg_id, iterations = iterations)
     reconstruction = astra.data2d.get(reconstruction_id)
@@ -295,7 +295,7 @@ def TV_POCS(sinogram: np.array,
             pixel_size: float = 0.0087,
             debug: bool = False
             ) -> np.array:
-    logging.warning("Remove debugging conditionals for better performance")
+    #logging.warning("Remove debugging conditionals for better performance")
     g = sinogram.copy()
     g0 = sinogram.copy()
     n_proj,detector_width = g.shape
@@ -313,8 +313,8 @@ def TV_POCS(sinogram: np.array,
         print("starting sino sum = ",np.sum(g))
         print("g0 sum = ",np.sum(g0))
         
-    #for j in range(num_iter):
-    for j in tqdm(range(num_iter)):
+    for j in range(num_iter):
+    #for j in tqdm(range(num_iter)):
         if debug: print(f"iteration {j} -----------------------------")
         f0 = f.copy()
         f += beta*astra_back_projec_local_function(g0-g, algorithm = algorithm, 
