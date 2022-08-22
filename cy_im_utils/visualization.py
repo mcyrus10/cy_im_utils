@@ -264,18 +264,11 @@ def COR_interact(   data_dict : dict,
         dictionary with projection path , read_fcn, etc. this gets its
         crop_patch and norm_patch overwritten
 
-    ff : np.array
-        flat field
-
-    df : np.array
-        dark field
-
-    angles: list
-        Which angles to show projections (this can be important if the object
-        is not cylindrical)
-
-    figsize: tuple of ints
-        figure size
+    ff : np.array - flat field
+    df : np.array - dark field
+    angles: list - Which angles to show projections (this can be important if
+                    the object is not cylindrical)
+    figsize: tuple of ints - figure size
 
     apply_thresh: float
         this will apply a threshold to the combined image (sum of attenuation)
@@ -287,7 +280,7 @@ def COR_interact(   data_dict : dict,
 
     proj_path = data_dict['paths']['projection_path']
     ext = data_dict['pre_processing']['extension']
-    proj_files = list(proj_path.glob(f"*.{ext}"))
+    proj_files = list(proj_path.glob(f"*{ext}"))
 
     Transpose = data_dict['pre_processing']['transpose']
 
@@ -728,6 +721,8 @@ def TV_interact(    data_dict : dict,
                     figsize : tuple  = (8,8),
                     max_iter: int = 100,
                     max_ng: int = 100,
+                    enforce_positivity: bool = False,
+                    seed: np.array = None
                     ) -> None: 
     """
     Interactive inspection of TV-median with sliders to control the
@@ -748,7 +743,7 @@ def TV_interact(    data_dict : dict,
         maximum value for median slider to take
 
     """
-    fig,ax = plt.subplots(1,2)
+    fig,ax = plt.subplots(1,2, figsize = figsize)
 
     fig.tight_layout()
     nz,nx,ny = input_array.shape
@@ -761,11 +756,14 @@ def TV_interact(    data_dict : dict,
                             alpha = alpha,
                             ng = ng,
                             num_iter = num_iter,
+                            seed = seed[frame],
+                            enforce_positivity = enforce_positivity
                             )
         
-        l,h = contrast(temp)
-        ax[0].imshow(temp, vmin = l, vmax = h)
-        ax[1].imshow(filtered, vmin = l, vmax = h)
+        l_sino,h_sino = contrast(temp)
+        ax[0].imshow(temp, vmin = l_sino, vmax = h_sino)
+        l_recon,h_recon = contrast(filtered)
+        ax[1].imshow(filtered, vmin = l_recon, vmax = h_recon)
 
         data_dict['ng'] = ng
         data_dict['num_iter'] = num_iter
@@ -1135,7 +1133,8 @@ def plot_crop_template( ax: plt.axis,
                         crop_size: int,
                         nx: int,
                         ny: int,
-                        color:str = 'w'
+                        color:str = 'w',
+                        lw: float = 0.5
                         ) -> None:
     """
     This function will plot an even cropping template over a figure to see how
@@ -1148,11 +1147,38 @@ def plot_crop_template( ax: plt.axis,
         nx: int - number of pixels in x-direction
         ny: int - number of pixels in y-direction
         color: str - color of lines
+        lw: float - line width
         
     """
     for i in range(nx//crop_size+1):
         x_coord = crop_size*i
-        ax.plot([x_coord,x_coord],[0,ny-1], color = color)
+        ax.plot([x_coord,x_coord],[0,ny-1], color = color, linewidth = lw)
     for i in range(ny//crop_size+1):
         y_coord = crop_size*i
-        ax.plot([0,nx-1],[y_coord,y_coord], color = color)
+        ax.plot([0,nx-1],[y_coord,y_coord], color = color, linewidth = lw)
+
+def stack_diff_image(im_1: np.array, im_2: np.array) -> np.array:
+    """
+    This function returns a 3 channel image with image 2 as the green and blue
+    channels and im_1 as the red channel. This is for viewing registered images
+    (if they are registered then it looks black and white, un-registered has
+    red green blue)
+
+    Note: this returns an 8 bit image so it converts the range to a 255 scale
+    and then to float on a range [0,255]
+
+    Args:
+    -----
+        im_1: np.array 2d array 
+        im_2: np.array 2d array 
+
+    Returns:
+    --------
+        im_temp: np.array 3d (3 channel image) 8 bit
+
+    """
+    im_temp = np.dstack([im_1,im_2,im_2])
+    im_temp -= np.min(im_temp)
+    max_ = max([im_1.max(), im_2.max()])
+    im_temp = (im_temp * 255)/ max_
+    return im_temp.astype(np.uint8)

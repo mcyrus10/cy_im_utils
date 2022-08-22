@@ -415,9 +415,12 @@ class tomo_dataset:
             im *= flat_scale/scale
             im = median_gpu(im,(self.median_spatial, self.median_spatial))
             im = im[self.crop_y,self.crop_x]
+            # Rotate will produce all zeros if it has non-finites
+            im[~cp.isfinite(im)] = 0
             im = rotate_gpu(im, -theta, reshape = False)
             im = -cp.log(im)
             im[~cp.isfinite(im)] = 0
+
             self.attenuation[i] = cp.asnumpy(im)
 
 
@@ -633,6 +636,7 @@ class tomo_dataset:
     def reconstruct(self, 
                     ds_interval: int = 1,
                     iterations: int = 1,
+                    angles: np.array = None,
                     seed = 0
                     ) -> None:
         """
@@ -640,17 +644,17 @@ class tomo_dataset:
 
         Args:
         ----
-            ds_interval: int
-                downsampling interval default is 1 -> no Downsampling
-            iterations: int
-                only for iterative methods
-            seed: scalar or np.array
-                this is the seed for iterative methods                
+            ds_interval: int - downsampling interval default is 1 -> no
+                            Downsampling
+            iterations: int - only for iterative methods
+            angles: np.array (optional) - if non-linear
+            seed: scalar or np.array - this is the seed for iterative methods                
         """
         self.reconstruction = ASTRA_General(
                                             self.attenuation[:,::ds_interval,:],
                                             self.settings['recon'],
                                             iterations = iterations,
+                                            angles = angles,
                                             seed = seed
                                             )
 

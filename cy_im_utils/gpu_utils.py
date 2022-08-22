@@ -216,7 +216,49 @@ def median_GPU_batch( input_arr: np.array,
                 temp_median[slice_z_inner,slice_x_inner,slice_y_inner].get()
     return output_arr
 
+def GPU_curry_reduce(   function,
+                        arr_ref,
+                        arr_test,
+                        batch_size: int = 50,
+                        kwargs:dict = {}
+                        ) -> np.array:
+    """
+    This is for ferrying batches to the GPU that produce a single output value
+    and are not executing a function that transforms the array. Note that this
+    is not completely generalizable and is made for PSNR and SSIM, maybe have
+    an argument that controls nargs of the function so you can have
+    refernce-free functions work as well. Also note that this only executes on
+    the 0th-axis
 
+    Args:
+    -----
+        function: the gpu function to execute on the batches - note this should
+                    output cupy arrays
+        arr_ref: reference array (e.g., for PSNR the ground truth)
+        arr_test: testing array
+        batch_size: int - size of batches going up to GPU
+        kwargs: dict - these keyword arguments get passed to the input function
+
+    Returns:
+    --------
+        out: np.array - reduced values (1D array of size 0th axis of input
+                arrs)
+
+    """
+    nz,nx,ny = arr_test.shape
+    remainder = nz % batch_size
+    out = np.zeros([nz])
+    for i in tqdm(range(nz//batch_size)):
+        slice_ = slice(i*batch_size,(i+1)*batch_size)
+        out[slice_] = function( cp.array(arr_ref[slice_]),
+                                cp.array(arr_test[slice_]),
+                                **kwargs).get()
+    if remainder > 0:
+        slice_ = slice(nz-remainder,nz)
+        out[slice_] = function(cp.array(arr_ref[slice_]),
+                                cp.array(arr_test[slice_]),
+                                **kwargs).get()
+    return out
 
 def test(N : int = 1000) -> None:
     arr = np.ones(N**3).reshape(N,N,N)

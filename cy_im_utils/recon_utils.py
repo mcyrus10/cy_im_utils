@@ -9,40 +9,50 @@ from .prep import radial_zero
 def astra_2d_simple(sinogram : np.array,
                     algorithm : str = 'FBP_CUDA',
                     pixel_size : float = 0.0087,
-                    angles = None
+                    angles = None,
+                    geometry: str = 'parallel',
+                    seed: np.array = 0,
+                    iterations: int = 1,
+                    filters: dict = {'FilterType':'ram-lak'}
                     ) -> np.array:
     """
     basic for the AAA_bottom dataset with 0.0087 pixel size 
 
     Args:
     -----
-        sinogram: np.array
-            input sinogram to back project (rows are projections, columns are
-            detector width)
-        algorithm: str
-            not sure if this will work any other way than 'FBP_CUDA'
+        sinogram: np.array - input sinogram to back project (rows are
+                             projections, columns are detector width)
+        algorithm: str - not sure if this will work any other way than
+                         'FBP_CUDA'
         pixel_size: float
-        angles: np.array (optional)
-            angles of the projections
+        angles: np.array (optional) - angles of the projections
+        geometry: str parallel or fanflat?
+        seed: seed for iterative recon methods...
+        iterations: number of iterations for iterative methods
 
     Returns:
     --------
         reconstructed image
     """
+    assert geometry == 'parallel', "only parallel beam is implemented right now"
     n_projections,detector_width = sinogram.shape
     vol_geom = astra.create_vol_geom(detector_width,detector_width)
     if angles is None:
         angles = np.linspace(0,2*np.pi,n_projections, endpoint = False)
-    proj_geom = astra.create_proj_geom('parallel',1.0, detector_width,angles)
+    proj_geom = astra.create_proj_geom(geometry,1.0, detector_width,angles)
     sino_id = astra.data2d.create('-sino', proj_geom, sinogram)
-    reconstruction_id = astra.data2d.create('-vol',vol_geom)
+    reconstruction_id = astra.data2d.create('-vol',
+                                            vol_geom,
+                                            data = seed)
     algorithm = algorithm
     cfg = astra.astra_dict(algorithm)
     cfg['ReconstructionDataId'] = reconstruction_id
     cfg['ProjectionDataId'] = sino_id
-    cfg['option'] = {'FilterType':'ram-lak'}
+    cfg['option'] = filters
     alg_id = astra.algorithm.create(cfg)
-    astra.algorithm.run(alg_id)
+    # -----------------------------------------------------
+    astra.algorithm.run(alg_id, iterations = iterations)
+    # -----------------------------------------------------
     reconstruction = astra.data2d.get(reconstruction_id)
     reconstruction /= pixel_size
     astra.data2d.delete([sino_id,reconstruction_id])
@@ -114,12 +124,17 @@ def ASTRA_FDK_batch( attn,
 def ASTRA_General(  attn: np.array, 
                     data_dict: dict,
                     iterations: int = 1,
+                    angles: np.array = None,
                     seed = 0,
                     ) -> np.array:
     """
     Hopefully this is sufficiently generic to handle arbitrariness...
     
     """
+    known_algos = ['FDK_CUDA','SIRT3D_CUDA','CGLS3D_CUDA','FP3D_CUDA','FP3D_CUDA']
+    warning = "unknown ASTRA 3D algorithm"
+    assert data_dict['recon algorithm'] in known_algos, warning
+
     detector_rows,n_projections,detector_cols = attn.shape
     distance_source_origin = data_dict['source to origin distance']
     distance_origin_detector = data_dict['origin to detector distance']
@@ -127,7 +142,8 @@ def ASTRA_General(  attn: np.array,
                           * data_dict['reproduction ratio']
     algorithm = data_dict['recon algorithm']
     geometry = data_dict['recon geometry']
-    angles = np.linspace(0, 2 * np.pi, num = n_projections, endpoint=False)
+    if angles is None:
+        angles = np.linspace(0, 2 * np.pi, num = n_projections, endpoint = False)
     #  ---------    PARALLEL BEAM    --------------
     if geometry.lower() == 'parallel':
         logging.info("Using Parallel Beam Geometry")
@@ -293,7 +309,8 @@ def TV_POCS(sinogram: np.array,
             enforce_positivity: bool = True,
             iter_thresh: float = 0.005 ,
             pixel_size: float = 0.0087,
-            debug: bool = False
+            debug: bool = False,
+            seed: np.array = None
             ) -> np.array:
     #logging.warning("Remove debugging conditionals for better performance")
     g = sinogram.copy()
@@ -302,8 +319,17 @@ def TV_POCS(sinogram: np.array,
     f = np.zeros([detector_width,detector_width], dtype = np.float32)
     if debug: print(f"n_proj = {n_proj}")
     angles = np.linspace(0, 2*np.pi, n_proj, endpoint = False)
-    recon_ds = astra_back_projec_local_function(sinogram, algorithm = 'FBP_CUDA'
-                                        , angles = angles, pixel_size = 1)
+    if seed is not None:
+        recon_ds = astra_back_projec_local_function(sinogram,
+                                                    algorithm = algorithm,
+                                                    angles = angles,
+                                                    pixel_size = 1,
+                                                    seed = seed)
+    else:
+        recon_ds = astra_back_projec_local_function(sinogram,
+                                                    algorithm = 'FBP_CUDA',
+                                                    angles = angles,
+                                                    pixel_size = 1)
     f = recon_ds.copy()
     recon_downsampled = recon_ds.copy()
     radial_zero(recon_downsampled)
