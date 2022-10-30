@@ -176,6 +176,16 @@ def mean_squared_error_GPU(imstack_0, imstack_1):
     """
     return cp.mean((imstack_0-imstack_1)**2, axis = (1,2))
 
+def root_mean_squared_error_GPU_curry(reference):
+    """
+    Ultra basic
+    """
+    def inner(imstack_1):
+        return cp.mean((reference-imstack_1)**2, axis = (1,2))
+    return inner
+
+
+
 def iou_calculate(  im0: np.array,
                     im1: np.array,
                     classes: int = 3,

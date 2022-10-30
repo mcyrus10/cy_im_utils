@@ -8,11 +8,12 @@
 
 from PIL import Image
 from astropy.io import fits
-from cupyx.scipy.ndimage import median_filter as median_filter_gpu
 from cupyx.scipy import ndimage as gpu_ndimage
+from cupyx.scipy.ndimage import median_filter as median_filter_gpu
+from numba import njit,cuda,prange
+from pathlib import Path
 from scipy.ndimage import median_filter,gaussian_filter
 from tqdm import tqdm
-from numba import njit,cuda,prange
 import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,18 +21,19 @@ import logging
 from .gpu_utils import GPU_curry
 
 
-def imstack_read(files: list, dtype = np.float32) -> np.array: 
+def imstack_read(   files: list,
+                    dtype = np.float32,
+                    tqdm_read = True
+                    ) -> np.array: 
     """
     Boilerplate image stack reader: takes a list of file names and writes the
     images to a 3D array (image stack)
 
     Parameters
     ----------
-    files : list
-        list of filenames
-
-    dtype : numpy datatype
-        datatype for the array
+    files : list - list of filenames
+    dtype : numpy datatype - datatype for the array
+    tqdm_read : bool - use a tqdm wrapper on the reading
 
     Returns
     -------
@@ -40,7 +42,11 @@ def imstack_read(files: list, dtype = np.float32) -> np.array:
     n_images = len(files)
     h,w = np.asarray(Image.open(files[0]), dtype = dtype).shape
     im_stack = np.zeros([n_images,h,w], dtype = dtype)
-    for i,f in tqdm(enumerate(files)):
+    if tqdm_read:
+        iterator = tqdm(enumerate(files), desc = 'Reading image files')
+    else:
+        iterator = enumerate(files)
+    for i,f in iterator:
         im = np.asarray(Image.open(f), dtype = dtype)
         im_stack[i] = im
     return im_stack
@@ -162,6 +168,11 @@ def imread_fit(file_name,
         return im
     else:
         assert False,"Unknown Shape of image (should be 2D or 3D"
+
+def imread(im: Path, dtype = np.float32) -> np.array:
+    """ super basic wrapper for reading image to np.array
+    """
+    return np.asarray(Image.open(im), dtype = dtype)
     
 def get_y_vec(img: np.array, axis = 0) -> np.array:
     """
@@ -174,24 +185,18 @@ def get_y_vec(img: np.array, axis = 0) -> np.array:
     return np.round(np.sum(img * i, axis = axis) / np.sum(img, axis = axis), 1)
 
 def center_of_rotation( image: np.array ,
-                        coord_0 : int,
-                        coord_1 : int,
+                        coord_y0 : int,
+                        coord_y1 : int,
                         ax : plt.axis = [],
                         image_center : bool = True): 
     """
     Parameters
     ----------
-    image : 2D numpy array
-        (ATTENUATION IMAGE) Opposing (0-180 degree) images summed
-
-    coord_0 : int
-        Lower bounds (row-wise) for curve fitting
-
-    coord_1 : int
-        Upper bounds (row-wise) for curve fitting
-
-    ax: int
-        axis which y0 and y1 belong to
+    image : 2D numpy array - (ATTENUATION IMAGE) Opposing (0-180 degree) images
+                                summed
+    coord_y0 : int - Lower bounds (row-wise) for curve fitting
+    coord_y1 : int - Upper bounds (row-wise) for curve fitting
+    ax: int - axis which y0 and y1 belong to
 
     image_center: bool
         For visual inspection of the fit (shows where the center of the image
@@ -209,8 +214,8 @@ def center_of_rotation( image: np.array ,
     height,width = combined.shape       # rows, cols
     axis = 1
     COM = get_y_vec(combined,axis)
-    subset2 = COM[coord_0:coord_1]
-    y = np.arange(coord_0,coord_1)
+    subset2 = COM[coord_y0:coord_y1]
+    y = np.arange(coord_y0,coord_y1)
     com_fit = np.polyfit(y,subset2,1)
     # Plotting
     if ax:
@@ -218,13 +223,14 @@ def center_of_rotation( image: np.array ,
                                                         'k-',
                                                         linewidth = 1,
                                                         label = 'Curve Fit')
-        ax.plot([0,width],[coord_0,coord_0],'k--', linewidth = 0.5)
-        ax.plot([0,width],[coord_1,coord_1],'k--', linewidth = 0.5)
-        ax.annotate("",xy = (width//4,coord_0), xytext = (width//4,coord_1), 
+        ax.plot([width//6,5*width//6],[coord_y0,coord_y0],'k--', linewidth = 0.5)
+        ax.plot([width//6,5*width//6],[coord_y1,coord_y1],'k--', linewidth = 0.5)
+        ax.annotate("",xy = (width//4,coord_y0), xytext = (width//4,coord_y1), 
                                         arrowprops = dict(arrowstyle="<->"))
-        ax.text(width//10,(coord_1-coord_0)/2+coord_0,"fit\nROI", 
+        ax.text(width//10,(coord_y1-coord_y0)/2+coord_y0,"fit\nROI", 
                                         verticalalignment = 'center',
                                         color = 'w')
+
         ax.scatter(COM,range(height),color = 'r', s = 0.5, label = 'Center of mass')
         if image_center:
             ax.plot([width//2,width//2],[0,height-1],
@@ -359,3 +365,20 @@ def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
             r = ((i-nx//2)**2+(j-ny//2)**2)**(1./2.)
             if r > radius-radius_offset:
                 arr[i,j] = 0
+
+@njit
+def make_circular_2d_mask(   input_arr: np.array,
+                    radius: float,
+                    x_center: int,
+                    y_center: int
+                    ) -> None:
+    """
+    this is pretty useful
+    """
+    nx,ny = input_arr.shape
+    for i in prange(nx):
+        for j in prange(ny):
+            if ((i-x_center)**2 + (j-y_center)**2)**(0.5) < radius:
+                input_arr[i,j] = True
+
+

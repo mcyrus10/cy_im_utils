@@ -3,7 +3,10 @@ import numpy as np
 import pathlib
 from tqdm import tqdm
 import logging
-from .TV import TV_grad
+try:
+    from .TV import TV_grad
+except:
+    print("ERROR LOADING TV ")
 from .prep import radial_zero
 
 def astra_2d_simple(sinogram : np.array,
@@ -43,8 +46,8 @@ def astra_2d_simple(sinogram : np.array,
     sino_id = astra.data2d.create('-sino', proj_geom, sinogram)
     reconstruction_id = astra.data2d.create('-vol',
                                             vol_geom,
-                                            data = seed)
-    algorithm = algorithm
+                                            data = seed
+                                            )
     cfg = astra.astra_dict(algorithm)
     cfg['ReconstructionDataId'] = reconstruction_id
     cfg['ProjectionDataId'] = sino_id
@@ -125,6 +128,7 @@ def ASTRA_General(  attn: np.array,
                     data_dict: dict,
                     iterations: int = 1,
                     angles: np.array = None,
+                    cfg_options: dict = {'FilterType':'ram-lak'},
                     seed = 0,
                     ) -> np.array:
     """
@@ -136,8 +140,6 @@ def ASTRA_General(  attn: np.array,
     assert data_dict['recon algorithm'] in known_algos, warning
 
     detector_rows,n_projections,detector_cols = attn.shape
-    distance_source_origin = data_dict['source to origin distance']
-    distance_origin_detector = data_dict['origin to detector distance']
     detector_pixel_size = data_dict['camera pixel size'] \
                           * data_dict['reproduction ratio']
     algorithm = data_dict['recon algorithm']
@@ -158,6 +160,8 @@ def ASTRA_General(  attn: np.array,
     #  ---------    CONE BEAM    --------------
     elif geometry.lower() == 'cone':
         logging.info("Using Cone Beam Geometry")
+        distance_source_origin = data_dict['source to origin distance']
+        distance_origin_detector = data_dict['origin to detector distance']
         proj_geom = astra.create_proj_geom('cone',
                                             1,
                                             1,
@@ -178,12 +182,12 @@ def ASTRA_General(  attn: np.array,
     alg_cfg = astra.astra_dict(algorithm)
     alg_cfg['ProjectionDataId'] = projections_id
     alg_cfg['ReconstructionDataId'] = reconstruction_id
-    alg_cfg['option'] = {'FilterType': 'ram-lak'}
+    alg_cfg['option'] = cfg_options
     algorithm_id = astra.algorithm.create(alg_cfg)
     
-    #-------------------------------------------------
-    astra.algorithm.run(algorithm_id, iterations = iterations)  # This is slow
-    #-------------------------------------------------
+    #----------------------------------------------------------------------
+    astra.algorithm.run(algorithm_id, iterations = iterations)
+    #----------------------------------------------------------------------
 
     reconstruction = astra.data3d.get(reconstruction_id)
     reconstruction /= detector_pixel_size
@@ -217,10 +221,10 @@ def ASTRA_forward_project_2D(   recon_image : np.array,
     proj_geom = astra.create_proj_geom(geom, 1.0, detector_width, angles)
     proj_id = astra.create_projector('cuda',proj_geom,vol_geom)
     _,sinogram = astra.create_sino(recon_image,proj_id)
-    astra.data2d.delete(proj_id)
+    astra.projector.delete(proj_id)
     return sinogram
 
-def astra_back_projec_local_function(   sinogram : np.array,
+def astra_back_project_local_function(   sinogram : np.array,
                                         algorithm : str = 'BP_CUDA',
                                         pixel_size : float = 0.0087,
                                         angles = None,
@@ -257,7 +261,6 @@ def astra_back_projec_local_function(   sinogram : np.array,
     cfg = astra.astra_dict(algorithm)
     cfg['ReconstructionDataId'] = reconstruction_id
     cfg['ProjectionDataId'] = sino_id
-    #cfg['option'] = {'FilterType':'ram-lak'}
     alg_id = astra.algorithm.create(cfg)
     astra.algorithm.run(alg_id, iterations = iterations)
     reconstruction = astra.data2d.get(reconstruction_id)
@@ -292,7 +295,7 @@ def astra_forward_project_local_function(  recon_image : np.array,
     proj_geom = astra.create_proj_geom(geom, 1.0, detector_width, angles)
     proj_id = astra.create_projector('cuda',proj_geom,vol_geom)
     _,sinogram = astra.create_sino(recon_image,proj_id)
-    astra.data2d.delete(proj_id)
+    astra.projector.delete(proj_id)
     return sinogram
 
 def TV_POCS(sinogram: np.array,
@@ -306,7 +309,7 @@ def TV_POCS(sinogram: np.array,
             eps: float = 2.5,
             num_iter: int = 25,
             recon_iter: int = 1,
-            enforce_positivity: bool = True,
+            enforce_positivity: bool = False,
             iter_thresh: float = 0.005 ,
             pixel_size: float = 0.0087,
             debug: bool = False,
@@ -320,19 +323,23 @@ def TV_POCS(sinogram: np.array,
     if debug: print(f"n_proj = {n_proj}")
     angles = np.linspace(0, 2*np.pi, n_proj, endpoint = False)
     if seed is not None:
-        recon_ds = astra_back_projec_local_function(sinogram,
+        recon_ds = astra_back_project_local_function(sinogram,
                                                     algorithm = algorithm,
                                                     angles = angles,
                                                     pixel_size = 1,
                                                     seed = seed)
-    else:
-        recon_ds = astra_back_projec_local_function(sinogram,
-                                                    algorithm = 'FBP_CUDA',
-                                                    angles = angles,
-                                                    pixel_size = 1)
+    #else:
+    #    recon_ds = astra_back_project_local_function(sinogram,
+    #                                                algorithm = 'FBP_CUDA',
+    #                                                angles = angles,
+    #                                                pixel_size = 1)
+    else: 
+        recon_ds = f.copy()
+
     f = recon_ds.copy()
     recon_downsampled = recon_ds.copy()
     radial_zero(recon_downsampled)
+    g = astra_forward_project_local_function(f, angles = angles)
     
     if debug:
         print("starting sum = ",np.sum(f))
@@ -343,7 +350,7 @@ def TV_POCS(sinogram: np.array,
     #for j in tqdm(range(num_iter)):
         if debug: print(f"iteration {j} -----------------------------")
         f0 = f.copy()
-        f += beta*astra_back_projec_local_function(g0-g, algorithm = algorithm, 
+        f += beta*astra_back_project_local_function(g0-g, algorithm = algorithm, 
                             iterations = recon_iter, pixel_size = 1, seed = 0)
         radial_zero(f)
 
@@ -391,5 +398,5 @@ def TV_POCS(sinogram: np.array,
         #g = (M*f).reshape(n_proj,detector_width)
         g = astra_forward_project_local_function(f, angles = angles)
         if debug: print("g sum = ",np.sum(g))
-
-    return f_res / pixel_size, g
+    del f0,g_,g
+    return f_res / pixel_size

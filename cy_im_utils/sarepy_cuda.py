@@ -130,6 +130,7 @@ def remove_stripe_based_sorting_GPU(sinogram,
     
     # Apply Median Filter
     if dim == 2:
+        print("using 2d filter")
         mat_sort = median_filter(mat_sort, (size,1,size))
     elif dim == 1:
         mat_sort = median_filter(mat_sort, (1,1,size))

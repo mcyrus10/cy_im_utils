@@ -2,7 +2,8 @@ from .prep import imread_fit,field_gpu
 from .prep import radial_zero
 from .recon_utils import ASTRA_General
 from .sarepy_cuda import *
-from .visualization import COR_interact,SAREPY_interact,orthogonal_plot
+from .visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
+from .thresholded_median import thresh_median_2D_GPU
 from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
 from numba import njit,cuda
@@ -53,6 +54,17 @@ class tomo_config_handler:
                 # Path Parsing
                 elif 'paths' in key:
                     sub_val = pathlib.Path(sub_val)
+                # unpack list
+                elif '[' in sub_val and ']' in sub_val:
+                    temp_list = [e for e in sub_val.replace("[","").replace("]","").split(",")]
+                    for i,elem in enumerate(temp_list):
+                        remove_chars =  [" ","'"]
+                        elem = "".join([e for e in elem if e not in remove_chars])
+                        temp_str = elem.replace(".","1").lstrip("-")
+                        if temp_str.isnumeric():
+                            temp_list[i] = self.float_int(elem)
+                    sub_val = temp_list
+
                 self.data_dict[key][sub_key] = sub_val
 
     def float_int(self, value: str):
@@ -131,6 +143,24 @@ class tomo_config_handler:
 
         self.log_field("SARE")
         self.write()
+
+    def update_median(self) -> None:
+        """
+        This method updates the SARE parameters
+        """
+        update_keys = [ 
+                        'median_spatial',
+                        'num thresh filters',
+                        'thresh median kernels',
+                        'thresh median z-scores'
+                        ]
+        for key in update_keys:
+            if key in self.data_dict['pre_processing']:
+                self.config["pre_processing"][key] = str(self.data_dict['pre_processing'][key])
+
+        self.log_field("pre_processing")
+        self.write()
+
 
 class tomo_dataset:
     """
@@ -302,10 +332,8 @@ class tomo_dataset:
             logging.info("\tshape files = "
                               f"{np.array(imread_fcn(files[0])).shape}")
             nx,ny = np.asarray(imread_fcn(files[0])).shape
-            field = field_gpu(files, self.median_spatial)
-
-        if self.transpose:
-            field = field.T
+            field = field_gpu(files, 3)
+        field = self.median_operations_wrapper(cp.array(field, dtype = np.float32)).get()
         setattr(self,mode,field)
 
     ## Commented this function out on June 18,2022, pretty sure its deprecated
@@ -335,6 +363,20 @@ class tomo_dataset:
     #        if self.transpose:
     #            logging.info("Transposing images")
     #            self.projections = np.transpose(self.projections,(0,2,1))
+
+    def median_operations_wrapper(self, image: cp.array) -> None:
+        """ Generic wrapper for 2D Median Operations
+        """
+        prep_handle = self.settings['pre_processing']
+        if 'median spatial' in prep_handle.keys():
+            kernel = prep_handle['median spatial']
+            image = median_gpu(image, (kernel,kernel))
+        if 'num thresh filters' in prep_handle.keys():
+            kernels = prep_handle['thresh median kernels']
+            z_scores = prep_handle['thresh median z-scores']
+            for kern,z_sc in zip(kernels,z_scores):
+                image = thresh_median_2D_GPU(image, kern, z_sc)
+        return image
 
     def load_projections_to_attn(self,
                                 truncate_dataset : int = 1,
@@ -391,8 +433,8 @@ class tomo_dataset:
         attn_nx = crop_patch[3]-crop_patch[2]
         n_proj = len(files)
         self.attenuation = np.empty([n_proj,attn_nx,attn_ny], dtype = self.dtype)
-        self.dark = cp.array(self.dark)
-        self.flat = cp.array(self.flat)
+        dark_local = cp.array(self.dark)
+        flat_local = cp.array(self.flat)
         logging.info(f"attenuation shape = {self.attenuation.shape}")
         logging.info(f"crop_y = {self.crop_y}")
         logging.info(f"crop_x = {self.crop_x}")
@@ -402,24 +444,40 @@ class tomo_dataset:
         if self.transpose:
             load_im = lambda f :  cp.asarray(imread_fcn(f),
                                                         dtype = self.dtype).T
+            dark_local = dark_local.T
+            flat_local = flat_local.T
 
-        flat_ = self.flat-self.dark
+
+        flat_ = flat_local-dark_local
         flat_scale = cp.sum(flat_[self.norm_y,self.norm_x])
         logging.info(f"flat patch magnitude = {flat_scale}")
-        tqdm_imread = tqdm(range(n_proj), desc = "Projection -> Attenuation Ops")
+        tqdm_imread = tqdm(range(n_proj), desc = "Projection -> Transmission Ops")
+        """
+        In ReconstructCT Source code see line 183 from
+        NIF_TomographyReconstruction/NIF_Translate_projection_Tomography.m 
+        for these operations
+
+        # note -> sep 9, 2022 moved median to before dark field subtraction
+        """
+        #print("howdy from september 9")
+        #self.norm_mags = np.zeros([n_proj])
         for i in tqdm_imread:
             im = load_im(files[i])
-            im -= self.dark
+            #im = median_gpu(im,(self.median_spatial, self.median_spatial))
+            im = self.median_operations_wrapper(im)
+            #im -= self.dark
+            im -= dark_local
             scale = cp.sum(im[self.norm_y,self.norm_x])
             im /= flat_
             im *= flat_scale/scale
-            im = median_gpu(im,(self.median_spatial, self.median_spatial))
+            #self.norm_mags[i] = cp.mean(im[self.norm_y,self.norm_x]).get()
             im = im[self.crop_y,self.crop_x]
             # Rotate will produce all zeros if it has non-finites
             im[~cp.isfinite(im)] = 0
             im = rotate_gpu(im, -theta, reshape = False)
-            im = -cp.log(im)
-            im[~cp.isfinite(im)] = 0
+            # DO THE LOG TRANFORM AFTER THE VO FILTER!!!!!!!
+            #im = -cp.log(im)
+            #im[~cp.isfinite(im)] = 0
 
             self.attenuation[i] = cp.asnumpy(im)
 
@@ -464,13 +522,14 @@ class tomo_dataset:
         ax[3].imshow(self.attenuation[:,:,nz//2])
         ax[3].set_title("Detector Col Slice (Axis : 2)")
         [a.axis(False) for a in ax]
-        fig.tight_layout()
         fig.suptitle("Astra Expected - (Attenuation Array)")
+        fig.tight_layout()
 
     def COR_interact(self,
                     d_theta : int = 60,
                     angles : list = [],
-                    apply_thresh: float = None
+                    apply_thresh: float = None,
+                    med_kernel = 3,
                     ) -> None:
         """
         Wrapper for COR_interact in visualization
@@ -485,12 +544,16 @@ class tomo_dataset:
             assert 360 % d_theta== 0, "all angles must be factors of 360"
             if not angles:
                 angles = [j*d_theta for j in range(360//d_theta)]
+            flat_local = median_gpu(cp.array(self.flat, dtype = cp.float32), (med_kernel,med_kernel))
+            dark_local = median_gpu(cp.array(self.dark, dtype = cp.float32), (med_kernel, med_kernel))
             COR_interact(   self.settings,
                             imread_fcn,
-                            self.flat,
-                            self.dark,
+                            flat_local,
+                            dark_local,
                             angles,
-                            apply_thresh = apply_thresh)
+                            apply_thresh = apply_thresh,
+                            med_kernel = med_kernel
+                            )
         else:
             logging.warning("Interact needs to be executed in a Notebook" 
                             "Environment - This method is not being executed")
@@ -504,10 +567,37 @@ class tomo_dataset:
         """
         if self.is_jupyter():
             logging.info("Stripe Artifact Interact Started")
-            SAREPY_interact(self.settings, self.attenuation, figsize = figsize)
+            SAREPY_interact(self.settings,
+                            self.attenuation,
+                            figsize = figsize)
         else:
             logging.warning("Interact needs to be executed in a Notebook"
                             "Environment - This method is not being executed")
+
+    def median_2D_interact( self,
+                            image_index: int = 0,
+                            figsize : tuple = (12,5),
+                            kwargs: dict = {}
+                            ) -> None:
+        """
+        Wrapper for median filtering operations
+
+        """
+        if self.is_jupyter():
+            logging.info("Median 2D Interact Started")
+            ext = self.settings['pre_processing']['extension']
+            imread_fcn = self.return_imread_fcn(ext)
+            proj_path = self.settings['paths']['projection_path']
+            assert proj_path.is_dir(), f"{str(proj_path)} (path) does not exist"
+            proj_files = sorted(list(proj_path.glob(f"*.{ext}")))
+            test_image = imread_fcn(proj_files[image_index])
+            median_2D_interact( self.settings,
+                                test_image,
+                                **kwargs)
+        else:
+            logging.warning("Interact needs to be executed in a Notebook"
+                            "Environment - This method is not being executed")
+
 
     def ORTHO_interact(self, **kwargs) -> None:
         """

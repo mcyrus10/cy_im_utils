@@ -102,7 +102,21 @@ def crete_blur_metric_GPU(F: cp.array, h: int = 9) -> np.array:
     #logging.debug(f'Crete blur metric (normalized) = {1.0 - blur}')
     return np.array(blur)
 
-def diagonal_laplacian(F : str, s : int = 1):
+def helm_GPU(im: cp.array, window_size: int = 15) -> np.array:
+    """
+    This is taken from the implementation in the infer gitlab, with the
+    modification being that it takes a convolution not a 'fspecial'
+    """
+    conv_kernel = cp.ones([1,window_size,window_size]) / (window_size**2)
+    U = ndimage_GPU.convolve(im,conv_kernel)
+    R1 = U/im
+    R1[im == 0] = 1
+    index = U > im
+    FM = 1/R1
+    FM[index] = R1[index]
+    return cp.mean(FM, axis = (1,2)).get()
+
+def diagonal_laplacian(F : np.array, s : int = 1):
     """
     """
     import matplotlib.pyplot as plt
@@ -113,17 +127,53 @@ def diagonal_laplacian(F : str, s : int = 1):
 
     kernel_2 = np.zeros([edge,edge])
     kernel_2[0,0],kernel_2[s,s],kernel_2[-1,-1] = 1,-2,1
+    sqrt_2 = 2**(-1/2)
     kernels = [
                 kernel_1,
                 kernel_1.T,
-                kernel_2,
-                kernel_2[::-1]
+                kernel_2*sqrt_2,
+                kernel_2[::-1]*sqrt_2
                 ]
 
-    FM = [np.abs(ndimage.convolve(F,k)) for k in kernels]
-    FM = np.sum(np.dstack(FM), axis = 2)
+    FM = np.array([np.abs(ndimage.convolve(F,k)) for k in kernels])
+    FM = np.sum(FM, axis = 0)
     return np.mean(FM)
+
+def diagonal_laplacian_GPU(F : cp.array, s : int = 1):
+    """
+    """
+    assert s == 1, "I dont think this works for s > 1...?"
+    edge = s*2+1
+    kernel_1 = cp.zeros(edge).reshape(1,edge)
+    kernel_1[0,0],kernel_1[0,s],kernel_1[0,-1] = 1,-2,1
+    kernel_1 = kernel_1[None,:,:]
+
+    kernel_2 = cp.zeros([edge,edge])
+    kernel_2[0,0],kernel_2[s,s],kernel_2[-1,-1] = 1,-2,1
+    kernel_2 = kernel_2[None,:,:]
+    const = 2**(-1/2)
+    kernels = [
+            kernel_1,
+            cp.transpose(kernel_1,(0,2,1)),
+            kernel_2*const,
+            kernel_2[:,::-1,:]*const
+                ]
+
+    FM = [cp.abs(ndimage_GPU.convolve(F,k)) for k in kernels]
+    FM = cp.transpose(cp.stack(FM),(1,0,2,3))
+    FM = cp.sum(FM,axis = 1)
+    return cp.mean(FM, axis = (1,2)).get()
  
+def variance_of_laplacian_GPU(im: cp.array) -> np.array:
+    """
+    Variance of laplacian as a blurring metric
+    """
+    laplacian_kernel = cp.array([   [0,1,0],
+                                    [1,-4,1],
+                                    [0,1,0]], dtype = cp.float32)[None,:,:]
+    conv = ndimage_GPU.convolve(im,laplacian_kernel)
+    return cp.asnumpy(cp.std(conv, axis = (1,2))**2)
+
 if __name__=="__main__":
     """
     """
