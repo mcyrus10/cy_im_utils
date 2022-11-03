@@ -18,6 +18,8 @@ import matplotlib.path as mpltPath
 import matplotlib.path as mpltPath 
 import matplotlib.pyplot as plt
 import numpy as np
+import pickle
+import logging
 
 def imread(x): return np.array(Image.open(x), dtype = np.float32)
 
@@ -48,46 +50,49 @@ def process_frame(  frame_no: int,
                     x_ray_files: list,      # provide partial
                     phases: dict,           # provide partial
                     pad: tuple,             # provide partial
-                    output_directory: Path  # provide partial
                     ) -> None:
     """ This is meant to be called by multiprocessing.pool
     """
     neutron = np.pad(imread(neutron_files[frame_no]),pad)
     x_ray = imread(x_ray_files[frame_no])
-    segmentation = apply_segmentation(  neutron,
-                                        x_ray,
-                                        phases)
-    file_name = output_directory / f"segmentation_{frame_no:05}.tif"
-    Image.fromarray(segmentation).save(file_name)
+    return apply_segmentation(  neutron,
+                                x_ray,
+                                phases)
 
 class bivariate_segmentation:
     def __init__(self,
                  neutron_files: list,
                  x_ray_files: list,
+                 method: str, 
                  phases: dict = {},
                  segmentation_cmap: str = 'gist_ncar',
                 neutron_array = None,
                 x_ray_array = None):
         """ optionally pass neutron_array and x_ray_array to the constructor
         """
+        self.method = method
         self.neutron_files = neutron_files
         self.x_ray_files = x_ray_files
         self.phases = phases
         self.colors = 'rgbcmyk'
         self.segmentation_cmap = segmentation_cmap
+        self.plot_axis = {'xy':0,'yz':1,'xz':2}
         if neutron_array is None: 
-            print("reading neutron files")
+            logging.info("reading neutron files")
             self.neutron = self.imstack_read(neutron_files)
         else:
             self.neutron = neutron_array
         if x_ray_array is None:
-            print("reading neutron files")
+            logging.info("reading x-ray files")
             self.x_ray = self.imstack_read(x_ray_files)
         else:
             self.x_ray = x_ray_array
 
         
     def imread(self, x): return np.array(Image.open(x), dtype = np.float32)
+
+    def contrast(self, arr):
+        return np.quantile(arr,0.01), np.quantile(arr, 0.99)
 
     def plot_registration(  self,
                             image_idx: int = 100,
@@ -134,7 +139,6 @@ class bivariate_segmentation:
         self.x_coords = x_coords.get()
         self.y_coords = y_coords.get()
         self.counts = counts.T.get()
-        self.plot_axis = {'xy':0,'yz':1,'xz':2}
     
     
     def plot_hist(self, ax = None, figsize: tuple = (8,8) , kwargs: dict = {}):
@@ -174,11 +178,25 @@ class bivariate_segmentation:
         """
         self.global_frame = frame_no
         self.global_axis = plot_axis
-        
+
+        slice_ = self.fetch_axis_slice( frame_no,
+                                        self.plot_axis[plot_axis])
+
+        neutron_image = self.neutron[slice_]
+        x_ray_image = self.x_ray[slice_]
+        for i,arr in enumerate([neutron_image,x_ray_image]):
+            self.biv_ax[i+3].clear()
+            self.biv_ax[i+3].axis(True)
+            #vmin,vmax = self.contrast(arr)
+            self.biv_ax[i+3].imshow(arr)#, vmin = vmin, vmax = vmax)
+       
+        # If vertices are empty (i.e., no vertices selected)
         if self.selector.verts == []:
             print("No Vertices Selected")
+            # No Phases assigned
             if self.phases != {}:
                 self.interactive_show_segmentation()
+        # Vertices are selected
         elif self.selector.verts != []:
             print("")
             self.biv_ax[1].clear()
@@ -204,6 +222,7 @@ class bivariate_segmentation:
                         ax = self.biv_ax[2],
                         axis = axis,
                         imshow_kwargs = {'cmap' : self.segmentation_cmap})
+        # Updating Segmentation Plot
         cmap_ = getattr(mpl.cm, self.segmentation_cmap)
         bounds = np.arange(0,len(self.phases)+2,1)
         norm = mpl.colors.BoundaryNorm(bounds, cmap_.N)
@@ -218,6 +237,7 @@ class bivariate_segmentation:
                                         shrink = 0.5,
                                         cax = self.cbaxes)
         self.cbar.set_ticklabels(["unlabeld"]+list(self.phases.keys()))
+
                 
             
     def integrate_phase(self,name) -> None:
@@ -245,12 +265,21 @@ class bivariate_segmentation:
             - the third column shows the current segmentation (all phases)
                 - colorbar takes phase names
         """
+        #fig = plt.figure(figsize = figsize)
+        #n_col = 5
+        #ax = [plt.subplot(1,n_col,1)]
+        #ax.append(plt.subplot(1,n_col,2))
+        #ax.append(plt.subplot(1,n_col,3, sharex = ax[1], sharey = ax[1]))
+        #ax.append(plt.subplot(1,n_col,4, sharex = ax[1], sharey = ax[1]))
+        #ax.append(plt.subplot(1,n_col,5, sharex = ax[1], sharey = ax[1]))
+        gs = mpl.gridspec.GridSpec(2,3)
         fig = plt.figure(figsize = figsize)
-        n_col = 3
-        ax = [plt.subplot(1,n_col,1)]
-        ax.append(plt.subplot(1,n_col,2))
-        ax.append(plt.subplot(1,n_col,3, sharex = ax[1], sharey = ax[1]))
-        for a in [ax[1],ax[2]]:
+        ax = [fig.add_subplot(gs[:,0])]
+        ax.append(fig.add_subplot(gs[0,1]))
+        ax.append(fig.add_subplot(gs[0,2], sharex = ax[1],sharey = ax[1]))
+        ax.append(fig.add_subplot(gs[1,1], sharex = ax[1],sharey = ax[1]))
+        ax.append(fig.add_subplot(gs[1,2], sharex = ax[1],sharey = ax[1]))
+        for a in ax[1:]:
             a.axis(False)
         self.biv_ax = ax
         self.hist_kwargs = hist_kwargs
@@ -281,6 +310,16 @@ class bivariate_segmentation:
         manual_2 = interact.options(manual = True, manual_name = 'Add Phase')
         out_2 = manual_2(self.integrate_phase, name = phase_add)
         
+    def fetch_axis_slice(self,frame,axis):
+        nz,nx,ny = self.neutron.shape
+        if axis == 0:
+            slice_ = (frame,slice(0,nx),slice(0,ny))
+        elif axis == 1:
+            slice_ = (slice(0,nz),frame,slice(0,ny))
+        elif axis == 2:
+            slice_ = (slice(0,nz),slice(0,nx),frame)
+        return slice_
+
     def apply_segmentation( self,
                             frame,
                             phases,
@@ -291,13 +330,7 @@ class bivariate_segmentation:
         """ This takes a given set of vertices closed polygons) and segments
         a single frame
         """
-        nz,nx,ny = self.neutron.shape
-        if axis == 0:
-            slice_ = (frame,slice(0,nx),slice(0,ny))
-        elif axis == 1:
-            slice_ = (slice(0,nz),frame,slice(0,ny))
-        elif axis == 2:
-            slice_ = (slice(0,nz),slice(0,nx),frame)
+        slice_ = self.fetch_axis_slice(frame, axis)
         neutron = self.neutron[slice_]
         x_ray = self.x_ray[slice_]
         nx,ny = neutron.shape
@@ -356,15 +389,14 @@ class bivariate_segmentation:
             self.full_segmentation[i] = self.apply_segmentation(i,
                                                         phases = self.phases)
             
-    def process_volume_parallel(self,
-                                output_directory: Path,
-                                method: str = None,
-                                write_and_read: bool = True
-                                ) -> None:
+    def process_volume_parallel(self, 
+                                num_proc = None) -> None:
         """ This is a wrapper to call multiprocessing externally for processing
-        frames. check the task manager to see that its working correctly
+        frames. check the task manager to see that its working correctly.
+
+        Creates a new array member self.segmentation
         """
-        if 'fbpconvnet' in method.lower():
+        if 'fbpconvnet' in self.method.lower():
             pad = ((64,64),(64,64))
         else:
             pad = ((0,0),(0,0))
@@ -373,9 +405,8 @@ class bivariate_segmentation:
                                  x_ray_files = self.x_ray_files,
                                  phases = self.phases,
                                  pad = pad,
-                                 output_directory = output_directory
                                 )
         nz = len(self.neutron_files)
-        print('Parallel Processing Segmentation')
-        with Pool() as pool:
-            self.segmentation = np.stack(pool.map(process_handle, range(nz)))
+        logging.info('Multi Processing Segmentation')
+        with Pool(processes = num_proc) as pool:
+            self.segmentation = np.stack(pool.map(process_handle, tqdm(range(nz))))

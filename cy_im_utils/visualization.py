@@ -650,7 +650,7 @@ def COR_interact(   data_dict : dict,
 
                 data_dict['COR']['theta'] = theta
         ax[0].set_title("$\Sigma_{{i=0}}^{{{}}}$ Projection[i$\pi / {{{}}}]$".format(len(angles),len(angles)))
-        plt.show()
+        #plt.show()
 
 
     #---------------------------------------------------------------------------
