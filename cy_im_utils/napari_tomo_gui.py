@@ -1,19 +1,22 @@
-
-from .prep import radial_zero,field_gpu,imstack_read,center_of_rotation
-from .recon_utils import ASTRA_General
-from .sarepy_cuda import *
-from .visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
-from .thresholded_median import thresh_median_2D_GPU
-
+""" 
+this is a behemoth that can work in jupyter, napari and in a scripted
+context. 
+"""
+from sys import path
+path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
+from cy_im_utils.prep import radial_zero,field_gpu,imstack_read,center_of_rotation,imread_fit
+from cy_im_utils.recon_utils import ASTRA_General
+from cy_im_utils.sarepy_cuda import *
+from cy_im_utils.visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
+from cy_im_utils.thresholded_median import thresh_median_2D_GPU
 
 from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
-from functools import partial
 from magicgui import magicgui
-from numba import njit,cuda
+from magicgui.tqdm import tqdm
 from pathlib import Path
-from scipy.ndimage import rotate
-from tqdm import tqdm
+from enum import Enum
+#from tqdm import tqdm
 import astra
 import configparser
 import cupy as cp
@@ -23,10 +26,7 @@ import napari
 import numpy as np
 import os
 import pathlib
-import pickle
 import shutil
-
-
 
 
 class tomo_config_handler:
@@ -175,52 +175,116 @@ class tomo_config_handler:
         self.log_field("pre_processing")
         self.write()
 
-class tomo_dataset:
+class napari_tomo_gui:
     """
     This is the big boy: it holds the projections and can facilitate the recon
     operations
     """
-    def __init__(   self, 
-                    #data_dict: dict, 
-                    config_file: str, 
-                    ) -> None:
-        logging.info("-"*80)
-        logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
-        logging.info("-"*80)
-        self.previous_settings = {}
-        self.config = tomo_config_handler(config_file)
-        self.settings = self.config.data_dict
-        self.files = []
-        logging.info(f"{'='*20} SETTINGS: {'='*20}")
-        for key,val in self.settings['pre_processing'].items():
-            setattr(self,key,val)
-        for key,val in self.settings.items():
-            logging.info(f"{key}:")
-            for sub_key,sub_val in val.items():
-                logging.info(f"\t{sub_key} : {sub_val}")
-        logging.info(f"{'='*20} End SETTINGS {'='*20}")
+    def __init__(   self) -> None:
+        self.transpose = False
+        self.widgets = [
+                        self.select_config(),
+                        self.transpose_widget(),
+                        self.median_widget(),
+                        self.select_norm(),
+                        self.crop_image(),
+                        self.cor_wrapper(),
+                        self.load_images(),
+                        self.show_transmission(),
+                        self.reconstruct_interact(),
+                        self.show_reconstruction()
+                        ]
+        self.viewer = napari.Viewer()
+        self.viewer.window.add_dock_widget(self.widgets, name = 'Tomo Prep')
 
     #---------------------------------------------------------------------------
     #                       UTILS
     #---------------------------------------------------------------------------
-    def update_patch(self) -> None:
-        """
-        """
-        pass
+    def load_transmission_sample(self, image_index: int = 0):
+        """ This is for loading an image for the median to operate on """
+        proj_path = self.settings['paths']['projection_path']
+        ext = self.settings['pre_processing']['extension']
+        proj_files = self.fetch_files(proj_path, ext = ext)
+        if 'tif' in ext:
+            imread_fcn = lambda x: np.array(Image.open(x), dtype = np.float32)
+        elif 'fit' in ext:
+            imread_fcn = imread_fit
 
+        self.transmission_sample = imread_fcn(proj_files[image_index])
 
-    def is_jupyter(self) -> bool:
+    def fetch_files(self, path_, ext: str = 'tif'):
+        """ Jesus Christ i've written this line a million times
         """
-        Yanked this from "Parsing Args in Jupyter Notebooks" on YouTube
-        This tells you whether you're executing from a notebook or not
-        """
-        jn = True
-        try:
-            get_ipython()
-        except NameError as err:
-            jn = False
-        return jn
+        return sorted(list(path_.glob(f"*.{ext}")))
 
+    def fetch_combined_image(self, mode = 'auto', median = 1) -> None:
+        """ this function composes the 0 + 180 degree image for defining the
+        center of rotation. 
+
+        Args:
+        -----
+            mode: str -> right now only auto is availalbe which automatically
+                        searches for the 180 degree image and if it is not
+                        found, it uses the closest angular value
+            median: int -> this median is applied to the composed image to
+                        reduce noise
+        returns:
+        --------
+            None
+
+        Side effects:
+        ------------- 
+            - creates attribute self.combined_image
+            - adds layer 'combined image' to the viewer 
+        """
+        proj_path = self.settings['paths']['projection_path']
+        ext = self.settings['pre_processing']['extension']
+        proj_files = self.fetch_files(proj_path, ext = ext)
+        print(proj_path.is_dir(),len(proj_files))
+        if 'tif' in ext:
+            imread_fcn = lambda x: np.array(Image.open(x), dtype = np.float32)
+        elif 'fit' in ext:
+            imread_fcn = imread_fit
+
+        nx,ny = self.flat.shape
+        combined = cp.zeros([2,nx,ny], dtype = cp.float32)
+        f_0 = proj_files[0]
+        angles = []
+        if mode == 'auto':
+            """ String matching to find 180 deg image"""
+            str_180 = 'p0180d00000'
+            for f in proj_files:
+                print(str(f))
+                angles.append(self._angle_(f))
+                if str_180 in str(f):
+                    f_180 = f
+                    break
+            else:
+                print("no image found at 180 Degrees, finding closest")
+                abs_diff = np.abs(np.pi-np.array(angles, dtype = np.float32))
+                file_idx = np.where(abs_diff == np.min(abs_diff))[0][0].astype(np.uint32)
+                print("file index = ",file_idx)
+                print("closest file = ",str(proj_files[file_idx]))
+                f_180 = proj_files[file_idx]
+
+        ff = cp.array(self.flat, dtype = cp.float32)
+        df = cp.array(self.dark, dtype = cp.float32)
+
+        for i,f in enumerate([f_0,f_180]):
+            im_temp = cp.asarray(imread_fcn(f), dtype = cp.float32)
+            transmission = (im_temp-df)/(ff-df)
+            attenuation = -cp.log(transmission)
+            attenuation[~cp.isfinite(attenuation)] = 0
+            attenuation = median_gpu(attenuation,(median,median))
+            combined[i] = attenuation
+        combined = cp.sum(combined, axis = 0).get()
+
+        self.combined_image = combined
+
+        self.viewer.add_image(  combined,
+                                name = 'combined image',
+                                colormap = 'Spectral')
+        
     def free(self, field : str) -> None:
         """
         This can be used to free the projections if they are taking up too much
@@ -236,7 +300,6 @@ class tomo_dataset:
             tomo_recon.free_field("transmission")
         """
         setattr(self,field,None)
-
 
     def gpu_curry_loop( self,
                         function,
@@ -262,7 +325,6 @@ class tomo_dataset:
         if remainder > 0:
             logging.info(f"remainder = {remainder}")
             function(ax_length-remainder,ax_length)
-
         
     def recon_radial_zero(self, radius_offset: int = 0) -> None:
         """
@@ -281,12 +343,13 @@ class tomo_dataset:
 
     def return_imread_fcn(self, extension: str):
         """
-        Ultra obnoxiousness
+        Ultra obnoxiousness -> datasets with different imread for flat, dark
+        and projections
         """
         if 'fit' in  extension:
             return imread_fit
         elif 'tif' in extension or 'tiff' in extension:
-            return lambda x: np.asarray(Image.open(x))
+            return lambda x: np.array(Image.open(x), dtype = np.float32)
         else:
             assert False, "unknown image extension for imread"
 
@@ -409,8 +472,10 @@ class tomo_dataset:
         #crop_patch = self.settings['crop patch']
         #norm_patch = self.settings['norm patch']
         # new way 
-        crop_patch = [self.settings['crop'][k] for k in ['x0','x1','y0','y1']]
-        norm_patch = [self.settings['norm'][k] for k in ['x0','x1','y0','y1']]
+        #crop_patch = [self.settings['crop'][k] for k in ['x0','x1','y0','y1']]
+        #norm_patch = [self.settings['norm'][k] for k in ['x0','x1','y0','y1']]
+        crop_patch = self.crop_patch
+        norm_patch = self.norm_patch
         self.crop_x = slice(crop_patch[0],crop_patch[1])
         self.crop_y = slice(crop_patch[2],crop_patch[3])
         self.norm_x = slice(norm_patch[0],norm_patch[1])
@@ -565,52 +630,9 @@ class tomo_dataset:
             logging.warning("Interact needs to be executed in a Notebook" 
                             "Environment - This method is not being executed")
 
-
     #---------------------------------------------------------------------------
     #                       PROCESSING
     #---------------------------------------------------------------------------
-
-    def gpu_ops(self,x0 : int,x1 : int) -> None:
-        """
-        In-Place Operations to populate self.transmission; 
-        This function is intended to be an argument to self.gpu_curry_loop
-
-        this performs:
-            1) slice to GPU
-            2) crop
-            3) Rotate
-            4) Lambert Beer
-
-        args:
-        ----
-            x0 : int
-                index 1 for the slice
-
-            x1 : int
-                index 2 for the slice
-
-        """
-        logging.warning("THIS METHOD IS DEPRECATED, USE 'load_projections_to_attn'")
-        logging.warning("MAKE SURE ORDER OF OPERATIONS IS CORRECT -> "
-                "CROP BEFORE ROTATING!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-                "!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        """
-        _,height,width = self.transmission.shape
-        slice_ = slice(x0,x1)
-        batch_size = x1-x0
-        projection_gpu = cp.asarray(self.projections[slice_], dtype = self.dtype)
-        patch = cp.mean(projection_gpu[:,self.norm_y,self.norm_x], axis = (1,2), dtype = self.dtype)
-        projection_gpu -= cp.asarray(self.dark[None,:,:])
-        projection_gpu /= cp.asarray(self.flat[None,:,:]-self.dark[None,:,:])
-        projection_gpu /= patch.reshape(batch_size,1,1)
-        projection_gpu = median_gpu(projection_gpu,(1,self.median_spatial,self.median_spatial))
-        projection_gpu = -cp.log(projection_gpu)
-        projection_gpu[~cp.isfinite(projection_gpu)] = 0
-        projection_gpu = rotate_gpu(projection_gpu, -self.theta, axes = (1,2), reshape = False)
-        self.transmission[slice_,:,:] = cp.asnumpy(projection_gpu[:,self.crop_y,self.crop_x])
-
-        """
-
     def transmission_GPU(self, batch_size : int = 20) -> None:
         """
         this method executes gpu_ops on all the batches to create
@@ -703,6 +725,10 @@ class tomo_dataset:
             angles: np.array (optional) - if non-linear
             seed: scalar or np.array - this is the seed for iterative methods                
         """
+        try:
+            del self.reconstruction
+        except:
+            pass
         self.reconstruction = ASTRA_General(
                                             self.attenuation(ds_interval),
                                             self.settings['recon'],
@@ -716,8 +742,11 @@ class tomo_dataset:
         on windows convention (\\), then it uses the delimiter and angle
         position to extract the angle
         """
-        delimiter = self.settings['pre_processing']['filename_delimiter']
-        delimiter = delimiter.replace('"','')
+        if 'filename_delimiter' in self.settings['pre_processing']:
+            delimiter = self.settings['pre_processing']['filename_delimiter']
+            delimiter = delimiter.replace('"','')
+        else:
+            assert False, "No filename_delimiter in config"
         angle_position = int(self.settings['pre_processing']['angle_argument'])
         f_name = str(file_name).split("\\")[-1]
         angle_str = f_name.split(delimiter)[angle_position]
@@ -788,4 +817,274 @@ class tomo_dataset:
             im = Image.fromarray(arr_handle[i,:,:])
             f_name = directory / f"{arr_name}_{i:06}.tif"
             im.save(f_name)
+
+    #--------------------------------------------------------------------------
+    #              Napari Widgets and Functions
+    #--------------------------------------------------------------------------
+    def mute_all(self):
+        """ this suppresses all image layers """
+        for elem in self.viewer.layers:
+            elem.visible = False
+
+    def select_config(self):
+        @magicgui(call_button = "Select Config",
+                config_file = {'label':'Select Config File (.ini)'})
+        def inner(config_file = Path.home()):
+            logging.info("-"*80)
+            logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
+            logging.info("-"*80)
+            self.previous_settings = {}
+            self.config = tomo_config_handler(config_file)
+            self.settings = self.config.data_dict
+            self.files = []
+            logging.info(f"{'='*20} SETTINGS: {'='*20}")
+            for key,val in self.settings['pre_processing'].items():
+                setattr(self,key,val)
+            for key,val in self.settings.items():
+                logging.info(f"{key}:")
+                for sub_key,sub_val in val.items():
+                    logging.info(f"\t{sub_key} : {sub_val}")
+            logging.info(f"{'='*20} End SETTINGS {'='*20}")
+
+            self.load_field('dark')
+            self.load_field('flat')
+            self.fetch_combined_image()
+            self.load_transmission_sample()
+
+        return inner
+
+    def transpose_widget(self):
+        @magicgui(call_button = 'Apply Transpose')
+        def inner(Transpose: bool = False):
+            if Transpose:
+                self.transpose = Transpose
+                self.combined_image = self.combined_image.T
+                if 'combined image' in self.viewer.layers:
+                    self.viewer.layers.remove('combined image')
+                    self.viewer.add_image(self.combined_image,
+                            name = 'combined image',
+                            colormap = 'Spectral',
+                            )
+        return inner
+
+    def median_widget(self):
+        @magicgui(call_button = "Apply Median",
+                median_size = {'step':2,'value':1})
+        def inner(median_size: int = 1, kernels: str = '', z_scores: str = ''):
+            transmission_image = self.transmission_sample
+            handle = self.settings['pre_processing']
+            handle['median_xy'] = median_size
+            med_kernel = (median_size,median_size)
+            if kernels != "":
+                kernels = [int(elem) for elem in kernels.split(",")]
+                z_scores = [float(elem) for elem in z_scores.split(",")]
+            else:
+                kernels = []
+                z_scores = []
+            handle['thresh median kernels'] = kernels
+            handle['thresh median z-scores'] = z_scores
+            med_stack_shape = len(kernels)+2
+            nx,ny = transmission_image.shape
+            med_image = [transmission_image.copy()]
+            if median_size > 1:
+                med_image.append(median_gpu(cp.array(med_image[-1], dtype = cp.float32), 
+                                                                med_kernel).get()
+                                                                )
+            print('kernels = ',kernels,'; z_scores= ',z_scores)
+            for kern,z_score in zip(kernels,z_scores):
+                temp = thresh_median_2D_GPU(
+                            cp.array(med_image[-1], dtype = cp.float32),
+                                                        kern,
+                                                        z_score).get()
+                med_image.append(temp)
+            med_image = np.stack(med_image)
+            med_layer_name = 'median stack'
+            if med_layer_name in self.viewer.layers:
+                self.viewer.layers.remove(med_layer_name)
+            self.viewer.add_image(med_image,
+                                    name = med_layer_name,
+                                    colormap = 'turbo')
+        return inner
+
+    def select_norm(self):
+        @magicgui(call_button = "Select Norm Patch")
+        def inner():
+            verts = self.viewer.layers[-1].data[0][:,-2:]
+            x0,x1 = np.min(verts[:,0]), np.max(verts[:,0])
+            y0,y1 = np.min(verts[:,1]), np.max(verts[:,1])
+            self.norm_patch = [y0,y1,x0,x1]
+            self.viewer.layers[-1].name = 'Norm'
+            self.viewer.layers['Norm'].face_color = 'r'
+        return inner
+
+    def crop_image(self):
+        """ This returns the widget that selects the crop portion of the image
+        Note: it also mutes the full image and 
+        """
+        @magicgui(call_button = "Crop Image")
+        def inner():
+            crop_key = 'Crop'
+            if crop_key not in self.viewer.layers:
+                self.viewer.layers[-1].name = crop_key
+            verts = np.round(self.viewer.layers[crop_key].data[0][:,-2:]).astype(np.uint32)
+            y0,y1 = np.min(verts[:,1]), np.max(verts[:,1])
+            x0,x1 = np.min(verts[:,0]), np.max(verts[:,0])
+            slice_y = slice(y0,y1)
+            slice_x = slice(x0,x1)
+            crop_image = self.viewer.layers['combined image'].data[slice_x,slice_y]
+            mute_layers = ['combined image',crop_key,'Norm']
+            for key in mute_layers:
+                if key not in self.viewer.layers:
+                    continue
+                self.viewer.layers[key].visible = False
+            self.viewer.add_image(crop_image, colormap = 'twilight_shifted', name = 'cropped image')
+            return crop_image
+        return inner
+
+    def cor_wrapper(self):
+        @magicgui(call_button = "Calculate Center of Rotation")
+        def inner():
+            points_key = "COR Points"
+            if points_key not in self.viewer.layers:
+                self.viewer.layers[-1].name = points_key
+            points = np.round(self.viewer.layers[points_key].data[:,-2:]).astype(np.uint32)
+            verts = np.round(self.viewer.layers['Crop'].data[0][:,-2:]
+                                                ).astype(np.uint32).copy()
+            x0,x1 = np.min(verts[:,0]), np.max(verts[:,0])
+            y0,y1 = np.min(verts[:,1]), np.max(verts[:,1])
+            cropped_image = self.viewer.layers['cropped image'].data
+            cor_y0,cor_y1 = sorted([points[0,0],points[1,0]])
+            print('y0 =',cor_y0,'; y1 =',cor_y1)
+            fig,ax = plt.subplots(1,3, sharex = True, sharey = True)
+            cor = center_of_rotation(cropped_image,cor_y0,cor_y1, ax = ax[0])
+            theta = np.tan(cor[0])*(180/np.pi)
+            ax[0].set_title(f"theta = {theta}")
+            rot = rotate_gpu(cp.array(cropped_image, dtype = cp.float32),
+                            -theta,
+                            reshape = False).get()
+            cor2 = center_of_rotation(rot, cor_y0, cor_y1, ax = ax[1])
+            crop_nx = y1-y0
+            dx = int(np.round(cor2[1]))-crop_nx//2
+            ax[1].set_title("Re-Fit")
+            y0 += dx
+            y1 += dx
+            slice_x = slice(x0,x1)
+            slice_y = slice(y0,y1)
+            crop2 = self.viewer.layers['combined image'].data[slice_x,slice_y]
+            crop2rot = rotate_gpu(cp.array(crop2, dtype = cp.float32),
+                                    -theta,
+                                    reshape = False).get()
+            cor3 = center_of_rotation(crop2rot,cor_y0,cor_y1, ax = ax[2])
+            ax[2].set_title(f"corrected center dx = {dx}")
+            fig.tight_layout()
+            plt.show()
+            verts[:,1] = [y0,y1,y1,y0]
+            try:
+                self.viewer.layers.remove('crop corrected')
+            except:
+                pass
+            self.viewer.add_shapes(verts, name = 'crop corrected', face_color = 'b', visible = False, opacity = 0.3)
+            self.crop_patch = [y0,y1,x0,x1]
+            return dx,theta,verts
+        return inner
+
+    def load_images(self):
+        @magicgui(call_button = "Load Projections to Transmission")
+        def inner():
+            self.load_projections()
+        return inner
+
+    def show_transmission(self):
+        @magicgui(call_button = "Show Transmission",
+                down_sampling = {'value': 1})
+        def inner(down_sampling:int):
+            try:
+                self.viewer.layers.remove('Transmission')
+            except:
+                pass
+            self.mute_all()
+            ds = down_sampling
+            self.viewer.add_image(  self.transmission.copy(),
+                                    name = 'Transmission',
+                                    colormap = 'cividis')
+        return inner
+
+    def reconstruct_interact(self):
+        @magicgui(call_button = "Reconstruct")
+        def inner():
+            self.reconstruct()
+        return inner
+
+    def show_reconstruction(self):
+        @magicgui(call_button = "Show Reconstruction",
+                    down_sampling = {'value': 1})
+        def inner(down_sampling: int):
+            try:
+                self.viewer.layers.remove('Reconstruction')
+            except:
+                pass
+
+            if hasattr(self,'reconstruction'):
+                self.mute_all()
+                ds = down_sampling
+                self.viewer.add_image(  self.reconstruction[::ds,::ds,::ds].copy(),
+                                        name = 'Reconstruction',
+                                        colormap = 'plasma')
+            else:
+                print("Not Reconstructed Yet")
+        return inner
+    
+    def reset(self):
+        @magicgui(call_button = 'Reset')
+        def inner():
+            attributes = ['transmission','reconstruction']
+            for attr in attributes:
+                if hasattr(self,attr):
+                    setattr(self,attr,None)
+        return inner
+
+class recon_algorithms(Enum):
+    FBP_CUDA = "FBP_CUDA"
+    FDK_CUDA = "FDK_CUDA"
+    SIRT_CUDA = "SIRT_CUDA"
+
+class recon_geometry(Enum):
+    parallel = "parallel"
+    cone = "cone"
+
+class tomo_config_gen_gui:
+    def __init__(self):
+        self.generate_config_widget().show(run = True)
+
+    def generate_config_widget(self):
+        @magicgui(call_button = 'Generate Config',
+                layout = 'vertical',
+                dark_files = {"label":'Select File in Dark Directory'},
+                flat_files = {"label":'Select File in Flat Directory'},
+                ext = {"value":"tif"},
+                source_detector = {"value":'0.0 (mm)'},
+                origin_detector = {"value":'0.0 (mm)'},
+                )
+        def inner(dark_files = Path.home(),
+                flat_files = Path.home(),
+                ext = "*.tif",
+                source_detector: str = '0.0',
+                origin_detector: str = '0.0',
+                algorithm = recon_algorithms.FDK_CUDA,
+                geometry = recon_geometry.parallel
+                ):
+            pass
+        return inner
+
+def test_gui():
+    inst = napari_tomo_gui()
+    napari.run()
+
+def test_config_gen():
+    #generate_config_widget.show(run = True)
+    tomo_config_gen_gui()
+
+if __name__ == "__main__":
+    inst = napari_tomo_gui()
+    napari.run()
 

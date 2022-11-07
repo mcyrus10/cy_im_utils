@@ -752,6 +752,7 @@ def SAREPY_interact(data_dict : dict,
     fig,ax = plt.subplots(2,2, sharex = 'row', sharey = 'row', figsize = figsize)
     ax = ax.flatten()
     fig.tight_layout()
+    plt.show()
     n_proj,n_sino,detector_width = input_array.shape
     def inner(frame,snr,la_size,sm_size,dim):
         plt.cla()
@@ -981,6 +982,7 @@ def median_2D_interact(data_dict: dict,
                             sharex = True, sharey = True)
 
     fig.tight_layout()
+    plt.show()
     nx,ny = input_array.shape
     temp_local = cp.array(input_array, dtype = cp.float32)
     def inner(median_1, thresh_kernels, thresh_z_scores, xlim, ylim):
@@ -995,6 +997,10 @@ def median_2D_interact(data_dict: dict,
         ax[0].set_xlim(xlim)
         ax[0].set_ylim(ylim)
         temp = median_gpu(temp, (median_1,median_1))
+        # Setting these to nothing if they are not selected
+        data_dict['pre_processing']['num thresh filters'] = 0
+        data_dict['pre_processing']['thresh median kernels'] = ''
+        data_dict['pre_processing']['thresh median z-scores'] = ''
         if median_1 > 1:
             title = f"Median ({median_1}$\\times${median_1})"
             ax[1].imshow(temp.get(), **im_kwargs)
@@ -1022,7 +1028,7 @@ def median_2D_interact(data_dict: dict,
         else:
             for j in range(num_thresh_filters):
                 ax[j+2].axis(False)
-        data_dict['pre_processing']['median_spatial'] = median_1
+        data_dict['pre_processing']['median_xy'] = median_1
 
 
     median_1 = IntSlider(
