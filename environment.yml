@@ -4,7 +4,7 @@ channels:
   - astra-toolbox
   - conda-forge
 dependencies:
-  - python=3.7
+  - python=3.9
   - astra-toolbox           # reconstructions
   - cupy                    # cuda - numpy wrappers
   - cudatoolkit=11.2        # have to specify version for my computer
@@ -12,12 +12,16 @@ dependencies:
   - ipympl                  
   - ipython                 # interactive command-line environment
   - ipywidgets              # interactive plots in jupyter
-  - jupyter                 
   - jupyterlab
   - matplotlib
+  - napari                  # n-dimensional data viewer
+  - notebook
   - numba                   # python function compiler
   - numpy   
   - pillow                  # Image reading and writing
+  - pip
   - scikit-image
   - scipy
   - tqdm                    # progress bars
+  - pip:
+      - jupyterlab_vim      # this optional

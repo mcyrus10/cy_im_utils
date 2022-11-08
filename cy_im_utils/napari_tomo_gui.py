@@ -5,7 +5,7 @@ context.
 from sys import path
 path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
 from cy_im_utils.prep import radial_zero,field_gpu,imstack_read,center_of_rotation,imread_fit
-from cy_im_utils.recon_utils import ASTRA_General
+from cy_im_utils.recon_utils import ASTRA_General,astra_2d_simple
 from cy_im_utils.sarepy_cuda import *
 from cy_im_utils.visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
 from cy_im_utils.thresholded_median import thresh_median_2D_GPU
@@ -95,6 +95,7 @@ class tomo_config_handler:
         """
         Wrapper for re-writing the config file after it's updated
         """
+        print("WRITING UPDATED CONFIG",self.config_file)
         with open(self.config_file,'w') as config_file:
             self.config.write(config_file)
 
@@ -137,7 +138,7 @@ class tomo_config_handler:
         # Crop and Norm
         for field in ['crop','norm']:
             self.conditional_add_field(field)
-            for sub_key in ['x0','x1','y0','y1','dx','dy']:
+            for sub_key in ['x0','x1','y0','y1']:
                 sub_val = str(self.data_dict[field][sub_key])
                 self.config[field][sub_key] = sub_val
 
@@ -181,18 +182,20 @@ class napari_tomo_gui:
     operations
     """
     def __init__(   self) -> None:
-        self.transpose = False
+        self.starting_init()
         self.widgets = [
                         self.select_config(),
                         self.transpose_widget(),
-                        self.median_widget(),
                         self.select_norm(),
                         self.crop_image(),
                         self.cor_wrapper(),
+                        self.median_widget(),
                         self.load_images(),
                         self.show_transmission(),
                         self.reconstruct_interact(),
-                        self.show_reconstruction()
+                        self.show_reconstruction(),
+                        self.sare_widget(),
+                        self.reset()
                         ]
         self.viewer = napari.Viewer()
         self.viewer.window.add_dock_widget(self.widgets, name = 'Tomo Prep')
@@ -200,6 +203,25 @@ class napari_tomo_gui:
     #---------------------------------------------------------------------------
     #                       UTILS
     #---------------------------------------------------------------------------
+    def starting_init(self) -> None:
+        """ getting to square 0 """
+        logging.info("Starting new")
+        self.transpose = False
+        self.files = []
+        self.settings = {}
+        try:
+            del self.reconstruction
+        except:
+            pass
+        try:
+            del self.transmission
+        except:
+            pass
+        try:
+            del self.combined_image
+        except:
+            pass
+
     def load_transmission_sample(self, image_index: int = 0):
         """ This is for loading an image for the median to operate on """
         proj_path = self.settings['paths']['projection_path']
@@ -217,7 +239,7 @@ class napari_tomo_gui:
         """
         return sorted(list(path_.glob(f"*.{ext}")))
 
-    def fetch_combined_image(self, mode = 'auto', median = 1) -> None:
+    def fetch_combined_image(self, mode = 'auto', median = 3) -> None:
         """ this function composes the 0 + 180 degree image for defining the
         center of rotation. 
 
@@ -254,7 +276,6 @@ class napari_tomo_gui:
             """ String matching to find 180 deg image"""
             str_180 = 'p0180d00000'
             for f in proj_files:
-                print(str(f))
                 angles.append(self._angle_(f))
                 if str_180 in str(f):
                     f_180 = f
@@ -431,9 +452,9 @@ class napari_tomo_gui:
             3) loop over all images : Normalize + Lambert Beer + Crop + Rotate
                 a) load image
                 b) subtract dark field (in-place operation)
-                c) scale of image-dark (sum over norm patch)
+                c) scale of image-dark (sum over norm)
                 d) divide by flat_ (in-place)
-                e) multiply by flat_scale/scale (mean of norm patch --> ~1)
+                e) multiply by flat_scale/scale (mean of norm --> ~1)
                 f) spatial median  (3x3 by default)
                 g) crop
                 h) rotate
@@ -449,6 +470,9 @@ class napari_tomo_gui:
             None (operates in-place)
 
         """
+        self.config.update_median()
+        self.config.update_COR()
+
         proj_path = self.settings['paths']['projection_path']
         logging.info(f"Reading Images From {proj_path}")
         ext = self.settings['pre_processing']['extension']
@@ -469,11 +493,6 @@ class napari_tomo_gui:
             return
         nx,ny = np.asarray(imread_fcn(new_files[0])).shape
 
-        #crop_patch = self.settings['crop patch']
-        #norm_patch = self.settings['norm patch']
-        # new way 
-        #crop_patch = [self.settings['crop'][k] for k in ['x0','x1','y0','y1']]
-        #norm_patch = [self.settings['norm'][k] for k in ['x0','x1','y0','y1']]
         crop_patch = self.crop_patch
         norm_patch = self.norm_patch
         self.crop_x = slice(crop_patch[0],crop_patch[1])
@@ -645,8 +664,8 @@ class napari_tomo_gui:
         """
         logging.warning("THIS METHOD IS DEPRECATED, USE 'load_projections_to_attn'")
         # in case these have been updated by COR Interact
-        crop_patch = self.settings['crop patch']
-        norm_patch = self.settings['norm patch']
+        crop_patch = self.settings['crop']
+        norm_patch = self.settings['norm']
         self.crop_x = slice(crop_patch[0],crop_patch[1])
         self.crop_y = slice(crop_patch[2],crop_patch[3])
         self.norm_x = slice(norm_patch[0],norm_patch[1])
@@ -867,52 +886,20 @@ class napari_tomo_gui:
                             )
         return inner
 
-    def median_widget(self):
-        @magicgui(call_button = "Apply Median",
-                median_size = {'step':2,'value':1})
-        def inner(median_size: int = 1, kernels: str = '', z_scores: str = ''):
-            transmission_image = self.transmission_sample
-            handle = self.settings['pre_processing']
-            handle['median_xy'] = median_size
-            med_kernel = (median_size,median_size)
-            if kernels != "":
-                kernels = [int(elem) for elem in kernels.split(",")]
-                z_scores = [float(elem) for elem in z_scores.split(",")]
-            else:
-                kernels = []
-                z_scores = []
-            handle['thresh median kernels'] = kernels
-            handle['thresh median z-scores'] = z_scores
-            med_stack_shape = len(kernels)+2
-            nx,ny = transmission_image.shape
-            med_image = [transmission_image.copy()]
-            if median_size > 1:
-                med_image.append(median_gpu(cp.array(med_image[-1], dtype = cp.float32), 
-                                                                med_kernel).get()
-                                                                )
-            print('kernels = ',kernels,'; z_scores= ',z_scores)
-            for kern,z_score in zip(kernels,z_scores):
-                temp = thresh_median_2D_GPU(
-                            cp.array(med_image[-1], dtype = cp.float32),
-                                                        kern,
-                                                        z_score).get()
-                med_image.append(temp)
-            med_image = np.stack(med_image)
-            med_layer_name = 'median stack'
-            if med_layer_name in self.viewer.layers:
-                self.viewer.layers.remove(med_layer_name)
-            self.viewer.add_image(med_image,
-                                    name = med_layer_name,
-                                    colormap = 'turbo')
-        return inner
 
     def select_norm(self):
-        @magicgui(call_button = "Select Norm Patch")
+        @magicgui(call_button = "Select norm")
         def inner():
-            verts = self.viewer.layers[-1].data[0][:,-2:]
+            verts = np.round(self.viewer.layers[-1].data[0][:,-2:]
+                                                    ).astype(np.uint32)
             x0,x1 = np.min(verts[:,0]), np.max(verts[:,0])
             y0,y1 = np.min(verts[:,1]), np.max(verts[:,1])
             self.norm_patch = [y0,y1,x0,x1]
+            if self.transpose:
+                keys = ['x0','x1','y0','y1']
+            else:
+                keys = ['y0','y1','x0','x1']
+            self.settings['norm'] = {key:val for key,val in zip(keys,self.norm_patch)}
             self.viewer.layers[-1].name = 'Norm'
             self.viewer.layers['Norm'].face_color = 'r'
         return inner
@@ -985,7 +972,59 @@ class napari_tomo_gui:
                 pass
             self.viewer.add_shapes(verts, name = 'crop corrected', face_color = 'b', visible = False, opacity = 0.3)
             self.crop_patch = [y0,y1,x0,x1]
-            return dx,theta,verts
+            if self.transpose:
+                keys = ['x0','x1','y0','y1']
+            else:
+                keys = ['y0','y1','x0','x1']
+            self.settings['crop'] = {key:val for key,val in zip(keys,self.crop_patch)}
+            self.settings['COR'] = {key:val for key,val in zip(['y0','y1','theta'],[cor_y0,cor_y1,theta])}
+        return inner
+
+    def median_widget(self):
+        @magicgui(call_button = "Preview Median",
+                median_size = {'step':2,'value':1})
+        def inner(median_size: int = 1, kernels: str = '', z_scores: str = ''):
+            transmission_image = self.transmission_sample
+            handle = self.settings['pre_processing']
+            handle['median_xy'] = median_size
+            med_kernel = (median_size,median_size)
+            if kernels != "":
+                kernels = [int(elem) for elem in kernels.split(",")]
+                z_scores = [float(elem) for elem in z_scores.split(",")]
+            else:
+                kernels = []
+                z_scores = []
+            handle['thresh median kernels'] = kernels
+            handle['thresh median z-scores'] = z_scores
+            med_stack_shape = len(kernels)+2
+            nx,ny = transmission_image.shape
+            med_image = [transmission_image.copy()]
+            if median_size > 1:
+                med_image.append(median_gpu(cp.array(med_image[-1], dtype = cp.float32), 
+                                                                med_kernel).get()
+                                                                )
+            print('kernels = ',kernels,'; z_scores= ',z_scores)
+            for kern,z_score in zip(kernels,z_scores):
+                temp = thresh_median_2D_GPU(
+                            cp.array(med_image[-1], dtype = cp.float32),
+                                                        kern,
+                                                        z_score).get()
+                med_image.append(temp)
+            med_image = np.stack(med_image)
+            med_layer_name = 'median stack'
+            if med_layer_name in self.viewer.layers:
+                self.viewer.layers.remove(med_layer_name)
+
+            if self.transpose:
+                if med_image.ndim == 2:
+                    med_image = med_image.T
+                elif med_image.ndim == 3:
+                    med_image = np.transpose(med_image,(0,2,1))
+
+            self.mute_all()
+            self.viewer.add_image(med_image,
+                                    name = med_layer_name,
+                                    colormap = 'turbo')
         return inner
 
     def load_images(self):
@@ -1004,7 +1043,7 @@ class napari_tomo_gui:
                 pass
             self.mute_all()
             ds = down_sampling
-            self.viewer.add_image(  self.transmission.copy(),
+            self.viewer.add_image(  self.transmission[::ds,::ds,::ds].copy(),
                                     name = 'Transmission',
                                     colormap = 'cividis')
         return inner
@@ -1037,10 +1076,66 @@ class napari_tomo_gui:
     def reset(self):
         @magicgui(call_button = 'Reset')
         def inner():
-            attributes = ['transmission','reconstruction']
-            for attr in attributes:
-                if hasattr(self,attr):
-                    setattr(self,attr,None)
+            self.__init__()
+        return inner
+
+    def sare_widget(self):
+        @magicgui(call_button = 'Preview Ring Filter',
+                row={'value':0},
+                snr={'value':1.0},
+                la_size={'value':1,'step':2},
+                sm_size={'value':1,'step':2},
+                )
+        def inner(row: int,
+                snr: float,
+                la_size: int,
+                sm_size: int,
+                ):
+            sinogram_local = self.transmission[row,:,:].copy()
+            
+            filtered = remove_all_stripe_GPU(
+                    cp.array(sinogram_local[:,None,:], dtype = cp.float32),
+                    snr = snr,
+                    la_size = la_size,
+                    sm_size = sm_size)[:,0,:].get()
+
+            sino_args = {
+                    'algorithm':'FBP_CUDA',
+                    'pixel_size':self.settings['recon']['camera pixel size'],
+                    'angles': self.angles,
+                    'geometry': 'parallel'
+                    }
+
+            unfiltered_recon = astra_2d_simple(
+                    -np.log(sinogram_local, where = sinogram_local > 0),
+                    **sino_args)
+
+            filtered_recon = astra_2d_simple(
+                    -np.log(filtered, where = sinogram_local > 0),
+                    **sino_args)
+
+            self.mute_all()
+            sinogram_layer_name = "sare sinogram stack"
+            recon_layer_name = "sare reconstruction stack"
+            if sinogram_layer_name in self.viewer.layers:
+                self.viewer.layers.remove(sinogram_layer_name)
+            if recon_layer_name in self.viewer.layers:
+                self.viewer.layers.remove(recon_layer_name)
+
+            sinograms = np.stack([sinogram_local,filtered])
+            recons = np.stack([unfiltered_recon,filtered_recon])
+
+            self.viewer.add_image(  sinograms,
+                                    name = sinogram_layer_name,
+                                    colormap = 'viridis')
+
+            self.viewer.add_image(  recons,
+                                    name = recon_layer_name,
+                                    colormap = 'viridis',
+                                    visible = False)
+            keys = ['snr','la_size','sm_size']
+            vals  = [snr,la_size,sm_size]
+            self.settings['SARE'] = {key:val for key,val in zip(keys,vals)}
         return inner
 
 class recon_algorithms(Enum):
