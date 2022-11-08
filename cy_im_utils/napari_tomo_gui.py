@@ -16,6 +16,7 @@ from magicgui import magicgui
 from magicgui.tqdm import tqdm
 from pathlib import Path
 from enum import Enum
+from dask.array import array as dask_array
 #from tqdm import tqdm
 import astra
 import configparser
@@ -165,7 +166,6 @@ class tomo_config_handler:
         """
         update_keys = [ 
                         'median_xy',
-                        'num thresh filters',
                         'thresh median kernels',
                         'thresh median z-scores'
                         ]
@@ -183,22 +183,43 @@ class napari_tomo_gui:
     """
     def __init__(   self) -> None:
         self.starting_init()
-        self.widgets = [
-                        self.select_config(),
-                        self.transpose_widget(),
-                        self.select_norm(),
-                        self.crop_image(),
-                        self.cor_wrapper(),
-                        self.median_widget(),
-                        self.load_images(),
-                        self.show_transmission(),
-                        self.reconstruct_interact(),
-                        self.show_reconstruction(),
-                        self.sare_widget(),
-                        self.reset()
-                        ]
+        self.sare_bool = False
         self.viewer = napari.Viewer()
-        self.viewer.window.add_dock_widget(self.widgets, name = 'Tomo Prep')
+        self.viewer.window.add_dock_widget(self.select_config(),
+                name = 'Config',
+                )
+
+    def _secondary_widget(self) -> None:
+        """ Once a config has been selected this widget will be loaded """
+        self.widgets ={'Prep':[
+                                self.transpose_widget(),
+                                self.select_norm(),
+                                self.crop_image(),
+                                self.cor_wrapper(),
+                                self.median_widget(),
+                                ],
+                        'Transmission':[
+                                    self.load_images(),
+                                    self.show_transmission(),
+                                    self.reset_transmission(),
+                                    ],
+                        'Reconstruction':[
+                            self.reconstruct_interact(),
+                            self.show_reconstruction(),
+                            ],
+                        'Stripe Artifact Removal':[
+                            self.sare_widget(),
+                            self.sare_apply()
+                            ],
+                        'Reset':[
+                            self.reset()
+                            ]
+                        }
+        for key,val in self.widgets.items():
+            self.viewer.window.add_dock_widget( val,
+                                                name = key,
+                                                add_vertical_stretch = False
+                                                )
 
     #---------------------------------------------------------------------------
     #                       UTILS
@@ -233,6 +254,7 @@ class napari_tomo_gui:
             imread_fcn = imread_fit
 
         self.transmission_sample = imread_fcn(proj_files[image_index])
+        self.tm_global_index = image_index
 
     def fetch_files(self, path_, ext: str = 'tif'):
         """ Jesus Christ i've written this line a million times
@@ -300,7 +322,11 @@ class napari_tomo_gui:
             combined[i] = attenuation
         combined = cp.sum(combined, axis = 0).get()
 
+        tp = self.search_settings('transpose',False)
+
+        combined = combined.T if tp else combined
         self.combined_image = combined
+
 
         self.viewer.add_image(  combined,
                                 name = 'combined image',
@@ -432,9 +458,10 @@ class napari_tomo_gui:
         if 'median_xy' in prep_handle.keys():
             kernel = prep_handle['median_xy']
             image = median_gpu(image, (kernel,kernel))
-        if 'num thresh filters' in prep_handle.keys():
+        if 'thresh median kernels' in prep_handle.keys():
             kernels = prep_handle['thresh median kernels']
             z_scores = prep_handle['thresh median z-scores']
+            assert len(kernels) == len(z_scores),"Dissimilar kernels and zs"
             for kern,z_sc in zip(kernels,z_scores):
                 image = thresh_median_2D_GPU(image, kern, z_sc)
         return image
@@ -634,7 +661,6 @@ class napari_tomo_gui:
             logging.warning("Interact needs to be executed in a Notebook"
                             "Environment - This method is not being executed")
 
-
     def ORTHO_interact(self, **kwargs) -> None:
         """
         Wrapper for COR_interact in visualization
@@ -727,7 +753,6 @@ class napari_tomo_gui:
                         where = self.transmission[:,::ds_factor,:] > 0
                         ).astype(np.float32)
         
-
     def reconstruct(self, 
                     ds_interval: int = 1,
                     iterations: int = 1,
@@ -847,7 +872,9 @@ class napari_tomo_gui:
 
     def select_config(self):
         @magicgui(call_button = "Select Config",
-                config_file = {'label':'Select Config File (.ini)'})
+                config_file = {'label':'Select Config File (.ini)'},
+                persist = True
+                )
         def inner(config_file = Path.home()):
             logging.info("-"*80)
             logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
@@ -869,12 +896,23 @@ class napari_tomo_gui:
             self.load_field('flat')
             self.fetch_combined_image()
             self.load_transmission_sample()
+            self._secondary_widget()
 
         return inner
 
+    def search_settings(self,search_key,default) -> "various":
+        for key,val in self.settings.items():
+            for sub_key,sub_val in val.items():
+                if search_key == sub_key:
+                    return sub_val
+        else:
+            return default
+
     def transpose_widget(self):
+        tp = self.search_settings("transpose",default = False)
+
         @magicgui(call_button = 'Apply Transpose')
-        def inner(Transpose: bool = False):
+        def inner(Transpose: bool = tp):
             if Transpose:
                 self.transpose = Transpose
                 self.combined_image = self.combined_image.T
@@ -886,8 +924,25 @@ class napari_tomo_gui:
                             )
         return inner
 
-
     def select_norm(self):
+        """ 
+        If the configuration already has norm parameters:
+            add the shape for the norm parameters
+
+        """
+        if 'norm' in self.settings:
+            if self.settings['pre_processing']['transpose']:
+                keys = ['y0','y1','x0','x1']
+            else:
+                keys = ['x0','x1','y0','y1']
+            x0,x1,y0,y1 = [self.settings['norm'][key] for key in keys]
+            verts = np.array([  [x0,y0],
+                                [x0,y1],
+                                [x1,y1],
+                                [x1,y0]], dtype = np.uint32)
+            self.viewer.add_shapes(verts, name = 'Norm', face_color = 'r')
+            self.norm_patch = [y0,y1,x0,x1]
+
         @magicgui(call_button = "Select norm")
         def inner():
             verts = np.round(self.viewer.layers[-1].data[0][:,-2:]
@@ -908,6 +963,29 @@ class napari_tomo_gui:
         """ This returns the widget that selects the crop portion of the image
         Note: it also mutes the full image and 
         """
+        if 'crop' in self.settings:
+            if self.settings['pre_processing']['transpose']:
+                keys = ['y0','y1','x0','x1']
+            else:
+                keys = ['x0','x1','y0','y1']
+            x0,x1,y0,y1 = [self.settings['crop'][key] for key in keys]
+            verts = np.array([  [x0,y0],
+                                [x0,y1],
+                                [x1,y1],
+                                [x1,y0]], dtype = np.uint32)
+            self.viewer.add_shapes( verts,
+                                    name = 'Crop',
+                                    face_color = 'b',
+                                    opacity = 0.2)
+            slice_y = slice(y0,y1)
+            slice_x = slice(x0,x1)
+            crop_image = self.combined_image[slice_x,slice_y]
+            self.mute_all()
+            self.viewer.add_image(  crop_image,
+                                    name = 'cropped image',
+                                    colormap = 'twilight_shifted')
+            self.crop_patch = [y0,y1,x0,x1]
+
         @magicgui(call_button = "Crop Image")
         def inner():
             crop_key = 'Crop'
@@ -929,6 +1007,17 @@ class napari_tomo_gui:
         return inner
 
     def cor_wrapper(self):
+        if 'COR' in self.settings:
+            y0 = self.settings['COR']['y0']
+            y1 = self.settings['COR']['y1']
+            if 'crop' in self.settings:
+                x_coord = (self.crop_patch[1]-self.crop_patch[0])/2
+            else:
+                x_coord = 0
+            verts = np.array([  [y0,x_coord],
+                                [y1,x_coord]])
+            self.viewer.add_points(verts, name = 'COR Points', size = 50)
+        
         @magicgui(call_button = "Calculate Center of Rotation")
         def inner():
             points_key = "COR Points"
@@ -981,9 +1070,30 @@ class napari_tomo_gui:
         return inner
 
     def median_widget(self):
+        median_init = self.search_settings("median_xy", default = 1)
+        kernels_init = self.search_settings("thresh median kernels", default = '')
+        z_scores_init = self.search_settings("thresh median z-scores", default = '')
+        print('--->',z_scores_init)
+        replace_elements = ["[","]"," "]
+        if kernels_init != '' and z_scores_init != '':
+            kernels_init = str(kernels_init)
+            z_scores_init = str(z_scores_init)
+            for elem in replace_elements:
+                kernels_init = kernels_init.replace(elem,"")
+                z_scores_init = z_scores_init.replace(elem,"")
+
         @magicgui(call_button = "Preview Median",
-                median_size = {'step':2,'value':1})
-        def inner(median_size: int = 1, kernels: str = '', z_scores: str = ''):
+                image_index = {'step':1,'value':0,'max':1e9},
+                median_size = {'step':2,'value':median_init}
+                )
+        def inner(
+                image_index: int = 0,
+                median_size: int = 1,
+                kernels: str = kernels_init,
+                z_scores: str = z_scores_init):
+            if image_index != self.tm_global_index:
+                self.load_transmission_sample(image_index)
+                self.tm_global_index = image_index
             transmission_image = self.transmission_sample
             handle = self.settings['pre_processing']
             handle['median_xy'] = median_size
@@ -1005,6 +1115,7 @@ class napari_tomo_gui:
                                                                 )
             print('kernels = ',kernels,'; z_scores= ',z_scores)
             for kern,z_score in zip(kernels,z_scores):
+                print(f'applying {kern} with {z_score}')
                 temp = thresh_median_2D_GPU(
                             cp.array(med_image[-1], dtype = cp.float32),
                                                         kern,
@@ -1022,7 +1133,7 @@ class napari_tomo_gui:
                     med_image = np.transpose(med_image,(0,2,1))
 
             self.mute_all()
-            self.viewer.add_image(med_image,
+            self.viewer.add_image(  med_image,
                                     name = med_layer_name,
                                     colormap = 'turbo')
         return inner
@@ -1030,7 +1141,10 @@ class napari_tomo_gui:
     def load_images(self):
         @magicgui(call_button = "Load Projections to Transmission")
         def inner():
-            self.load_projections()
+            if not self.sare_bool:
+                self.load_projections()
+            else:
+                logging.warning("Stripe Filter Has Been Applied, Reset Transmission to Load more Transmission Files")
         return inner
 
     def show_transmission(self):
@@ -1043,9 +1157,20 @@ class napari_tomo_gui:
                 pass
             self.mute_all()
             ds = down_sampling
-            self.viewer.add_image(  self.transmission[::ds,::ds,::ds].copy(),
+            self.viewer.add_image(  
+                            dask_array(self.transmission[::ds,::ds,::ds]),
                                     name = 'Transmission',
                                     colormap = 'cividis')
+        return inner
+
+    def reset_transmission(self):
+        @magicgui(call_button = "Reset Transmission")
+        def inner():
+            if 'Transmission' in self.viewer.layers:
+                self.viewer.layers.remove('Transmission')
+            del self.transmission
+            self.files = []
+            self.sare_bool = False
         return inner
 
     def reconstruct_interact(self):
@@ -1080,11 +1205,15 @@ class napari_tomo_gui:
         return inner
 
     def sare_widget(self):
+        snr_init = self.search_settings('snr',1.0)
+        la_size_init = self.search_settings('la_size',1)
+        sm_size_init = self.search_settings('sa_size',1)
+
         @magicgui(call_button = 'Preview Ring Filter',
-                row={'value':0},
-                snr={'value':1.0},
-                la_size={'value':1,'step':2},
-                sm_size={'value':1,'step':2},
+                row={'value':0,'min':0,'max':10_000},
+                snr={'value':snr_init},
+                la_size={'value':la_size_init,'step':2,'min':1},
+                sm_size={'value':sm_size_init,'step':2,'min':1},
                 )
         def inner(row: int,
                 snr: float,
@@ -1111,8 +1240,13 @@ class napari_tomo_gui:
                     **sino_args)
 
             filtered_recon = astra_2d_simple(
-                    -np.log(filtered, where = sinogram_local > 0),
+                    -np.log(filtered, where = filtered > 0),
                     **sino_args)
+
+            #print('non finites (sinogram_local) = ',np.sum(~np.isfinite(sinogram_local)))
+            #print('non finites (sinogram filtered) = ',np.sum(~np.isfinite(filtered)))
+            #print('non finites (unfiltered) = ',np.sum(~np.isfinite(unfiltered_recon)))
+            #print('non finites (filtered) = ',np.sum(~np.isfinite(filtered_recon)))
 
             self.mute_all()
             sinogram_layer_name = "sare sinogram stack"
@@ -1127,15 +1261,24 @@ class napari_tomo_gui:
 
             self.viewer.add_image(  sinograms,
                                     name = sinogram_layer_name,
-                                    colormap = 'viridis')
+                                    colormap = 'viridis',
+                                    visible = False)
 
             self.viewer.add_image(  recons,
                                     name = recon_layer_name,
-                                    colormap = 'viridis',
-                                    visible = False)
+                                    colormap = 'viridis')
+
             keys = ['snr','la_size','sm_size']
             vals  = [snr,la_size,sm_size]
             self.settings['SARE'] = {key:val for key,val in zip(keys,vals)}
+        return inner
+
+    def sare_apply(self):
+        @magicgui(call_button = 'Apply Ring Filter (In Place)')
+        def inner(batch_size: int = 10):
+            self.config.update_SARE()
+            self.remove_all_stripe(batch_size = batch_size)
+            self.sare_bool = True
         return inner
 
 class recon_algorithms(Enum):
@@ -1144,32 +1287,141 @@ class recon_algorithms(Enum):
     SIRT_CUDA = "SIRT_CUDA"
 
 class recon_geometry(Enum):
-    parallel = "parallel"
-    cone = "cone"
+    Parallel = "parallel"
+    Cone = "cone"
 
 class tomo_config_gen_gui:
     def __init__(self):
+        self.settings = {
+                'general':{},
+                'pre_processing':{},
+                'paths':{},
+                'recon':{}
+                }
         self.generate_config_widget().show(run = True)
 
     def generate_config_widget(self):
         @magicgui(call_button = 'Generate Config',
+                main_window = True,                 # gives a help option
+                persist = True,                     # previous values are automatically reloaded
                 layout = 'vertical',
-                dark_files = {"label":'Select File in Dark Directory'},
-                flat_files = {"label":'Select File in Flat Directory'},
-                ext = {"value":"tif"},
-                source_detector = {"value":'0.0 (mm)'},
-                origin_detector = {"value":'0.0 (mm)'},
+                Name = {"label":'Name of Experiment'},
+                Dark_files = {"label":'Select File in Dark Directory'},
+                Flat_files = {"label":'Select File in Flat Directory'},
+                Proj_files = {"label":'Select File in Projections Directory'},
+                transpose = {'label':"Transpose"},
+                dtype = {"value":"float32"},
+                Extension = {"value":"tif"},
+                Delimiter = {'label':'Delimiter for File Naming',"value":"_"},
+                Angle_argument = {'label':'Angle Position in File Name',"value":1},
+                Source_detector_distance = {
+                                    'label':'Source to Detector Distance (mm)',
+                                            "value":0.0,
+                                            'max':1e9},
+                Origin_detector_distance = {
+                        'label':'Origin to Detector Distance (mm)',
+                        "value":0.0,
+                        'max':1e9},
+                Pixel_pitch = {
+                            'label':'Pixel Pitch (mm)',
+                            'value':0.0,
+                            'step':0.0001},
+                Reproduction_ratio = {'value':1.0},
+                Iterations = {'value':1,'max':1e9},
                 )
-        def inner(dark_files = Path.home(),
-                flat_files = Path.home(),
-                ext = "*.tif",
-                source_detector: str = '0.0',
-                origin_detector: str = '0.0',
-                algorithm = recon_algorithms.FDK_CUDA,
-                geometry = recon_geometry.parallel
+        def inner(
+                Name: str = '',
+                Dark_files = Path.home(),
+                Flat_files = Path.home(),
+                Proj_files = Path.home(),
+                dtype = 'float32',
+                Extension = "*.tif",
+                Delimiter = "_",
+                transpose: bool = False,
+                Angle_argument:int = 1,
+                Source_detector_distance: float = 0.0,
+                Origin_detector_distance: float = 0.0,
+                Pixel_pitch: float = 1.0,
+                Reproduction_ratio: float = 1.0,
+                Geometry = recon_geometry.Parallel,
+                Algorithm = recon_algorithms.FDK_CUDA,
+                Iterations: int = 1,
                 ):
-            pass
+            """ 
+            This GUI helps to generate a config file that the Napari gui can
+            read. The file selectors require a single file to be selected in
+            the target directory, and the program finds the parent directory to
+            give to the config.
+
+
+            Parameters
+            ----------
+            name: str 
+                The name of the experiment. This is also the name that is used
+                for the 
+            Dark Files: Path 
+                Select a file in the directory of the dark images
+            Flat Files: Path 
+                Select a file in the directory of the flat images
+            Proj Files: Path 
+                Select a file in the directory of the projection images
+            Extension: str
+                Image file extension (e.g., tif or fit)
+            Source_detector_distance: float
+                Distance from the source to the detector  in mm
+            Origin_detector_distance: float
+                Distance from the origin (center of sample) to the detector in
+                mm
+            Pixel_pitch: float
+                Camera pixel pitch in mm
+            Reproduction_ratio: float
+                Reproduction ratio...
+            Geometry: str
+                Reconstruction geometry (parallel or cone)
+            Algorithm: str
+                Reconstruction Algorithm
+            Iterations: int (optional)
+                If an iterative method is selected, this specifies iterations
+
+
+            """
+            self.settings['general']['name'] = Name
+            self.settings['paths']['dark_path'] = str(Dark_files.parent).replace("\\","/")
+            self.settings['paths']['flat_path'] = str(Flat_files.parent).replace("\\","/")
+            self.settings['paths']['projection_path'] = str(Proj_files.parent).replace("\\","/")
+            self.settings['pre_processing']['extension'] = Extension
+            self.settings['pre_processing']['filename_delimiter'] = Delimiter
+            self.settings['pre_processing']['angle_argument'] = Angle_argument
+            self.settings['pre_processing']['dtype'] = dtype
+            self.settings['pre_processing']['transpose'] = 'True' if transpose else 'False'
+
+
+            self.settings['recon']['camera pixel size'] = Pixel_pitch
+            self.settings['recon']['source to origin distance'] = Source_detector_distance - Origin_detector_distance
+            self.settings['recon']['origin to detector distance'] = Origin_detector_distance
+            self.settings['recon']['reproduction ratio'] = Reproduction_ratio
+            self.settings['recon']['recon algorithm'] = Algorithm.value
+            self.settings['recon']['recon geometry'] = Geometry.value
+            self.settings['recon']['iterations'] = Iterations
+
+            for key,val in self.settings.items():
+                print(key,val)
+
+            self.write_config()
+
         return inner
+
+    def write_config(self):
+        parser = configparser.ConfigParser()
+        for key,val in self.settings.items():
+            parser.add_section(key)
+            for sub_key,sub_val in val.items():
+                parser.set(key,sub_key,str(sub_val))
+
+        f_name = Path(".") / f"{self.settings['general']['name']}.ini"
+        print(f"Writing Config File to :{str(f_name)}")
+        with open(f_name ,'w') as file_:
+            parser.write(file_)
 
 def test_gui():
     inst = napari_tomo_gui()
@@ -1182,4 +1434,4 @@ def test_config_gen():
 if __name__ == "__main__":
     inst = napari_tomo_gui()
     napari.run()
-
+    #test_config_gen()
