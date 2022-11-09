@@ -185,41 +185,53 @@ class napari_tomo_gui:
         self.starting_init()
         self.sare_bool = False
         self.viewer = napari.Viewer()
-        self.viewer.window.add_dock_widget(self.select_config(),
+        self.viewer.title = "NIST Tomography GUI"
+        self.config_widget = self.viewer.window.add_dock_widget(self.select_config(),
                 name = 'Config',
+                area = 'right'
                 )
 
     def _secondary_widget(self) -> None:
         """ Once a config has been selected this widget will be loaded """
-        self.widgets ={'Prep':[
+        self.widgets ={
+            'Prep':[
                                 self.transpose_widget(),
                                 self.select_norm(),
                                 self.crop_image(),
                                 self.cor_wrapper(),
                                 self.median_widget(),
                                 ],
-                        'Transmission':[
-                                    self.load_images(),
-                                    self.show_transmission(),
-                                    self.reset_transmission(),
-                                    ],
-                        'Reconstruction':[
-                            self.reconstruct_interact(),
-                            self.show_reconstruction(),
-                            ],
-                        'Stripe Artifact Removal':[
-                            self.sare_widget(),
-                            self.sare_apply()
-                            ],
-                        'Reset':[
-                            self.reset()
-                            ]
+            'Transmission':[
+                                self.load_images(),
+                                self.show_transmission(),
+                                self.reset_transmission(),
+                                ],
+            'Reconstruction':[
+                                self.reconstruct_interact(),
+                                self.show_reconstruction(),
+                                self.write_reconstruction_widget(),
+                                ],
+            'Stripe Artifact Removal':[
+                                self.sare_widget(),
+                                self.sare_apply()
+                                ],
+            'Reset':[
+                                self.reset()
+                                ]
                         }
-        for key,val in self.widgets.items():
-            self.viewer.window.add_dock_widget( val,
+        for i,(key,val) in enumerate(self.widgets.items()):
+            handle = self.viewer.window.add_dock_widget( val,
                                                 name = key,
-                                                add_vertical_stretch = False
+                                                add_vertical_stretch = True,
+                                                area = 'right'
                                                 )
+
+            # THIS ADDS THE WIDGETS AS TABS BEHIND THE CONFIG!
+            self.viewer.window._qt_window.tabifyDockWidget(
+                    self.config_widget,
+                    handle)
+
+            
 
     #---------------------------------------------------------------------------
     #                       UTILS
@@ -466,6 +478,28 @@ class napari_tomo_gui:
                 image = thresh_median_2D_GPU(image, kern, z_sc)
         return image
 
+    def rotated_crop(   self,
+                        image: cp.array,
+                        theta: float,
+                        crop: list
+                        ) -> cp.array:
+        """ This pads the array so that the rotation does not introduce zeroes,
+        maybe a bit clunky, but whatever
+        """
+        x0,x1,y0,y1 = crop
+        theta_rad = np.deg2rad(theta)
+        trig_product = np.abs(np.sin(theta_rad)*np.cos(theta_rad))
+        pad_x = np.ceil(trig_product*(y1-y0)).astype(np.uint32)//2
+        pad_y = np.ceil(trig_product*(x1-x0)).astype(np.uint32)//2
+        x_0,x_1,y_0,y_1 = np.ceil([x0-pad_x,x1+pad_x,y0-pad_y,y1+pad_y]).astype(np.uint32)
+        slice_2 = (slice(y_0,y_1),slice(x_0,x_1))
+        image_2 = image[slice_2]
+        im2_rot = rotate_gpu(image_2,
+                         theta,
+                         reshape = False)
+        slice_3 = (slice(pad_y,pad_y+(y1-y0)),slice(pad_x,pad_x+(x1-x0)))
+        return im2_rot[slice_3]
+
     def load_projections(self,
                         truncate_dataset : int = 1,
                         ) -> None:
@@ -571,10 +605,11 @@ class napari_tomo_gui:
             im /= flat_
             im *= flat_scale/scale
             #self.norm_mags[i] = cp.mean(im[self.norm_y,self.norm_x]).get()
-            im = im[self.crop_y,self.crop_x]
+            #im = im[self.crop_y,self.crop_x]
             # Rotate will produce all zeros if it has non-finites
-            im[~cp.isfinite(im)] = 0
-            im = rotate_gpu(im, -theta, reshape = False)
+            #im[~cp.isfinite(im)] = 0
+            #im = rotate_gpu(im, -theta, reshape = False)
+            im = self.rotated_crop(im, -theta, self.crop_patch)
             # DO THE LOG TRANFORM AFTER THE VO FILTER!!!!!!!
             temp[:,i,:] = cp.asnumpy(im)
 
@@ -1035,9 +1070,16 @@ class napari_tomo_gui:
             cor = center_of_rotation(cropped_image,cor_y0,cor_y1, ax = ax[0])
             theta = np.tan(cor[0])*(180/np.pi)
             ax[0].set_title(f"theta = {theta}")
-            rot = rotate_gpu(cp.array(cropped_image, dtype = cp.float32),
-                            -theta,
-                            reshape = False).get()
+            #rot = rotate_gpu(cp.array(cropped_image, dtype = cp.float32),
+            #                -theta,
+            #                reshape = False).get()
+            combined_cupy = cp.array(self.combined_image, dtype = cp.float32)
+            rot = self.rotated_crop(
+                    combined_cupy,
+                    -theta,
+                    [y0,y1,x0,x1]
+                    ).get()
+
             cor2 = center_of_rotation(rot, cor_y0, cor_y1, ax = ax[1])
             crop_nx = y1-y0
             dx = int(np.round(cor2[1]))-crop_nx//2
@@ -1047,9 +1089,14 @@ class napari_tomo_gui:
             slice_x = slice(x0,x1)
             slice_y = slice(y0,y1)
             crop2 = self.viewer.layers['combined image'].data[slice_x,slice_y]
-            crop2rot = rotate_gpu(cp.array(crop2, dtype = cp.float32),
-                                    -theta,
-                                    reshape = False).get()
+            #crop2rot = rotate_gpu(cp.array(crop2, dtype = cp.float32),
+            #                        -theta,
+            #                        reshape = False).get()
+            crop2rot = self.rotated_crop(
+                    combined_cupy,
+                    -theta,
+                    [y0,y1,x0,x1]
+                    ).get()
             cor3 = center_of_rotation(crop2rot,cor_y0,cor_y1, ax = ax[2])
             ax[2].set_title(f"corrected center dx = {dx}")
             fig.tight_layout()
@@ -1197,10 +1244,27 @@ class napari_tomo_gui:
             else:
                 print("Not Reconstructed Yet")
         return inner
-    
+
+    def write_reconstruction_widget(self):
+        @magicgui(call_button = "Write Reconstruction",
+                Output_dir={
+                    'label':'Output Directory for Reconstruction',
+                    'mode':'d'                  # select a directory
+                    }
+                )
+        def inner(Output_dir= Path.home(),
+            prefix = 'reconstruction',
+            extension = 'tif'):
+            nz = self.reconstruction.shape[0]
+            for i in tqdm(range(nz)):
+                f_name = Output_dir / f'{prefix}_{i:0d}.{extension}'
+                Image.fromarray(self.reconstruction[i]).save(f_name)
+        return inner
+
     def reset(self):
         @magicgui(call_button = 'Reset')
         def inner():
+            self.viewer.window.close()
             self.__init__()
         return inner
 
@@ -1243,10 +1307,10 @@ class napari_tomo_gui:
                     -np.log(filtered, where = filtered > 0),
                     **sino_args)
 
-            #print('non finites (sinogram_local) = ',np.sum(~np.isfinite(sinogram_local)))
-            #print('non finites (sinogram filtered) = ',np.sum(~np.isfinite(filtered)))
-            #print('non finites (unfiltered) = ',np.sum(~np.isfinite(unfiltered_recon)))
-            #print('non finites (filtered) = ',np.sum(~np.isfinite(filtered_recon)))
+            print('non finites (sinogram_local) = ',np.sum(~np.isfinite(sinogram_local)))
+            print('non finites (sinogram filtered) = ',np.sum(~np.isfinite(filtered)))
+            print('non finites (unfiltered) = ',np.sum(~np.isfinite(unfiltered_recon)))
+            print('non finites (filtered) = ',np.sum(~np.isfinite(filtered_recon)))
 
             self.mute_all()
             sinogram_layer_name = "sare sinogram stack"
@@ -1306,9 +1370,9 @@ class tomo_config_gen_gui:
                 persist = True,                     # previous values are automatically reloaded
                 layout = 'vertical',
                 Name = {"label":'Name of Experiment'},
-                Dark_files = {"label":'Select File in Dark Directory'},
-                Flat_files = {"label":'Select File in Flat Directory'},
-                Proj_files = {"label":'Select File in Projections Directory'},
+                Dark_files = {"label":'Select Dark Image Directory','mode':'d'},
+                Flat_files = {"label":'Select Flat Image Directory','mode':'d'},
+                Proj_files = {"label":'Select Projections Directory','mode':'d'},
                 transpose = {'label':"Transpose"},
                 dtype = {"value":"float32"},
                 Extension = {"value":"tif"},
