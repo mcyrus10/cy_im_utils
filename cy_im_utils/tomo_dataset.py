@@ -788,4 +788,3 @@ class tomo_dataset:
             im = Image.fromarray(arr_handle[i,:,:])
             f_name = directory / f"{arr_name}_{i:06}.tif"
             im.save(f_name)
-

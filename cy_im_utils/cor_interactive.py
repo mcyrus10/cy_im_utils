@@ -5,13 +5,12 @@ more modular
 """
 from PIL import Image
 from cupyx.scipy.ndimage import median_filter as median_gpu
-from glob import glob
 from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual,RadioButtons,Text,IntRangeSlider,interactive
 from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Rectangle
 from matplotlib.transforms import Affine2D
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from scipy.ndimage import rotate as rotate_cpu, median_filter
+from scipy.ndimage import rotate as rotate_cpu
 from skimage.transform import warp
 from tqdm import tqdm
 import logging
@@ -221,6 +220,7 @@ class center_of_rotation_interact:
                 self.data_dict['norm']['y0'] = norm_patch[2]
                 self.data_dict['norm']['y1'] = norm_patch[3]
                 self.data_dict['norm']['dx'] = norm_patch[1]-norm_patch[0]
+                self.data_dict['norm']['dy'] = norm_patch[3]-norm_patch[2]
                 self.data_dict['norm']['dy'] = norm_patch[3]-norm_patch[2]
                 self.data_dict['COR']['y0'] = cor_y0
                 self.data_dict['COR']['y1'] = cor_y1

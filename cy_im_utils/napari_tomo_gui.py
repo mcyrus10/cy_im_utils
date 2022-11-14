@@ -1,23 +1,29 @@
 """ 
-this is a behemoth that can work in jupyter, napari and in a scripted
-context. 
+
+This file has the tomo_dataset class that defines how to read/write and process
+frames. 
+The napari_gui inherits from tomo_dataset and just wraps all the method calls
+with button presses, and likewise the jupyter version can operate inside a
+notebook
+
+
 """
 from sys import path
 path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
 from cy_im_utils.prep import radial_zero,field_gpu,imstack_read,center_of_rotation,imread_fit
-from cy_im_utils.recon_utils import ASTRA_General,astra_2d_simple
+from cy_im_utils.recon_utils import ASTRA_General,astra_2d_simple,astra_tomo_handler
 from cy_im_utils.sarepy_cuda import *
-from cy_im_utils.visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
 from cy_im_utils.thresholded_median import thresh_median_2D_GPU
+from cy_im_utils.visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
 
 from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
+from dask.array import array as dask_array
+from enum import Enum
 from magicgui import magicgui
 from magicgui.tqdm import tqdm
+from napari.qt.threading import thread_worker
 from pathlib import Path
-from enum import Enum
-from dask.array import array as dask_array
-#from tqdm import tqdm
 import astra
 import configparser
 import cupy as cp
@@ -28,6 +34,8 @@ import numpy as np
 import os
 import pathlib
 import shutil
+
+from ipywidgets import widgets,Layout
 
 
 class tomo_config_handler:
@@ -136,6 +144,13 @@ class tomo_config_handler:
 
         self.log_field("COR")
 
+
+        # Transpose (might have changed)
+        self.config['pre_processing']['transpose'] =\
+                        str(self.data_dict['pre_processing']['transpose'])
+
+        self.log_field("pre_processing")
+
         # Crop and Norm
         for field in ['crop','norm']:
             self.conditional_add_field(field)
@@ -145,6 +160,34 @@ class tomo_config_handler:
 
         self.log_field("crop")
         self.log_field("norm")
+
+        self.write()
+
+    def update_recon_params(self) -> None:
+        """
+        This method updates the Reconstruction parameters in the config
+        """
+        # Reconstruction Parameters
+        field = "recon"
+        self.conditional_add_field(field)
+        keys = [
+                'camera pixel size',
+                'source to origin distance',
+                'origin to detector distance',
+                'reproduction ratio',
+                'recon algorithm',
+                'recon geometry',
+                'iterations',
+                'ng',
+                'alpha',
+                'seed_path'
+                ]
+        for key in keys:
+            if key not in self.data_dict[field]:
+                continue
+            self.config[field][key] = str(self.data_dict[field][key])
+
+        self.log_field("recon")
 
         self.write()
 
@@ -176,85 +219,28 @@ class tomo_config_handler:
         self.log_field("pre_processing")
         self.write()
 
-class napari_tomo_gui:
-    """
-    This is the big boy: it holds the projections and can facilitate the recon
-    operations
-    """
-    def __init__(   self) -> None:
-        self.starting_init()
+class tomo_dataset:
+    def __init__(self, config_file):
+        logging.info("-"*80)
+        logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
+        logging.info("-"*80)
+        self.previous_settings = {}
+        self.config = tomo_config_handler(config_file)
+        self.settings = self.config.data_dict
+        self.files = []
+        logging.info(f"{'='*20} SETTINGS: {'='*20}")
+        for key,val in self.settings['pre_processing'].items():
+            setattr(self,key,val)
+        for key,val in self.settings.items():
+            logging.info(f"{key}:")
+            for sub_key,sub_val in val.items():
+                logging.info(f"\t{sub_key} : {sub_val}")
+        logging.info(f"{'='*20} End SETTINGS {'='*20}")
         self.sare_bool = False
-        self.viewer = napari.Viewer()
-        self.viewer.title = "NIST Tomography GUI"
-        self.config_widget = self.viewer.window.add_dock_widget(self.select_config(),
-                name = 'Config',
-                area = 'right'
-                )
-
-    def _secondary_widget(self) -> None:
-        """ Once a config has been selected this widget will be loaded """
-        self.widgets ={
-            'Prep':[
-                                self.transpose_widget(),
-                                self.select_norm(),
-                                self.crop_image(),
-                                self.cor_wrapper(),
-                                self.median_widget(),
-                                ],
-            'Transmission':[
-                                self.load_images(),
-                                self.show_transmission(),
-                                self.reset_transmission(),
-                                ],
-            'Reconstruction':[
-                                self.reconstruct_interact(),
-                                self.show_reconstruction(),
-                                self.write_reconstruction_widget(),
-                                ],
-            'Stripe Artifact Removal':[
-                                self.sare_widget(),
-                                self.sare_apply()
-                                ],
-            'Reset':[
-                                self.reset()
-                                ]
-                        }
-        for i,(key,val) in enumerate(self.widgets.items()):
-            handle = self.viewer.window.add_dock_widget( val,
-                                                name = key,
-                                                add_vertical_stretch = True,
-                                                area = 'right'
-                                                )
-
-            # THIS ADDS THE WIDGETS AS TABS BEHIND THE CONFIG!
-            self.viewer.window._qt_window.tabifyDockWidget(
-                    self.config_widget,
-                    handle)
-
-            
 
     #---------------------------------------------------------------------------
     #                       UTILS
     #---------------------------------------------------------------------------
-    def starting_init(self) -> None:
-        """ getting to square 0 """
-        logging.info("Starting new")
-        self.transpose = False
-        self.files = []
-        self.settings = {}
-        try:
-            del self.reconstruction
-        except:
-            pass
-        try:
-            del self.transmission
-        except:
-            pass
-        try:
-            del self.combined_image
-        except:
-            pass
-
     def load_transmission_sample(self, image_index: int = 0):
         """ This is for loading an image for the median to operate on """
         proj_path = self.settings['paths']['projection_path']
@@ -265,7 +251,10 @@ class napari_tomo_gui:
         elif 'fit' in ext:
             imread_fcn = imread_fit
 
-        self.transmission_sample = imread_fcn(proj_files[image_index])
+        sample = imread_fcn(proj_files[image_index])
+        if self.settings['pre_processing']['transpose']:
+            sample = imread_fcn(proj_files[image_index]).T
+        self.transmission_sample = sample
         self.tm_global_index = image_index
 
     def fetch_files(self, path_, ext: str = 'tif'):
@@ -387,7 +376,7 @@ class napari_tomo_gui:
         
     def recon_radial_zero(self, radius_offset: int = 0) -> None:
         """
-        this function makes all the values outside the radius eq
+        this function makes all the values outside the radius 0
 
         args:
         -----
@@ -396,7 +385,8 @@ class napari_tomo_gui:
 
         """
         n_frame,detector_width,_ = self.reconstruction.shape
-        tqdm_zeroing = tqdm(range(n_frame), desc = "zeroing outisde crop radius")
+        tqdm_zeroing = tqdm(range(n_frame),
+                                        desc = "zeroing outisde crop radius")
         for f in tqdm_zeroing:
             radial_zero(self.reconstruction[f], radius_offset = radius_offset)
 
@@ -412,9 +402,49 @@ class napari_tomo_gui:
         else:
             assert False, "unknown image extension for imread"
 
-    #---------------------------------------------------------------------------
+    def check_reconstruction_config(self) -> None:
+        """ This is to make sure that geometries are compatible so the user does
+        not pick something that will make astra cry
+        """
+        alg_3d = ['FDK_CUDA','SIRT3D_CUDA']
+        alg_2d = ['FBP_CUDA','SIRT_CUDA','CGLS_CUDA','EM_CUDA','SART_CUDA']
+        fourier_methods = ['FDK_CUDA',"FBP_CUDA"]
+        sirt_methods = ['SIRT3D_CUDA','SIRT_CUDA']
+        iter_methods = ['SIRT_CUDA','SIRT3D_CUDA','SART_CUDA','CGLS_CUDA']
+        geom_3d = ['parallel3d','cone']
+        geom_2d = ['parallel','fanflat']
+        non_par_geom = ['cone','fanflat']
+        alg = self.settings['recon']['recon algorithm'] 
+        geom = self.settings['recon']['recon geometry']
+        if alg not in alg_3d+alg_2d:
+            assert False,f"{alg} is uknown to check_reconstruction_config"
+        if alg in alg_3d:
+            assert geom in geom_3d,f'{alg} (3d) incompatilbe with {geom} geometry (2d)'
+        elif alg in alg_2d:
+            assert geom in geom_2d,f'{alg} (2d) incompatilbe with {geom} geometry (3d)'
+
+        if 'FilterType' in self.settings:
+            if self.settings['FilterType'] != 'none' and \
+                    alg not in fourier_methods:
+                logging.warning("Skipping FilterType for non Fourier Method")
+
+        if 'MinConstraint' in self.settings and alg not in sirt_methods:
+            logging.warning("Skipping MinConstraint for non SIRT Method")
+
+        if alg in iter_methods and 'iterations' not in self.settings['recon']:
+            logging.warning("0 iterations specified for iterative method")
+
+        if geom in non_par_geom:
+            handle = self.settings['recon']
+            assert handle['source to origin distance'] > 0.0,\
+                        "source - detector distance must be greater than 0"
+            assert handle['origin to detector distance'] > 0.0, \
+                        "origin -  detector distance must be greater than 0"
+
+
+    #--------------------------------------------------------------------------
     #                       PRE PROCESSING
-    #---------------------------------------------------------------------------
+    #--------------------------------------------------------------------------
     def load_field(self, mode : str) -> None:
         """
         wrapper for "field_GPU" in prep.py for loading in flat and dark fields
@@ -460,7 +490,8 @@ class napari_tomo_gui:
                               f"{np.array(imread_fcn(files[0])).shape}")
             nx,ny = np.asarray(imread_fcn(files[0])).shape
             field = field_gpu(files, 3)
-        field = self.median_operations_wrapper(cp.array(field, dtype = np.float32)).get()
+        field = self.median_operations_wrapper(
+                                cp.array(field, dtype = np.float32)).get()
         setattr(self,mode,field)
 
     def median_operations_wrapper(self, image: cp.array) -> None:
@@ -491,7 +522,8 @@ class napari_tomo_gui:
         trig_product = np.abs(np.sin(theta_rad)*np.cos(theta_rad))
         pad_x = np.ceil(trig_product*(y1-y0)).astype(np.uint32)//2
         pad_y = np.ceil(trig_product*(x1-x0)).astype(np.uint32)//2
-        x_0,x_1,y_0,y_1 = np.ceil([x0-pad_x,x1+pad_x,y0-pad_y,y1+pad_y]).astype(np.uint32)
+        x_0,x_1,y_0,y_1 = np.ceil([x0-pad_x,x1+pad_x,y0-pad_y,y1+pad_y]
+                                                        ).astype(np.uint32)
         slice_2 = (slice(y_0,y_1),slice(x_0,x_1))
         image_2 = image[slice_2]
         im2_rot = rotate_gpu(image_2,
@@ -533,6 +565,7 @@ class napari_tomo_gui:
         """
         self.config.update_median()
         self.config.update_COR()
+       
 
         proj_path = self.settings['paths']['projection_path']
         logging.info(f"Reading Images From {proj_path}")
@@ -556,8 +589,9 @@ class napari_tomo_gui:
 
         crop_patch = self.crop_patch
         norm_patch = self.norm_patch
-        self.crop_x = slice(crop_patch[0],crop_patch[1])
-        self.crop_y = slice(crop_patch[2],crop_patch[3])
+        #keys = ['x0','x1','y0','y1']
+        #crop_patch = [self.settings['crop'][key] for key in keys]
+        #norm_patch = [self.settings['norm'][key] for key in keys]
         self.norm_x = slice(norm_patch[0],norm_patch[1])
         self.norm_y = slice(norm_patch[2],norm_patch[3])
         theta = self.settings['COR']['theta']
@@ -572,8 +606,6 @@ class napari_tomo_gui:
         dark_local = cp.array(self.dark)
         flat_local = cp.array(self.flat)
         logging.info(f"New Files Shape = {temp.shape}")
-        logging.info(f"crop_y = {self.crop_y}")
-        logging.info(f"crop_x = {self.crop_x}")
 
         load_im = lambda f :  cp.asarray(imread_fcn(f), dtype = self.dtype)
 
@@ -597,20 +629,12 @@ class napari_tomo_gui:
         """
         for i in tqdm_imread:
             im = load_im(new_files[i])
-            #im = median_gpu(im,(self.median_spatial, self.median_spatial))
             im = self.median_operations_wrapper(im)
-            #im -= self.dark
             im -= dark_local
             scale = cp.sum(im[self.norm_y,self.norm_x])
             im /= flat_
             im *= flat_scale/scale
-            #self.norm_mags[i] = cp.mean(im[self.norm_y,self.norm_x]).get()
-            #im = im[self.crop_y,self.crop_x]
-            # Rotate will produce all zeros if it has non-finites
-            #im[~cp.isfinite(im)] = 0
-            #im = rotate_gpu(im, -theta, reshape = False)
-            im = self.rotated_crop(im, -theta, self.crop_patch)
-            # DO THE LOG TRANFORM AFTER THE VO FILTER!!!!!!!
+            im = self.rotated_crop(im, -theta, crop_patch)
             temp[:,i,:] = cp.asnumpy(im)
 
         if hasattr(self,'transmission'):
@@ -619,126 +643,9 @@ class napari_tomo_gui:
             self.transmission = temp
         self.fetch_angles()
 
-    #--------------------------------------------------------------------------
-    #                    VISUALIZATION
-    #--------------------------------------------------------------------------
-    def COR_interact(self,
-                    d_theta : int = 60,
-                    angles : list = [],
-                    apply_thresh: float = None,
-                    med_kernel = 3,
-                    ) -> None:
-        """
-        Wrapper for COR_interact in visualization
-
-        This visualization tool helps you to find the Center of rotation of an
-        image stack
-        """
-        if self.is_jupyter():
-            logging.info("COR Interact Started")
-            ext = self.settings['pre_processing']['extension']
-            imread_fcn = self.return_imread_fcn(ext)
-            assert 360 % d_theta== 0, "all angles must be factors of 360"
-            if not angles:
-                angles = [j*d_theta for j in range(360//d_theta)]
-            flat_local = median_gpu(cp.array(self.flat, dtype = cp.float32), (med_kernel,med_kernel))
-            dark_local = median_gpu(cp.array(self.dark, dtype = cp.float32), (med_kernel, med_kernel))
-            COR_interact(   self.settings,
-                            imread_fcn,
-                            flat_local,
-                            dark_local,
-                            angles,
-                            apply_thresh = apply_thresh,
-                            med_kernel = med_kernel
-                            )
-        else:
-            logging.warning("Interact needs to be executed in a Notebook" 
-                            "Environment - This method is not being executed")
-
-    def SARE_interact(self, figsize : tuple = (12,5)) -> None:
-        """
-        Wrapper for SAREPY Interact in visualization
-
-        This visualization tool helps to determine the best settings for the
-        SARE filter
-        """
-        if self.is_jupyter():
-            logging.info("Stripe Artifact Interact Started")
-            transpose = (1,0,2)
-            SAREPY_interact(self.settings,
-                            np.transpose(self.transmission,transpose),
-                            figsize = figsize)
-        else:
-            logging.warning("Interact needs to be executed in a Notebook"
-                            "Environment - This method is not being executed")
-
-    def median_2D_interact( self,
-                            image_index: int = 0,
-                            figsize : tuple = (12,5),
-                            kwargs: dict = {}
-                            ) -> None:
-        """
-        Wrapper for median filtering operations
-
-        """
-        if self.is_jupyter():
-            logging.info("Median 2D Interact Started")
-            ext = self.settings['pre_processing']['extension']
-            imread_fcn = self.return_imread_fcn(ext)
-            proj_path = self.settings['paths']['projection_path']
-            assert proj_path.is_dir(), f"{str(proj_path)} (path) does not exist"
-            proj_files = sorted(list(proj_path.glob(f"*.{ext}")))
-            test_image = imread_fcn(proj_files[image_index])
-            median_2D_interact( self.settings,
-                                test_image,
-                                **kwargs)
-        else:
-            logging.warning("Interact needs to be executed in a Notebook"
-                            "Environment - This method is not being executed")
-
-    def ORTHO_interact(self, **kwargs) -> None:
-        """
-        Wrapper for COR_interact in visualization
-
-        This visualization tool helps you to find the Center of rotation of an
-        image stack
-        """
-        if self.is_jupyter():
-            logging.info("Orthogonal Plot Interact Started")
-            orthogonal_plot(np.transpose(self.reconstruction,(2,1,0)), **kwargs)
-        else:
-            logging.warning("Interact needs to be executed in a Notebook" 
-                            "Environment - This method is not being executed")
-
     #---------------------------------------------------------------------------
     #                       PROCESSING
     #---------------------------------------------------------------------------
-    def transmission_GPU(self, batch_size : int = 20) -> None:
-        """
-        this method executes gpu_ops on all the batches to create
-        self.transmission
-
-        args:
-        -----
-            batch_size : int
-                size of mini batches for GPU
-        """
-        logging.warning("THIS METHOD IS DEPRECATED, USE 'load_projections_to_attn'")
-        # in case these have been updated by COR Interact
-        crop_patch = self.settings['crop']
-        norm_patch = self.settings['norm']
-        self.crop_x = slice(crop_patch[0],crop_patch[1])
-        self.crop_y = slice(crop_patch[2],crop_patch[3])
-        self.norm_x = slice(norm_patch[0],norm_patch[1])
-        self.norm_y = slice(norm_patch[2],norm_patch[3])
-
-        attn_nx = crop_patch[1]-crop_patch[0]
-        attn_ny = crop_patch[3]-crop_patch[2]
-        n_proj = self.projections.shape[0]
-        self.transmission = np.empty([n_proj,attn_ny,attn_nx], dtype = self.dtype)
-        logging.info(f"transmission shape = {self.transmission.shape}")
-        self.gpu_curry_loop(self.gpu_ops, n_proj, batch_size)
-
     def remove_all_stripe_ops(  self, id0 : int, id1 : int) -> None:
         """
         SAREPY_CUDA takes sinogram as the index 1 (of 0,1,2) right now!!
@@ -808,13 +715,18 @@ class napari_tomo_gui:
             del self.reconstruction
         except:
             pass
-        self.reconstruction = ASTRA_General(
-                                            self.attenuation(ds_interval),
-                                            self.settings['recon'],
-                                            iterations = iterations,
-                                            angles = self.angles,
-                                            seed = seed
-                                            )
+        #self.reconstruction = ASTRA_General(
+        #                                    self.attenuation(ds_interval),
+        #                                    self.settings['recon'],
+        #                                    iterations = iterations,
+        #                                    angles = self.angles,
+        #                                    seed = seed
+        #                                    )
+        logging.info("--- reconstructing ---")
+        print("--- RECONSTRUCTING ---")
+        self.reconstruction = self._reconstructor_.reconstruct_volume(
+                self.attenuation(ds_interval),
+                self.angles)
 
     def _angle_(self, file_name: Path):
         """ This method converts the file_name to a string then splits it based
@@ -897,45 +809,291 @@ class napari_tomo_gui:
             f_name = directory / f"{arr_name}_{i:06}.tif"
             im.save(f_name)
 
+def dataset_select_widget(directory = Path(".")):
+    config_files = list(sorted(directory.glob("*/*.ini")))
+    data_set_select = widgets.Select(options = config_files,
+                            layout = Layout(width = '60%',height = '200px'),
+                                    description = 'Select Config:'
+                                    )
+    display(data_set_select)
+    return data_set_select
+
+class jupyter_tomo_dataset(tomo_dataset):
+    def __init__(self, config = None):
+        assert self.is_jupyter(), "This object only works in a Jupyter environment"
+        super().__init__(config)
+        self._reconstructor_ = astra_tomo_handler(self.settings['recon'])
+
+    def correct_crop_norm(self) -> None:
+        """One of these days i'm going to get all this nonsense straigtened out
+
+        The way that cor_interactive works it modifies x0 and y0 so what looks
+        like the 'x' axis on the plot is actually 'y' so this is correcting
+        that...
+
+        """
+        keys = ['y0','y1','x0','x1']
+        self.crop_patch = [self.settings['crop'][k] for k in keys]
+        self.norm_patch = [self.settings['norm'][k] for k in keys]
+
+    def read_dataset(self):
+        config = self.cfg
+        super().__init__(config)
+
+    def is_jupyter(self) -> bool:
+        """
+        Yanked this from "Parsing Args in Jupyter Notebooks" on YouTube
+        This tells you whether you're executing from a notebook or not
+        """
+        jn = True
+        try:
+            get_ipython()
+        except NameError as err:
+            jn = False
+        return jn
     #--------------------------------------------------------------------------
-    #              Napari Widgets and Functions
+    #                    Jupyter VISUALIZATION
     #--------------------------------------------------------------------------
-    def mute_all(self):
+    def COR_interact(self,
+                    d_theta : int = 60,
+                    angles : list = [],
+                    apply_thresh: float = None,
+                    med_kernel = 3,
+                    ) -> None:
+        """
+        Wrapper for COR_interact in visualization
+
+        This visualization tool helps you to find the Center of rotation of an
+        image stack
+        """
+        if self.is_jupyter():
+            logging.info("COR Interact Started")
+            ext = self.settings['pre_processing']['extension']
+            imread_fcn = self.return_imread_fcn(ext)
+            assert 360 % d_theta== 0, "all angles must be factors of 360"
+            if not angles:
+                angles = [j*d_theta for j in range(360//d_theta)]
+            flat_local = median_gpu(cp.array(self.flat, dtype = cp.float32),
+                                                    (med_kernel,med_kernel))
+            dark_local = median_gpu(cp.array(self.dark, dtype = cp.float32),
+                                                    (med_kernel, med_kernel))
+            COR_interact(   self.settings,
+                            imread_fcn,
+                            flat_local,
+                            dark_local,
+                            angles,
+                            apply_thresh = apply_thresh,
+                            med_kernel = med_kernel
+                            )
+        else:
+            logging.warning("Interact needs to be executed in a Notebook" 
+                            "Environment - This method is not being executed")
+
+    def SARE_interact(self, figsize : tuple = (12,5)) -> None:
+        """
+        Wrapper for SAREPY Interact in visualization
+
+        This visualization tool helps to determine the best settings for the
+        SARE filter
+        """
+        if self.is_jupyter():
+            logging.info("Stripe Artifact Interact Started")
+            transpose = (1,0,2)
+            SAREPY_interact(self.settings,
+                            np.transpose(self.transmission,transpose),
+                            figsize = figsize)
+        else:
+            logging.warning("Interact needs to be executed in a Notebook"
+                            "Environment - This method is not being executed")
+
+    def median_2D_interact( self,
+                            image_index: int = 0,
+                            figsize : tuple = (12,5),
+                            kwargs: dict = {}
+                            ) -> None:
+        """
+        Wrapper for median filtering operations
+
+        """
+        if self.is_jupyter():
+            logging.info("Median 2D Interact Started")
+            ext = self.settings['pre_processing']['extension']
+            imread_fcn = self.return_imread_fcn(ext)
+            proj_path = self.settings['paths']['projection_path']
+            assert proj_path.is_dir(), f"{str(proj_path)} (path) does not exist"
+            proj_files = sorted(list(proj_path.glob(f"*.{ext}")))
+            test_image = imread_fcn(proj_files[image_index])
+            median_2D_interact( self.settings,
+                                test_image,
+                                **kwargs)
+        else:
+            logging.warning("Interact needs to be executed in a Notebook"
+                            "Environment - This method is not being executed")
+
+    def ORTHO_interact(self, **kwargs) -> None:
+        """
+        Wrapper for COR_interact in visualization
+
+        This visualization tool helps you to find the Center of rotation of an
+        image stack
+        """
+        if self.is_jupyter():
+            logging.info("Orthogonal Plot Interact Started")
+            orthogonal_plot(np.transpose(self.reconstruction,(2,1,0)), **kwargs)
+        else:
+            logging.warning("Interact needs to be executed in a Notebook" 
+                            "Environment - This method is not being executed")
+
+class recon_algorithms(Enum):
+    FBP_CUDA = "FBP_CUDA"
+    FDK_CUDA = "FDK_CUDA"
+    CGLS_CUDA = "CGLS_CUDA"
+    SART_CUDA = "SART_CUDA"
+    EM_CUDA = "EM_CUDA"
+
+    SIRT3D_CUDA = "SIRT3D_CUDA"
+    SIRT_CUDA = "SIRT_CUDA"
+    CGLS3D_CUDA = "CGLS3D_CUDA"
+
+class recon_geometry(Enum):
+    Parallel = "parallel"
+    Fanflat = "fanflat"
+    Parallel3d = "parallel3d"
+    Cone = "cone"
+
+class fbp_fdk_filters(Enum):
+     ram_lak = 'ram-lak'
+     shepp_logan = 'shepp-logan'
+     cosine = 'cosine'
+     hamming = 'hamming'
+     hann = 'hann'
+     none = 'none'
+     tukey = 'tukey'
+     lanczos = 'lanczos'
+     triangular = 'triangular'
+     gaussian = 'gaussian'
+     barlett_hann = 'barlett-hann'
+     blackman = 'blackman'
+     nuttall = 'nuttall'
+     blackman_harris = 'blackman-harris'
+     blackman_nuttall = 'blackman-nuttall'
+     flat_top = 'flat-top'
+     kaiser = 'kaiser'
+     parzen = 'parzen'
+     projection = 'projection'
+     sinogram = 'sinogram'
+     rprojection = 'rprojection'
+     rsinogram = 'rsinogram'
+
+class napari_tomo_gui(tomo_dataset):
+    """
+    This is the big boy: it holds the projections and can facilitate the recon
+    operations grapically in Napari, interactively in Jupyter or in a script
+    """
+    def __init__(   self) -> None:
+        self.sare_bool = False
+        self.viewer = napari.Viewer()
+        self.viewer.title = "NIST Tomography GUI"
+        config_select_widget = {'Config Select':[
+                                    self.select_config(),
+                                    self.generate_config_widget(),
+                                    ]}
+
+        self.config_handles = []
+        for key,val in config_select_widget.items():
+            self.config_handles.append(
+                            self.viewer.window.add_dock_widget( val,
+                                                name = key,
+                                                add_vertical_stretch = True,
+                                                area = 'right'
+                                                )
+                            )
+
+    def init_operations(self, config_file) -> None:
+        """ Once a config has been selected this widget will be loaded """
+        super().__init__(config_file)
+        self.load_field('dark')
+        self.load_field('flat')
+        self.fetch_combined_image()
+        self.load_transmission_sample()
+        self.dtype = np.float32
+        self.files = []
+
+        self.widgets ={
+            'Transmission':[
+                                self.transpose_widget(),
+                                self.select_norm(),
+                                self.crop_image(),
+                                self.cor_wrapper(),
+                                self.median_widget(),
+                                self.load_images(),
+                                self.show_transmission(),
+                                self.reset_transmission(),
+                                ],
+            'Reconstruction':[
+                                self.select_reconstruction_parameters(),
+                                self.preview_reconstruction(),
+                                self.reconstruct_interact(),
+                                self.show_reconstruction(),
+                                self.write_reconstruction_widget(),
+                                self.sare_widget(),
+                                self.sare_apply()
+                                ],
+                        }
+        for i,(key,val) in enumerate(self.widgets.items()):
+            handle = self.viewer.window.add_dock_widget( val,
+                                                name = key,
+                                                add_vertical_stretch = True,
+                                                area = 'right'
+                                                )
+
+            # THIS ADDS THE WIDGETS AS TABS BEHIND THE CONFIG!
+            self.viewer.window._qt_window.tabifyDockWidget(
+                                                        self.config_handles[0],
+                                                        handle)
+
+    def _create_initial_config(self) -> None:
+        """ When creating a fresh configuration, this sets up the corresponding
+        config file so the settings can be kept track of
+        """
+        parser = configparser.ConfigParser()
+        for key,val in self.settings.items():
+            parser.add_section(key)
+            for sub_key,sub_val in val.items():
+                parser.set(key,sub_key,str(sub_val))
+
+        f_name = Path(".") / f"{self.settings['general']['name']}.ini"
+        print(f"writing config file to :{str(f_name)}")
+        with open(f_name ,'w') as file_:
+            parser.write(file_)
+
+        self.init_operations(f_name)
+
+    def mute_all(self) -> None:
         """ this suppresses all image layers """
         for elem in self.viewer.layers:
             elem.visible = False
 
-    def select_config(self):
-        @magicgui(call_button = "Select Config",
-                config_file = {'label':'Select Config File (.ini)'},
-                persist = True
-                )
-        def inner(config_file = Path.home()):
-            logging.info("-"*80)
-            logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
-            logging.info("-"*80)
-            self.previous_settings = {}
-            self.config = tomo_config_handler(config_file)
-            self.settings = self.config.data_dict
-            self.files = []
-            logging.info(f"{'='*20} SETTINGS: {'='*20}")
-            for key,val in self.settings['pre_processing'].items():
-                setattr(self,key,val)
-            for key,val in self.settings.items():
-                logging.info(f"{key}:")
-                for sub_key,sub_val in val.items():
-                    logging.info(f"\t{sub_key} : {sub_val}")
-            logging.info(f"{'='*20} End SETTINGS {'='*20}")
+    def search_settings(self,
+                        search_key: str,
+                        default: "various"
+                        ) -> "various":
+        """ This can search the configuration through all fields for a specific
+        value to see if it exists, if it does not, then the default is
+        returned. This is used to auto-populate the widgets with values when an
+        existing config is read in.
 
-            self.load_field('dark')
-            self.load_field('flat')
-            self.fetch_combined_image()
-            self.load_transmission_sample()
-            self._secondary_widget()
-
-        return inner
-
-    def search_settings(self,search_key,default) -> "various":
+        Parameters
+        ----------
+            search_key: str
+                the string to match for a parameter in the config
+            default: various
+                the default value to return if the parameter is not found in
+                the config
+        Returns
+        -------
+            either the value from the settings dictionary or the default value
+        """
         for key,val in self.settings.items():
             for sub_key,sub_val in val.items():
                 if search_key == sub_key:
@@ -943,13 +1101,99 @@ class napari_tomo_gui:
         else:
             return default
 
+    #--------------------------------------------------------------------------
+    #              NAPARI WIDGETS AND FUNCTIONS
+    #--------------------------------------------------------------------------
+    def select_config(self):
+        """ User can select a pre-existing configuration that will
+        auto-populate the widget parameters, etc.
+        """
+        @magicgui(call_button = "Load Existing Config",
+                config_file = {'label':'Select Config File (.ini)'},
+                persist = True
+                )
+        def inner(config_file = Path.home()):
+            self.init_operations(config_file)
+        return inner
+
+    def generate_config_widget(self):
+        """ if user selects to create a new config -> then this widget is added
+        """
+        @magicgui(call_button = 'Generate New Config',
+                main_window = True,               # gives a help option
+                persist = True,   # previous values are automatically reloaded
+                layout = 'vertical',
+                Name = {"label":'Name of Experiment'},
+                Dark_dir = {"label":'Select Dark Image Directory','mode':'d'},
+                Flat_dir = {"label":'Select Flat Image Directory','mode':'d'},
+                Proj_dir = {"label":'Select Projections Directory','mode':'d'},
+                Extension = {"value":"tif"},
+                Delimiter = {'label':'Delimiter for File Naming',"value":"_"},
+                Angle_argument = {'label':'Angle Position in File Name',
+                                    "value":1},
+                )
+        def inner(
+                Name: str = '',
+                Dark_dir = Path.home(),
+                Flat_dir = Path.home(),
+                Proj_dir = Path.home(),
+                Extension = "*.tif",
+                Delimiter = "_",
+                Angle_argument:int = 1,
+                ):
+            """ 
+            This widget helps to generate a config file that the gui can read.
+            
+            Parameters
+            ----------
+            name: str 
+                The name of the experiment. This is also the name that is used
+                for the configuration file (<name>.ini)
+            Dark Image Directory: Path 
+                Select the directory of the dark images
+            Flat Image Directory: Path 
+                Select the directory of the flat images
+            Proj Files: Path 
+                Select the directory of the projection images
+            Extension: str
+                Image file extension (e.g., tif or fit)
+            Delimiter For File Naming: str
+                This delimiter is for splitting the file name so the angular
+                position can be read
+            Angle Position in File Name: int
+                Zero-based indexing of which element in the split file name has
+                the angle information
+            """
+            self.settings = {'general':{},
+                    'paths':{},
+                    'pre_processing':{}
+                    }
+            self.settings['general']['name'] = Name
+            self.settings['paths']['dark_path'] = Dark_dir
+            self.settings['paths']['flat_path'] = Flat_dir
+            self.settings['paths']['projection_path'] = Proj_dir
+            self.settings['pre_processing']['extension'] = Extension
+            self.settings['pre_processing']['filename_delimiter'] = Delimiter
+            self.settings['pre_processing']['angle_argument'] = Angle_argument
+            self.settings['pre_processing']['dtype'] = 'float32'
+            self.settings['pre_processing']['transpose'] = False
+            self.transpose = False
+
+
+            self._create_initial_config()
+
+        return inner
+
     def transpose_widget(self):
+        """ This gives the option to toggle the transpose
+        """
         tp = self.search_settings("transpose",default = False)
 
         @magicgui(call_button = 'Apply Transpose')
         def inner(Transpose: bool = tp):
             if Transpose:
                 self.transpose = Transpose
+                self.settings['pre_processing']['transpose'] = Transpose
                 self.combined_image = self.combined_image.T
                 if 'combined image' in self.viewer.layers:
                     self.viewer.layers.remove('combined image')
@@ -1026,7 +1270,8 @@ class napari_tomo_gui:
             crop_key = 'Crop'
             if crop_key not in self.viewer.layers:
                 self.viewer.layers[-1].name = crop_key
-            verts = np.round(self.viewer.layers[crop_key].data[0][:,-2:]).astype(np.uint32)
+            verts = np.round(self.viewer.layers[crop_key].data[0][:,-2:]
+                                                        ).astype(np.uint32)
             y0,y1 = np.min(verts[:,1]), np.max(verts[:,1])
             x0,x1 = np.min(verts[:,0]), np.max(verts[:,0])
             slice_y = slice(y0,y1)
@@ -1037,11 +1282,26 @@ class napari_tomo_gui:
                 if key not in self.viewer.layers:
                     continue
                 self.viewer.layers[key].visible = False
-            self.viewer.add_image(crop_image, colormap = 'twilight_shifted', name = 'cropped image')
+            self.viewer.add_image(  crop_image,
+                                    colormap = 'twilight_shifted',
+                                    name = 'cropped image')
             return crop_image
         return inner
 
     def cor_wrapper(self):
+        """
+
+        This is a bit of a modification, but it produces much better results.
+        the algorithm:
+            1. calculates the off-axis angle for the raw cropped image
+            2. it then rotates the cropped image and calculates its off-axis angle
+            3. then it rotates the cropped image by half the angle calculated
+               in step 1 and calculates the off-axis angle
+            4. based on those 2 rotational data points it extrapolates to the
+               rotation that will make the second angle equal to zero (linear
+               fit)
+
+        """
         if 'COR' in self.settings:
             y0 = self.settings['COR']['y0']
             y1 = self.settings['COR']['y1']
@@ -1056,9 +1316,11 @@ class napari_tomo_gui:
         @magicgui(call_button = "Calculate Center of Rotation")
         def inner():
             points_key = "COR Points"
+            combined_cupy = cp.array(self.combined_image, dtype = cp.float32)
             if points_key not in self.viewer.layers:
                 self.viewer.layers[-1].name = points_key
-            points = np.round(self.viewer.layers[points_key].data[:,-2:]).astype(np.uint32)
+            points = np.round(self.viewer.layers[points_key].data[:,-2:]
+                                                            ).astype(np.uint32)
             verts = np.round(self.viewer.layers['Crop'].data[0][:,-2:]
                                                 ).astype(np.uint32).copy()
             x0,x1 = np.min(verts[:,0]), np.max(verts[:,0])
@@ -1066,37 +1328,89 @@ class napari_tomo_gui:
             cropped_image = self.viewer.layers['cropped image'].data
             cor_y0,cor_y1 = sorted([points[0,0],points[1,0]])
             print('y0 =',cor_y0,'; y1 =',cor_y1)
-            fig,ax = plt.subplots(1,3, sharex = True, sharey = True)
-            cor = center_of_rotation(cropped_image,cor_y0,cor_y1, ax = ax[0])
-            theta = np.tan(cor[0])*(180/np.pi)
-            ax[0].set_title(f"theta = {theta}")
-            #rot = rotate_gpu(cp.array(cropped_image, dtype = cp.float32),
-            #                -theta,
-            #                reshape = False).get()
-            combined_cupy = cp.array(self.combined_image, dtype = cp.float32)
-            rot = self.rotated_crop(
-                    combined_cupy,
-                    -theta,
-                    [y0,y1,x0,x1]
-                    ).get()
 
-            cor2 = center_of_rotation(rot, cor_y0, cor_y1, ax = ax[1])
+            fig2,ax2 = plt.subplots(1,1)
+            fig,ax = plt.subplots(1,3, sharex = True, sharey = True)
+            # Iterate until the cor angle of the rotated image is 0 -> then
+            # translate
+            cor = center_of_rotation(cropped_image,cor_y0,cor_y1, ax = ax[0])
+            ax[0].set_title("Original Slice")
+            theta = np.tan(cor[0])*(180/np.pi)
+            theta_a = theta*0.75
+            theta_b = theta*1.25
+            rot = self.rotated_crop(
+                                    combined_cupy,
+                                    -theta,
+                                    [y0,y1,x0,x1]
+                                    ).get()
+            rot_a = self.rotated_crop(
+                                    combined_cupy,
+                                    -theta_a,
+                                    [y0,y1,x0,x1]
+                                    ).get()
+            rot_b = self.rotated_crop(
+                                    combined_cupy,
+                                    -theta_b,
+                                    [y0,y1,x0,x1]
+                                    ).get()
+
+
+            cor2 = center_of_rotation(rot, cor_y0, cor_y1, ax = [])
+            cor2_a = center_of_rotation(rot_a, cor_y0, cor_y1, ax = [])
+            cor2_b = center_of_rotation(rot_b, cor_y0, cor_y1, ax = [])
+
+            theta2 = np.tan(cor2[0])*(180/np.pi)
+            theta2_a = np.tan(cor2_a[0])*(180/np.pi)
+            theta2_b = np.tan(cor2_b[0])*(180/np.pi)
+
+            theta_fit = np.polyfit([theta2,theta2_a,theta2_b],
+                                    [theta,theta_a,theta_b]
+                                    ,1)
+            theta_final = np.polyval(theta_fit,0)
+            rot_ = self.rotated_crop(
+                                    combined_cupy,
+                                    -theta_final,
+                                    [y0,y1,x0,x1]
+                                    ).get()
+
+            cor_final = center_of_rotation(rot_, cor_y0, cor_y1, ax = ax[1])
+
+            theta_qmark_zero = np.tan(cor_final[0])*(180/np.pi)
+
+            xs_local = [theta2,theta2_a,theta2_b,theta_qmark_zero]
+            ax2.scatter([theta,theta_a,theta_b,theta_final],xs_local)
+            ax2.plot(   np.polyval(theta_fit, xs_local),
+                        xs_local,
+                        'k--')
+            ax2.set_xlabel("theta applied (deg)")
+            ax2.set_ylabel("off-axis of rotated (deg)")
+            print('theta applied',theta,theta_a,theta_b,theta_final)
+            print('theta of rotated',theta2,theta2_a,theta2_b,theta_qmark_zero)
+
+            rot_final = self.rotated_crop(
+                                    combined_cupy,
+                                    -theta_final,
+                                    [y0,y1,x0,x1]
+                                    ).get()
+
+            cor2_corrected = center_of_rotation(rot_final,
+                                                cor_y0,
+                                                cor_y1,
+                                                ax = ax[1])
+
             crop_nx = y1-y0
-            dx = int(np.round(cor2[1]))-crop_nx//2
-            ax[1].set_title("Re-Fit")
+            dx = int(np.round(cor2_corrected[1]))-crop_nx//2
+            ax[1].set_title(f"rotated = {theta_final:.4f} degrees")
             y0 += dx
             y1 += dx
             slice_x = slice(x0,x1)
             slice_y = slice(y0,y1)
             crop2 = self.viewer.layers['combined image'].data[slice_x,slice_y]
-            #crop2rot = rotate_gpu(cp.array(crop2, dtype = cp.float32),
-            #                        -theta,
-            #                        reshape = False).get()
             crop2rot = self.rotated_crop(
-                    combined_cupy,
-                    -theta,
-                    [y0,y1,x0,x1]
-                    ).get()
+                                            combined_cupy,
+                                            -theta_final,
+                                            [y0,y1,x0,x1]
+                                            ).get()
             cor3 = center_of_rotation(crop2rot,cor_y0,cor_y1, ax = ax[2])
             ax[2].set_title(f"corrected center dx = {dx}")
             fig.tight_layout()
@@ -1106,20 +1420,24 @@ class napari_tomo_gui:
                 self.viewer.layers.remove('crop corrected')
             except:
                 pass
-            self.viewer.add_shapes(verts, name = 'crop corrected', face_color = 'b', visible = False, opacity = 0.3)
+            self.viewer.add_shapes(verts, name = 'crop corrected',
+                        face_color = 'b', visible = False, opacity = 0.3)
             self.crop_patch = [y0,y1,x0,x1]
             if self.transpose:
                 keys = ['x0','x1','y0','y1']
             else:
                 keys = ['y0','y1','x0','x1']
             self.settings['crop'] = {key:val for key,val in zip(keys,self.crop_patch)}
-            self.settings['COR'] = {key:val for key,val in zip(['y0','y1','theta'],[cor_y0,cor_y1,theta])}
+            self.settings['COR'] = {key:val for key,val in zip(['y0','y1','theta'],
+                                                   [cor_y0,cor_y1,theta_final])}
         return inner
 
     def median_widget(self):
         median_init = self.search_settings("median_xy", default = 1)
-        kernels_init = self.search_settings("thresh median kernels", default = '')
-        z_scores_init = self.search_settings("thresh median z-scores", default = '')
+        kernels_init = self.search_settings(    "thresh median kernels",
+                                                default = '')
+        z_scores_init = self.search_settings(   "thresh median z-scores",
+                                                default = '')
         print('--->',z_scores_init)
         replace_elements = ["[","]"," "]
         if kernels_init != '' and z_scores_init != '':
@@ -1157,9 +1475,10 @@ class napari_tomo_gui:
             nx,ny = transmission_image.shape
             med_image = [transmission_image.copy()]
             if median_size > 1:
-                med_image.append(median_gpu(cp.array(med_image[-1], dtype = cp.float32), 
-                                                                med_kernel).get()
-                                                                )
+                med_image.append(median_gpu(
+                                cp.array(med_image[-1], dtype = cp.float32), 
+                                med_kernel
+                                ).get())
             print('kernels = ',kernels,'; z_scores= ',z_scores)
             for kern,z_score in zip(kernels,z_scores):
                 print(f'applying {kern} with {z_score}')
@@ -1187,11 +1506,15 @@ class napari_tomo_gui:
 
     def load_images(self):
         @magicgui(call_button = "Load Projections to Transmission")
-        def inner():
+        def inner(sub_sample_transmission:int = 1):
             if not self.sare_bool:
-                self.load_projections()
+                @thread_worker(connect = {'returned':lambda: None})
+                def thread_load_images():
+                    self.load_projections(truncate_dataset = sub_sample_transmission)
+                thread_load_images()
             else:
-                logging.warning("Stripe Filter Has Been Applied, Reset Transmission to Load more Transmission Files")
+                logging.warning(("Stripe Filter Has Been Applied, Reset \
+                            Transmission to Load more Transmission Files"))
         return inner
 
     def show_transmission(self):
@@ -1205,7 +1528,7 @@ class napari_tomo_gui:
             self.mute_all()
             ds = down_sampling
             self.viewer.add_image(  
-                            dask_array(self.transmission[::ds,::ds,::ds]),
+                        dask_array(self.transmission[::ds,::ds,::ds].copy()),
                                     name = 'Transmission',
                                     colormap = 'cividis')
         return inner
@@ -1220,16 +1543,148 @@ class napari_tomo_gui:
             self.sare_bool = False
         return inner
 
+    def select_reconstruction_parameters(self):
+        pixel_pitch_init = self.search_settings('camera pixel size',0.0)
+        repro_ratio_init = self.search_settings('reproduction ratio',1.0)
+
+        @magicgui(call_button = 'Select Recon Parameters',
+                Source_detector_distance = {
+                        'label':'Source to Detector Distance (mm) (optional)',
+                            "value":0.0,
+                            'max':1e9},
+                Origin_detector_distance = {
+                        'label':'Origin to Detector Distance (mm) (optional)',
+                        "value":0.0,
+                        'max':1e9},
+                Pixel_pitch = {
+                            'label':'Pixel Pitch (mm)',
+                            'value':pixel_pitch_init,
+                            'step':0.0001},
+                Reproduction_ratio = {'value':repro_ratio_init},
+                Iterations = {'value':0,
+                            'min':0,
+                            'max':1e9,
+                            'label':'Iterations (optional)'
+                            },
+                fbp_fdk_seed = {'value':True,
+                        'label':'Use FBP/FDK as seed (optional)'
+                        },
+                seed_directory = {'value':Path.home(),
+                        'mode':'d',
+                        'label':'Directory of seed Dataset (optional)'
+                        },
+                fbp_filters = {'value':fbp_fdk_filters.ram_lak,
+                        'label':'FBP/FDK Filter (optional)'
+                        },
+                Min_constraint = {'value':-np.inf,
+                        'label':'Min Constraint (optional)'
+                        }
+                    )
+        def inner(
+                Algorithm = recon_algorithms.FBP_CUDA,
+                Geometry = recon_geometry.Parallel,
+                Pixel_pitch: float = 1.0,
+                Reproduction_ratio: float = 1.0,
+                Source_detector_distance: float = 0.0,
+                Origin_detector_distance: float = 0.0,
+                Iterations: int = 0,
+                fbp_fdk_seed: bool = True,
+                seed_directory= Path.home(),
+                fbp_filters = fbp_fdk_filters.ram_lak,
+                Min_constraint: float = 0.0
+                ):
+            """ 
+            This GUI helps to generate a config file that the Napari gui can
+            read. The file selectors require a single file to be selected in
+            the target directory, and the program finds the parent directory to
+            give to the config.
+
+            Parameters
+            ----------
+            Algorithm: str
+                Reconstruction Algorithm
+            Geometry: str
+                Reconstruction geometry (parallel or cone)
+            Pixel_pitch: float
+                Camera pixel pitch in mm
+            Source_detector_distance: float
+                Distance from the source to the detector  in mm
+            Origin_detector_distance: float
+                Distance from the origin (center of sample) to the detector in
+                mm
+            Reproduction_ratio: float
+                Reproduction ratio...
+            Iterations: int (optional)
+                If an iterative method is selected, this specifies iterations
+
+            """
+            self.settings['recon'] = {}
+            self.settings['recon']['camera pixel size'] = Pixel_pitch
+            assert Pixel_pitch > 0, "Pixel Pitch must be > 0"
+            self.settings['recon']['source to origin distance'] = Source_detector_distance - Origin_detector_distance
+            self.settings['recon']['origin to detector distance'] = Origin_detector_distance
+            self.settings['recon']['reproduction ratio'] = Reproduction_ratio
+            self.settings['recon']['recon algorithm'] = Algorithm.value
+            self.settings['recon']['recon geometry'] = Geometry.value
+
+            # Optional Arguments
+            if Iterations != 0:
+                self.settings['recon']['iterations'] = Iterations
+
+            if seed_directory != Path.home():
+                self.settings['paths']['seed_path'] = seed_directory
+                self.settings['recon']['seed_path'] = seed_directory
+
+            if fbp_fdk_seed and Algorithm.value in ['SIRT_CUDA','SIRT3D_CUDA']:
+                self.settings['recon']['fbp_fdk_seed'] = fbp_fdk_seed
+
+            if Algorithm.value in ['FBP_CUDA','FDK_CUDA']:
+                self.settings['recon']['FilterType'] = fbp_filters.value
+
+            if np.isfinite(Min_constraint):
+                self.settings['recon']['MinConstraint'] = Min_constraint
+
+            self.config.update_recon_params()
+            self.check_reconstruction_config()
+
+            self._reconstructor_ = astra_tomo_handler(self.settings['recon'])
+
+        return inner
+
+    def preview_reconstruction(self):
+        @magicgui(call_button = "Preview 2D Reconstruction")
+        def inner(  sinogram_index: int):
+            sinogram = self.transmission[sinogram_index]
+            attn = -np.log(sinogram, where = sinogram > 0)
+            reconstruction = self._reconstructor_.astra_reconstruct_2D(attn,
+                                                                self.angles)
+            self.mute_all()
+            name = 'recon preview'
+            if name in self.viewer.layers:
+                self.viewer.layers.remove(name)
+            self.viewer.add_image(reconstruction,
+                                name = name,
+                                colormap = 'viridis')
+        return inner
+
     def reconstruct_interact(self):
-        @magicgui(call_button = "Reconstruct")
-        def inner():
-            self.reconstruct()
+        @magicgui(call_button = "Reconstruct",
+                radial_zero = {'label':"Cylindrical mask",
+                    'value':True}
+                )
+        def inner(radial_zero: bool = True):
+            @thread_worker(connect = {'returned':lambda: None})
+            def thread_recon():
+                self.reconstruct()
+                if radial_zero:
+                    self.recon_radial_zero()
+            thread_recon()
         return inner
 
     def show_reconstruction(self):
         @magicgui(call_button = "Show Reconstruction",
                     down_sampling = {'value': 1})
-        def inner(down_sampling: int):
+        def inner(down_sampling: int = 1):
             try:
                 self.viewer.layers.remove('Reconstruction')
             except:
@@ -1238,9 +1693,10 @@ class napari_tomo_gui:
             if hasattr(self,'reconstruction'):
                 self.mute_all()
                 ds = down_sampling
-                self.viewer.add_image(  self.reconstruction[::ds,::ds,::ds].copy(),
-                                        name = 'Reconstruction',
-                                        colormap = 'plasma')
+                self.viewer.add_image(
+                    dask_array(self.reconstruction[::ds,::ds,::ds].copy()),
+                                      name = 'Reconstruction',
+                                      colormap = 'plasma')
             else:
                 print("Not Reconstructed Yet")
         return inner
@@ -1259,13 +1715,6 @@ class napari_tomo_gui:
             for i in tqdm(range(nz)):
                 f_name = Output_dir / f'{prefix}_{i:0d}.{extension}'
                 Image.fromarray(self.reconstruction[i]).save(f_name)
-        return inner
-
-    def reset(self):
-        @magicgui(call_button = 'Reset')
-        def inner():
-            self.viewer.window.close()
-            self.__init__()
         return inner
 
     def sare_widget(self):
@@ -1292,20 +1741,14 @@ class napari_tomo_gui:
                     la_size = la_size,
                     sm_size = sm_size)[:,0,:].get()
 
-            sino_args = {
-                    'algorithm':'FBP_CUDA',
-                    'pixel_size':self.settings['recon']['camera pixel size'],
-                    'angles': self.angles,
-                    'geometry': 'parallel'
-                    }
 
-            unfiltered_recon = astra_2d_simple(
+            unfiltered_recon = self._reconstructor_.astra_reconstruct_2D(
                     -np.log(sinogram_local, where = sinogram_local > 0),
-                    **sino_args)
+                    self.angles)
 
-            filtered_recon = astra_2d_simple(
+            filtered_recon = self._reconstructor_.astra_reconstruct_2D(
                     -np.log(filtered, where = filtered > 0),
-                    **sino_args)
+                    self.angles)
 
             print('non finites (sinogram_local) = ',np.sum(~np.isfinite(sinogram_local)))
             print('non finites (sinogram filtered) = ',np.sum(~np.isfinite(filtered)))
@@ -1341,161 +1784,17 @@ class napari_tomo_gui:
         @magicgui(call_button = 'Apply Ring Filter (In Place)')
         def inner(batch_size: int = 10):
             self.config.update_SARE()
-            self.remove_all_stripe(batch_size = batch_size)
+
+            @thread_worker(connect = {'returned':lambda: None})
+            def sarepy_threaded():
+                self.remove_all_stripe(batch_size = batch_size)
+
+            sarepy_threaded()
             self.sare_bool = True
         return inner
-
-class recon_algorithms(Enum):
-    FBP_CUDA = "FBP_CUDA"
-    FDK_CUDA = "FDK_CUDA"
-    SIRT_CUDA = "SIRT_CUDA"
-
-class recon_geometry(Enum):
-    Parallel = "parallel"
-    Cone = "cone"
-
-class tomo_config_gen_gui:
-    def __init__(self):
-        self.settings = {
-                'general':{},
-                'pre_processing':{},
-                'paths':{},
-                'recon':{}
-                }
-        self.generate_config_widget().show(run = True)
-
-    def generate_config_widget(self):
-        @magicgui(call_button = 'Generate Config',
-                main_window = True,                 # gives a help option
-                persist = True,                     # previous values are automatically reloaded
-                layout = 'vertical',
-                Name = {"label":'Name of Experiment'},
-                Dark_files = {"label":'Select Dark Image Directory','mode':'d'},
-                Flat_files = {"label":'Select Flat Image Directory','mode':'d'},
-                Proj_files = {"label":'Select Projections Directory','mode':'d'},
-                transpose = {'label':"Transpose"},
-                dtype = {"value":"float32"},
-                Extension = {"value":"tif"},
-                Delimiter = {'label':'Delimiter for File Naming',"value":"_"},
-                Angle_argument = {'label':'Angle Position in File Name',"value":1},
-                Source_detector_distance = {
-                                    'label':'Source to Detector Distance (mm)',
-                                            "value":0.0,
-                                            'max':1e9},
-                Origin_detector_distance = {
-                        'label':'Origin to Detector Distance (mm)',
-                        "value":0.0,
-                        'max':1e9},
-                Pixel_pitch = {
-                            'label':'Pixel Pitch (mm)',
-                            'value':0.0,
-                            'step':0.0001},
-                Reproduction_ratio = {'value':1.0},
-                Iterations = {'value':1,'max':1e9},
-                )
-        def inner(
-                Name: str = '',
-                Dark_files = Path.home(),
-                Flat_files = Path.home(),
-                Proj_files = Path.home(),
-                dtype = 'float32',
-                Extension = "*.tif",
-                Delimiter = "_",
-                transpose: bool = False,
-                Angle_argument:int = 1,
-                Source_detector_distance: float = 0.0,
-                Origin_detector_distance: float = 0.0,
-                Pixel_pitch: float = 1.0,
-                Reproduction_ratio: float = 1.0,
-                Geometry = recon_geometry.Parallel,
-                Algorithm = recon_algorithms.FDK_CUDA,
-                Iterations: int = 1,
-                ):
-            """ 
-            This GUI helps to generate a config file that the Napari gui can
-            read. The file selectors require a single file to be selected in
-            the target directory, and the program finds the parent directory to
-            give to the config.
-
-
-            Parameters
-            ----------
-            name: str 
-                The name of the experiment. This is also the name that is used
-                for the 
-            Dark Files: Path 
-                Select a file in the directory of the dark images
-            Flat Files: Path 
-                Select a file in the directory of the flat images
-            Proj Files: Path 
-                Select a file in the directory of the projection images
-            Extension: str
-                Image file extension (e.g., tif or fit)
-            Source_detector_distance: float
-                Distance from the source to the detector  in mm
-            Origin_detector_distance: float
-                Distance from the origin (center of sample) to the detector in
-                mm
-            Pixel_pitch: float
-                Camera pixel pitch in mm
-            Reproduction_ratio: float
-                Reproduction ratio...
-            Geometry: str
-                Reconstruction geometry (parallel or cone)
-            Algorithm: str
-                Reconstruction Algorithm
-            Iterations: int (optional)
-                If an iterative method is selected, this specifies iterations
-
-
-            """
-            self.settings['general']['name'] = Name
-            self.settings['paths']['dark_path'] = str(Dark_files.parent).replace("\\","/")
-            self.settings['paths']['flat_path'] = str(Flat_files.parent).replace("\\","/")
-            self.settings['paths']['projection_path'] = str(Proj_files.parent).replace("\\","/")
-            self.settings['pre_processing']['extension'] = Extension
-            self.settings['pre_processing']['filename_delimiter'] = Delimiter
-            self.settings['pre_processing']['angle_argument'] = Angle_argument
-            self.settings['pre_processing']['dtype'] = dtype
-            self.settings['pre_processing']['transpose'] = 'True' if transpose else 'False'
-
-
-            self.settings['recon']['camera pixel size'] = Pixel_pitch
-            self.settings['recon']['source to origin distance'] = Source_detector_distance - Origin_detector_distance
-            self.settings['recon']['origin to detector distance'] = Origin_detector_distance
-            self.settings['recon']['reproduction ratio'] = Reproduction_ratio
-            self.settings['recon']['recon algorithm'] = Algorithm.value
-            self.settings['recon']['recon geometry'] = Geometry.value
-            self.settings['recon']['iterations'] = Iterations
-
-            for key,val in self.settings.items():
-                print(key,val)
-
-            self.write_config()
-
-        return inner
-
-    def write_config(self):
-        parser = configparser.ConfigParser()
-        for key,val in self.settings.items():
-            parser.add_section(key)
-            for sub_key,sub_val in val.items():
-                parser.set(key,sub_key,str(sub_val))
-
-        f_name = Path(".") / f"{self.settings['general']['name']}.ini"
-        print(f"Writing Config File to :{str(f_name)}")
-        with open(f_name ,'w') as file_:
-            parser.write(file_)
-
-def test_gui():
-    inst = napari_tomo_gui()
-    napari.run()
-
-def test_config_gen():
-    #generate_config_widget.show(run = True)
-    tomo_config_gen_gui()
 
 if __name__ == "__main__":
     inst = napari_tomo_gui()
     napari.run()
     #test_config_gen()
+

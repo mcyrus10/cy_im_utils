@@ -2,12 +2,243 @@ import astra
 import numpy as np
 import pathlib
 from tqdm import tqdm
+from functools import partial
 import logging
 try:
     from .TV import TV_grad
 except:
     print("ERROR LOADING TV ")
 from .prep import radial_zero
+
+class astra_tomo_handler:
+    """ 
+    This is for the napari gui so that it can handle a single 2D reconstruction
+    or the full 3D reconstruction for previewing the state
+    """
+    def __init__(self, settings_dict: dict):
+        self.settings = settings_dict
+        self.algorithm = self.settings['recon algorithm']
+        self.geometry = self.settings['recon geometry']
+        self.proxy_methods = {
+                                'FDK_CUDA':'FBP_CUDA',
+                                'SIRT3D_CUDA':'SIRT_CUDA',
+                                'CGLS3D_CUDA':"CLGS_CUDA"
+                                }
+
+        self.geometries_2d = ['parallel','fanflat']
+        self.algorithms_2d = ['FBP_CUDA','SIRT_CUDA','CGLS_CUDA','EM_CUDA','SART_CUDA']
+
+        self.geometries_3d = ['parallel3d','cone']
+        self.algorithms_3d = ['FDK_CUDA','SIRT3D_CUDA','CGLS3D_CUDA']
+
+        if 'iterations' in self.settings:
+            self.iterations = self.settings['iterations']
+        else:
+            self.iterations = 1
+        self.pixel_size = self.settings['camera pixel size']
+
+    def _gen_fbp_fdk_seed(self, 
+                sinogram,
+                angles,
+                ndim: int = 2
+                ) -> np.array:
+        """
+        """
+        logging.info("Generating FBP Seed")
+        seed_settings = self.settings.copy()
+        if ndim == 2:
+            seed_settings['recon algorithm'] = 'FBP_CUDA' 
+            seed_settings['recon geometry'] = 'parallel' 
+        elif ndim == 3:
+            seed_settings['recon algorithm'] = 'FDP_CUDA' 
+            seed_settings['recon geometry'] = 'parallel3d' 
+
+        seed_settings['FilterType'] = 'ram-lak'
+        seed_settings['fbp_fdk_seed'] = False
+        return self.astra_reconstruct_2D(   sinogram,
+                                            angles,
+                                            settings = seed_settings)
+
+    def _parse_settings_2D(    self,
+                            sinogram,
+                            settings,
+                            detector_width,
+                            angles):
+        """ This function parses the settings dict so that the call to
+        reconstruct is more streamlined
+        """
+        if settings is None:
+            settings = self.settings
+
+        # Re-Assign Algorithm (if needed)
+        algorithm = settings['recon algorithm']
+        if algorithm in self.proxy_methods:
+            algorithm = self.proxy_methods[algorithm]
+            logging.info(f"Using {algorithm} for 2D Parallel")
+        
+        # create proj_args  (for 2D scenario)
+        geometry = settings['recon geometry']
+        if geometry in ['parallel','parallel3d']:
+            proj_args = ['parallel',1.0, detector_width,angles]
+        elif geometry in ['cone','fanflat']:
+            source_detector = settings['source to origin distance']
+            origin_detector = settings['origin to detector distance']
+            proj_args = ['fanflat',1.0, detector_width,angles,
+                (source_detector + origin_detector)/self.pixel_size, 0]
+        else:
+            assert False, f"Unkonwn geometry {geometry}"
+
+        # Parse Filters/Options
+        filters = {}
+        if 'FilterType' in settings:
+            filters = {'FilterType':settings['FilterType']}
+        elif 'MinConstraint' in settings:
+            filters = {'MinConstraint':settings['MinConstraint']}
+
+        # Seed operations
+        seed = 0
+        if 'fbp_fdk_seed' in settings:
+            if settings['fbp_fdk_seed']:
+                seed = self._gen_fbp_fdk_seed(sinogram, angles, ndim = 2)
+
+        return algorithm, geometry, proj_args, filters, seed
+
+    def _parse_settings_3D(    self,
+                            sinogram,
+                            settings,
+                            detector_width,
+                            detector_cols,
+                            angles):
+        """ This function parses the settings dict so that the call to
+        reconstruct is more streamlined
+        """
+        if settings is None:
+            settings = self.settings
+        
+        # create proj_args  (for 2D scenario)
+        geometry = settings['recon geometry']
+        if geometry == 'parallel3d':
+            proj_args = [   geometry,
+                            1.0,
+                            1.0,
+                            detector_width,
+                            detector_cols,
+                            angles]
+        else:
+            assert False, "Haven't implemented non parallel geometry yet"
+
+        # Parse Filters/Options
+        filters = {}
+        if 'FilterType' in settings:
+            filters = {'FilterType':settings['FilterType']}
+        elif 'MinConstraint' in settings:
+            filters = {'MinConstraint':settings['MinConstraint']}
+
+        # Seed operations
+        seed = 0
+        if 'fbp_fdk_seed' in settings:
+            if settings['fbp_fdk_seed']:
+                seed = self._gen_fbp_fdk_seed(sinogram, angles, ndim = 3)
+
+
+        return proj_args, filters, seed
+
+    def astra_reconstruct_2D(self,
+                            sinogram: np.array,
+                            angles: np.array,
+                            settings = None
+                            ) -> np.array:
+        """
+        """
+        n_projections, detector_width = sinogram.shape
+        vol_geom = astra.create_vol_geom(detector_width,detector_width)
+
+        algorithm,geometry,proj_args,filters,seed = self._parse_settings_2D(
+                                                            sinogram,
+                                                            settings,
+                                                            detector_width,
+                                                            angles
+                                                            )
+        proj_geom = astra.create_proj_geom(*proj_args)
+        sino_id = astra.data2d.create('-sino', proj_geom, sinogram)
+        reconstruction_id = astra.data2d.create('-vol',
+                                                vol_geom,
+                                                data = seed
+                                                )
+        cfg = astra.astra_dict(algorithm)
+        cfg['ReconstructionDataId'] = reconstruction_id
+        cfg['ProjectionDataId'] = sino_id
+        cfg['option'] = filters
+        alg_id = astra.algorithm.create(cfg)
+        # -----------------------------------------------------
+        astra.algorithm.run(alg_id, iterations = self.iterations)
+        # -----------------------------------------------------
+        reconstruction = astra.data2d.get(reconstruction_id)
+        reconstruction /= self.pixel_size
+        astra.data2d.delete([sino_id,reconstruction_id])
+        astra.algorithm.delete(alg_id)
+        return reconstruction
+
+    def astra_reconstruct_3D(self,
+                            sinogram: np.array,
+                            angles: np.array,
+                            settings = None
+                            ) -> np.array:
+        """
+        """
+        n_sino, n_projections, detector_width = sinogram.shape
+        vol_geom = astra.create_vol_geom(detector_width,detector_width)
+        algorithm = self.algorithm
+        geometry = self.geometry
+        proj_args,filters,seed = self._parse_settings_3D(
+                                                            sinogram,
+                                                            settings,
+                                                            detector_width,
+                                                            n_sino,
+                                                            angles
+                                                            )
+        proj_geom = astra.create_proj_geom(*proj_args)
+        sino_id = astra.data3d.create('-sino', proj_geom, sinogram)
+        reconstruction_id = astra.data3d.create('-vol',
+                                                vol_geom,
+                                                data = seed
+                                                )
+        cfg = astra.astra_dict(algorithm)
+        cfg['ReconstructionDataId'] = reconstruction_id
+        cfg['ProjectionDataId'] = sino_id
+        cfg['option'] = filters
+        alg_id = astra.algorithm.create(cfg)
+        # -----------------------------------------------------
+        astra.algorithm.run(alg_id, iterations = self.iterations)
+        # -----------------------------------------------------
+        reconstruction = astra.data3d.get(reconstruction_id)
+        reconstruction /= self.pixel_size
+        astra.data3d.delete([sino_id,reconstruction_id])
+        astra.algorithm.delete(alg_id)
+        return reconstruction
+
+    def reconstruct_volume( self,
+                            sinogram_volume,
+                            angles
+                            ) -> np.array:
+        nsino,n_proj,detector_width = sinogram_volume.shape
+        if self.geometry in self.geometries_2d and \
+                self.algorithm in self.algorithms_2d:
+            recon = np.zeros([nsino,detector_width,detector_width], 
+                                                        dtype = np.float32)
+            for j in tqdm(range(nsino), desc = 'reconstrucing volume'):
+                recon[j] = self.astra_reconstruct_2D(sinogram_volume[j],
+                                                angles = angles,
+                                                settings = self.settings)
+        elif self.geometry in self.geometries_3d and \
+                self.algorithm in self.algorithms_3d:
+            recon = self.astra_reconstruct_3d(   sinogram_volume, 
+                                            angles,
+                                            settings = self.settings)
+        else:
+            assert False, f"{self.geometry} incompatible wiht {self.algorithm}"
+
+        return recon
 
 def astra_2d_simple(sinogram : np.array,
                     algorithm : str = 'FBP_CUDA',
