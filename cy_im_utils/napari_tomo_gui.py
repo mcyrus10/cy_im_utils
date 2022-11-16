@@ -17,6 +17,7 @@ to do:
     - post-processing (after reconstruction)
         - write to disk
         - Apply volumetric median (base class)
+    - convert to yaml config files!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
 """
@@ -40,12 +41,12 @@ from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
 from dask.array import array as dask_array
 from enum import Enum
+from ipywidgets import widgets,Layout
 from magicgui import magicgui
 from magicgui.tqdm import tqdm
 from napari.qt.threading import thread_worker
 from pathlib import Path
 import astra
-import configparser
 import cupy as cp
 import logging
 import matplotlib.pyplot as plt
@@ -54,192 +55,7 @@ import numpy as np
 import os
 import pathlib
 import shutil
-
-from ipywidgets import widgets,Layout
-
-
-class tomo_config_handler:
-    """
-    This is intended to be able to read/write the config file so that you don't
-    have to copy/paste any text but just use the interactive functions to
-    update the configuration
-
-    This class expects that the name of the dataset, the paths to the
-    projections dark and flat are declared and the pre-processing options are
-    filled in
-    """
-    def __init__(self, config_file: str):
-        self.config_file = config_file
-        self.config = configparser.ConfigParser()
-        self.config.read(config_file)
-        self.write_data_dict()
-
-    
-    def write_data_dict(self) -> None:
-        """
-        Unpacking config into a single dictionary
-        """
-        self.data_dict = {}
-        for key,val in self.config.items():
-            self.data_dict[key] = {}
-            for sub_key,sub_val in val.items():
-                # Numeric Parsing
-                if sub_val.replace(".","1").lstrip("-").isnumeric():
-                    sub_val = self.float_int(sub_val)
-                # Boolean Parsing
-                elif sub_val in ['True','False']:
-                    sub_val = self.config.getboolean(key,sub_key)
-                # Potentially empty fields
-                elif sub_val == 'None':
-                    sub_val = None
-                # Path Parsing
-                elif 'paths' in key:
-                    sub_val = pathlib.Path(sub_val)
-                    assert sub_val.is_dir(), f"Path {str(sub_val)} does not exist"
-                # unpack list
-                elif '[' in sub_val and ']' in sub_val:
-                    temp_list = [e for e in \
-                            sub_val.replace("[","").replace("]","").split(",")]
-                    for i,elem in enumerate(temp_list):
-                        remove_chars =  [" ","'"]
-                        elem = "".join([e for e in elem if e not in remove_chars])
-                        temp_str = elem.replace(".","1").lstrip("-")
-                        if temp_str.isnumeric():
-                            temp_list[i] = self.float_int(elem)
-                        else:
-                            temp_list = []
-                    sub_val = temp_list
-
-                self.data_dict[key][sub_key] = sub_val
-
-    def float_int(self, value: str):
-        """
-        Hack for returning float or integer numbers
-        """
-        try:
-            out = int(value)
-        except ValueError as ve:
-            out = float(value)
-        return out
-
-    def write(self) -> None:
-        """
-        Wrapper for re-writing the config file after it's updated
-        """
-        print("WRITING UPDATED CONFIG",self.config_file)
-        with open(self.config_file,'w') as config_file:
-            self.config.write(config_file)
-
-    def conditional_add_field(self, field: str) -> None:
-        """
-        Wrapper for adding fields if they do not exist, if they do then this
-        will do nothing
-
-        Args:
-        -----
-            field: str
-                name of field to test / add
-        """
-        if field not in self.config.sections():
-            self.config.add_section(field)
-
-    def log_field(self,field) -> None:
-        """
-        wrapper for 
-        """
-        logging.info(f"Updating {field} parameters ")
-        for key,val in self.config[field].items():
-            logging.info(f"\t {key} : {val}")
-
-    def update_COR(self) -> None:
-        """
-        This method updates the config after the center of rotation has been
-        applied so it modifies COR, crop, norm and theta of the config
-
-        """
-        # COR and theta
-        field = "COR"
-        self.conditional_add_field(field)
-        self.config[field]['y0'] = str(self.data_dict['COR']['y0'])
-        self.config[field]['y1'] = str(self.data_dict['COR']['y1'])
-        self.config[field]['theta'] = str(self.data_dict['COR']['theta'])
-
-        self.log_field("COR")
-
-
-        # Transpose (might have changed)
-        self.config['pre_processing']['transpose'] =\
-                        str(self.data_dict['pre_processing']['transpose'])
-
-        self.log_field("pre_processing")
-
-        # Crop and Norm
-        for field in ['crop','norm']:
-            self.conditional_add_field(field)
-            for sub_key in ['x0','x1','y0','y1']:
-                sub_val = str(self.data_dict[field][sub_key])
-                self.config[field][sub_key] = sub_val
-
-        self.log_field("crop")
-        self.log_field("norm")
-
-        self.write()
-
-    def update_recon_params(self) -> None:
-        """
-        This method updates the Reconstruction parameters in the config
-        """
-        # Reconstruction Parameters
-        field = "recon"
-        self.conditional_add_field(field)
-        keys = [
-                'camera pixel size',
-                'source to origin distance',
-                'origin to detector distance',
-                'reproduction ratio',
-                'recon algorithm',
-                'recon geometry',
-                'iterations',
-                'ng',
-                'alpha',
-                'seed_path'
-                ]
-        for key in keys:
-            if key not in self.data_dict[field]:
-                continue
-            self.config[field][key] = str(self.data_dict[field][key])
-
-        self.log_field("recon")
-
-        self.write()
-
-    def update_SARE(self) -> None:
-        """
-        This method updates the SARE parameters
-        """
-        self.conditional_add_field("SARE")
-        self.config["SARE"]['snr'] = str(self.data_dict['SARE']['snr'])
-        self.config["SARE"]['la_size'] = str(self.data_dict['SARE']['la_size'])
-        self.config["SARE"]['sm_size'] = str(self.data_dict['SARE']['sm_size'])
-
-        self.log_field("SARE")
-        self.write()
-
-    def update_median(self) -> None:
-        """
-        This method updates the SARE parameters
-        """
-        update_keys = [ 
-                        'median_xy',
-                        'thresh median kernels',
-                        'thresh median z-scores'
-                        ]
-        for key in update_keys:
-            if key in self.data_dict['pre_processing']:
-                self.config["pre_processing"][key] = str(self.data_dict['pre_processing'][key])
-
-        self.log_field("pre_processing")
-        self.write()
+import yaml
 
 class tomo_dataset:
     def __init__(self, config_file):
@@ -247,15 +63,26 @@ class tomo_dataset:
         logging.info("-- TOMOGRAPHY RECONSTRUCTION --")
         logging.info("-"*80)
         self.previous_settings = {}
-        self.config = tomo_config_handler(config_file)
-        self.settings = self.config.data_dict
+        self.config_filename = config_file
+
+        with open(self.config_filename,'r') as f:
+            self.settings = yaml.safe_load(f)
+
+        for key,val in self.settings['paths'].items():
+            logging.info(f"converting {val} to pathlib.Path")
+            self.settings['paths'][key] = Path(val)
+
         logging.info(f"{'='*20} SETTINGS: {'='*20}")
         for key,val in self.settings['pre_processing'].items():
             setattr(self,key,val)
+        print("------>",self.settings)
         for key,val in self.settings.items():
-            logging.info(f"{key}:")
-            for sub_key,sub_val in val.items():
-                logging.info(f"\t{sub_key} : {sub_val}")
+            if isinstance(val,dict):
+                logging.info(f"{key}:")
+                for sub_key,sub_val in val.items():
+                    logging.info(f"\t{sub_key}:{sub_val}")
+            else:
+                logging.info(f"{key}:{val}")
         logging.info(f"{'='*20} End SETTINGS {'='*20}")
         self.sare_bool = False
         self.load_field('dark')
@@ -266,6 +93,29 @@ class tomo_dataset:
     #---------------------------------------------------------------------------
     #                       UTILS
     #---------------------------------------------------------------------------
+    def update_config(self) -> None:
+        """ This wrapper calls the yaml.safe_dump to re-write the config file,
+        such as when files are updated
+
+        Note that when you copy a dictionary, it DOES NOT copy the nested
+        layers, they are still referred to as the same memory so any operations
+        will modify both the copied and the original.... (this means you cannot
+        copy the whole dictionary then change a sub-dictionary because it will
+        change the original dictionary's sub-dictionary)
+        Therefore, here I am copying the 'paths' sub-dictionary from settings,
+        then converting the paths to strings, then copying the full dictionary
+        and adding the paths back in. A bit complicated, but this is simpler
+        than the config handler class
+        """
+        logging.info(f"Updating config file ({self.config_filename})")
+        yaml_safe_paths = self.settings['paths'].copy()
+        for key,val in yaml_safe_paths.items():
+            yaml_safe_paths[key] = val.as_posix()
+        cpy = self.settings.copy()
+        cpy.update({'paths':yaml_safe_paths})
+        with open(self.config_filename,'w') as f:
+            yaml.safe_dump(cpy,f)
+
     def load_transmission_sample(self, image_index: int = 0):
         """ This is for loading an image for the median to operate on """
         proj_path = self.settings['paths']['projection_path']
@@ -431,13 +281,13 @@ class tomo_dataset:
         alg_3d = ['FDK_CUDA','SIRT3D_CUDA']
         alg_2d = ['FBP_CUDA','SIRT_CUDA','CGLS_CUDA','EM_CUDA','SART_CUDA']
         fourier_methods = ['FDK_CUDA',"FBP_CUDA"]
-        sirt_methods = ['SIRT3D_CUDA','SIRT_CUDA']
+        sirt_methods = ['SIRT3D_CUDA','SIRT_CUDA','SART_CUDA']
         iter_methods = ['SIRT_CUDA','SIRT3D_CUDA','SART_CUDA','CGLS_CUDA']
         geom_3d = ['parallel3d','cone']
         geom_2d = ['parallel','fanflat']
         non_par_geom = ['cone','fanflat']
-        alg = self.settings['recon']['recon algorithm'] 
-        geom = self.settings['recon']['recon geometry']
+        alg = self.settings['recon']['algorithm'] 
+        geom = self.settings['recon']['geometry']
         if alg not in alg_3d+alg_2d:
             assert False,f"{alg} is uknown to check_reconstruction_config"
         if alg in alg_3d:
@@ -445,13 +295,16 @@ class tomo_dataset:
         elif alg in alg_2d:
             assert geom in geom_2d,f'{alg} (2d) incompatilbe with {geom} geometry (3d)'
 
-        if 'FilterType' in self.settings:
-            if self.settings['FilterType'] != 'none' and \
-                    alg not in fourier_methods:
-                logging.warning("Skipping FilterType for non Fourier Method")
+        # handle for options dictionary
+        if 'options' in self.settings:
+            options_h = self.settings['recon']['options']
+            if 'FilterType' in options_h:
+                if options_h['FilterType'] != 'none' and \
+                        alg not in fourier_methods:
+                    logging.warning("Skipping FilterType for non Fourier Method")
 
-        if 'MinConstraint' in self.settings and alg not in sirt_methods:
-            logging.warning("Skipping MinConstraint for non SIRT Method")
+            if 'MinConstraint' in options_h and alg not in sirt_methods:
+                logging.warning("Skipping MinConstraint for non SIRT Method")
 
         if alg in iter_methods and 'iterations' not in self.settings['recon']:
             logging.warning("0 iterations specified for iterative method")
@@ -483,9 +336,13 @@ class tomo_dataset:
             either the value from the settings dictionary or the default value
         """
         for key,val in self.settings.items():
-            for sub_key,sub_val in val.items():
-                if search_key == sub_key:
-                    return sub_val
+            if isinstance(val,dict):
+                for sub_key,sub_val in val.items():
+                    if search_key == sub_key:
+                        return sub_val
+            elif isinstance(val,str):
+                if search_key == key:
+                    return val
         else:
             return default
 
@@ -611,9 +468,7 @@ class tomo_dataset:
                 f) spatial median  (3x3 by default)
                 g) crop
                 h) rotate
-                i) -log(image)
-                j) remove non-finite
-                k) assign to self.transmission array
+                i) assign to self.transmission array
 
         Args:
             truncate_dataset : int
@@ -623,12 +478,10 @@ class tomo_dataset:
             None (operates in-place)
 
         """
-        self.config.update_median()
-        self.config.update_COR()
+        self.update_config()
        
 
         proj_path = self.settings['paths']['projection_path']
-        logging.info(f"Reading Images From {proj_path}")
         ext = self.settings['pre_processing']['extension']
         imread_fcn = self.return_imread_fcn(ext)
         all_files = list(
@@ -672,7 +525,7 @@ class tomo_dataset:
 
         load_im = lambda f :  cp.asarray(imread_fcn(f), dtype = self.dtype)
 
-        if self.transpose:
+        if self.settings['pre_processing']['transpose']:
             load_im = lambda f :  cp.asarray(imread_fcn(f),
                                                         dtype = self.dtype).T
             dark_local = dark_local.T
@@ -1024,10 +877,10 @@ class recon_algorithms(Enum):
     CGLS3D_CUDA = "CGLS3D_CUDA"
 
 class recon_geometry(Enum):
-    Parallel = "parallel"
-    Fanflat = "fanflat"
-    Parallel3d = "parallel3d"
-    Cone = "cone"
+    parallel = "parallel"
+    fanflat = "fanflat"
+    parallel3d = "parallel3d"
+    cone = "cone"
 
 class fbp_fdk_filters(Enum):
      ram_lak = 'ram-lak'
@@ -1136,16 +989,17 @@ class napari_tomo_gui(tomo_dataset):
         """ When creating a fresh configuration, this sets up the corresponding
         config file so the settings can be kept track of
         """
-        parser = configparser.ConfigParser()
-        for key,val in self.settings.items():
-            parser.add_section(key)
-            for sub_key,sub_val in val.items():
-                parser.set(key,sub_key,str(sub_val))
+        f_name = Path(".") / f"{self.settings['name']}.yml"
+        logging.info(f"writing intialized config file to :{str(f_name)}")
+        print("--->",self.settings)
 
-        f_name = Path(".") / f"{self.settings['general']['name']}.ini"
-        print(f"writing config file to :{str(f_name)}")
+        yaml_safe_dict = self.settings.copy()
+        for key,val in yaml_safe_dict['paths'].items():
+            yaml_safe_dict['paths'][key] = val.as_posix()
+
+        print("--->",yaml_safe_dict)
         with open(f_name ,'w') as file_:
-            parser.write(file_)
+            yaml.safe_dump(yaml_safe_dict,file_)
 
         self.init_operations(f_name)
 
@@ -1163,7 +1017,7 @@ class napari_tomo_gui(tomo_dataset):
         auto-populate the widget parameters, etc.
         """
         @magicgui(call_button = "Load Existing Config",
-                config_file = {'label':'Select Config File (.ini)'},
+                config_file = {'label':'Select Config File (.yml)'},
                 persist = True
                 )
         def inner(config_file = Path.home()):
@@ -1218,11 +1072,11 @@ class napari_tomo_gui(tomo_dataset):
                 Zero-based indexing of which element in the split file name has
                 the angle information
             """
-            self.settings = {'general':{},
+            self.settings = {'name':{},
                     'paths':{},
                     'pre_processing':{}
                     }
-            self.settings['general']['name'] = Name
+            self.settings['name'] = Name
             self.settings['paths']['dark_path'] = Dark_dir
             self.settings['paths']['flat_path'] = Flat_dir
             self.settings['paths']['projection_path'] = Proj_dir
@@ -1231,7 +1085,6 @@ class napari_tomo_gui(tomo_dataset):
             self.settings['pre_processing']['angle_argument'] = Angle_argument
             self.settings['pre_processing']['dtype'] = 'float32'
             self.settings['pre_processing']['transpose'] = False
-            self.transpose = False
 
 
             self._create_initial_config()
@@ -1246,7 +1099,6 @@ class napari_tomo_gui(tomo_dataset):
         @magicgui(call_button = 'Apply Transpose')
         def inner(Transpose: bool = tp):
             if Transpose:
-                self.transpose = Transpose
                 self.settings['pre_processing']['transpose'] = Transpose
                 self.combined_image = self.combined_image.T
                 if 'combined image' in self.viewer.layers:
@@ -1283,11 +1135,11 @@ class napari_tomo_gui(tomo_dataset):
             x0,x1 = np.min(verts[:,0]), np.max(verts[:,0])
             y0,y1 = np.min(verts[:,1]), np.max(verts[:,1])
             self.norm_patch = [y0,y1,x0,x1]
-            if self.transpose:
+            if self.settings['pre_processing']['transpose']:
                 keys = ['x0','x1','y0','y1']
             else:
                 keys = ['y0','y1','x0','x1']
-            self.settings['norm'] = {key:val for key,val in zip(keys,self.norm_patch)}
+            self.settings['norm'] = {key:int(val) for key,val in zip(keys,self.norm_patch)}
             self.viewer.layers[-1].name = 'Norm'
             self.viewer.layers['Norm'].face_color = 'r'
         return inner
@@ -1477,13 +1329,15 @@ class napari_tomo_gui(tomo_dataset):
             self.viewer.add_shapes(verts, name = 'crop corrected',
                         face_color = 'b', visible = False, opacity = 0.3)
             self.crop_patch = [y0,y1,x0,x1]
-            if self.transpose:
+            if self.settings['pre_processing']['transpose']:
                 keys = ['x0','x1','y0','y1']
             else:
                 keys = ['y0','y1','x0','x1']
-            self.settings['crop'] = {key:val for key,val in zip(keys,self.crop_patch)}
+            self.settings['crop'] = {key:int(val) for key,val in zip(keys,self.crop_patch)}
             self.settings['COR'] = {key:val for key,val in zip(['y0','y1','theta'],
-                                                   [cor_y0,cor_y1,theta_final])}
+                                                   [    int(cor_y0),
+                                                        int(cor_y1),
+                                                        float(theta_final)])}
         return inner
 
     def median_widget(self):
@@ -1591,13 +1445,20 @@ class napari_tomo_gui(tomo_dataset):
             self.sare_bool = False
         return inner
 
-    def select_reconstruction_parameters(self):
-        pixel_pitch_init = self.search_settings('camera pixel size',0.0)
+    def select_reconstruction_parameters(self) -> None:
+        """ This widget has all the recon and recon.cfg_options, which have the
+        geometry, algorithm, constraints, gpuindex, etc.
+        """
+        pixel_pitch_init = self.search_settings('pixel pitch',0.0)
         repro_ratio_init = self.search_settings('reproduction ratio',1.0)
-        algorithm_init = self.search_settings('recon algorithm',recon_algorithms.FBP_CUDA)
+        algorithm_init = self.search_settings('algorithm',recon_algorithms.FBP_CUDA)
+        iterations_init = self.search_settings('iterations',0)
         if isinstance(algorithm_init,str):
             algorithm_init = getattr(recon_algorithms,algorithm_init)
 
+        geometry_init = self.search_settings('geometry',recon_geometry.parallel)
+        if isinstance(geometry_init,str):
+            geometry_init = getattr(recon_geometry,geometry_init)
 
 
         @magicgui(call_button = 'Select Recon Parameters',
@@ -1614,7 +1475,8 @@ class napari_tomo_gui(tomo_dataset):
                             'value':pixel_pitch_init,
                             'step':0.0001},
                 Reproduction_ratio = {'value':repro_ratio_init},
-                Iterations = {'value':0,
+
+                Iterations = {'value':iterations_init,
                             'min':0,
                             'max':1e9,
                             'label':'Iterations (optional)'
@@ -1635,12 +1497,12 @@ class napari_tomo_gui(tomo_dataset):
                     )
         def inner(
                 Algorithm = algorithm_init,
-                Geometry = recon_geometry.Parallel,
+                Geometry = geometry_init,
                 Pixel_pitch: float = 1.0,
                 Reproduction_ratio: float = 1.0,
                 Source_detector_distance: float = 0.0,
                 Origin_detector_distance: float = 0.0,
-                Iterations: int = 0,
+                Iterations: int = iterations_init,
                 fbp_fdk_seed: bool = True,
                 seed_directory= Path.home(),
                 fbp_filters = fbp_fdk_filters.ram_lak,
@@ -1673,13 +1535,13 @@ class napari_tomo_gui(tomo_dataset):
 
             """
             self.settings['recon'] = {}
-            self.settings['recon']['camera pixel size'] = Pixel_pitch
+            self.settings['recon']['pixel pitch'] = Pixel_pitch
             assert Pixel_pitch > 0, "Pixel Pitch must be > 0"
             self.settings['recon']['source to origin distance'] = Source_detector_distance - Origin_detector_distance
             self.settings['recon']['origin to detector distance'] = Origin_detector_distance
             self.settings['recon']['reproduction ratio'] = Reproduction_ratio
-            self.settings['recon']['recon algorithm'] = Algorithm.value
-            self.settings['recon']['recon geometry'] = Geometry.value
+            self.settings['recon']['algorithm'] = Algorithm.value
+            self.settings['recon']['geometry'] = Geometry.value
 
             # Optional Arguments
             if Iterations != 0:
@@ -1692,13 +1554,18 @@ class napari_tomo_gui(tomo_dataset):
             if fbp_fdk_seed and Algorithm.value in ['SIRT_CUDA','SIRT3D_CUDA']:
                 self.settings['recon']['fbp_fdk_seed'] = fbp_fdk_seed
 
+            # These are options for ASTRA to read
+            options = {'GPUindex':GPUindex}
             if Algorithm.value in ['FBP_CUDA','FDK_CUDA']:
-                self.settings['recon']['FilterType'] = fbp_filters.value
+                options.update({'FilterType':fbp_filters.value})
 
             if np.isfinite(Min_constraint):
-                self.settings['recon']['MinConstraint'] = Min_constraint
+                options.update({'MinConstraint':Min_constraint})
 
-            self.config.update_recon_params()
+            if options != {}:
+                self.settings['recon']['options'] = options
+
+            self.update_config()
             self.check_reconstruction_config()
 
             self._reconstructor_ = astra_tomo_handler(self.settings['recon'])
@@ -1837,7 +1704,7 @@ class napari_tomo_gui(tomo_dataset):
     def sare_apply(self):
         @magicgui(call_button = 'Apply Ring Filter (In-Place)')
         def inner(batch_size: int = 10):
-            self.config.update_SARE()
+            self.update_config()
 
             @thread_worker(connect = {'returned':lambda: None})
             def sarepy_threaded():
@@ -1887,7 +1754,7 @@ class napari_tomo_gui(tomo_dataset):
                                             )
         return inner
 
-
 if __name__ == "__main__":
     inst = napari_tomo_gui()
     napari.run()
+

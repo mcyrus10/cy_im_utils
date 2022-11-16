@@ -2,3 +2,4 @@ cy_im_utils/__pycache__
 sarepy_array_format image.pptx
 ~$sarepy_array_format image.pptx
 .ipynb_checkpoints
+cy_im_utils/*.log

@@ -17,8 +17,8 @@ class astra_tomo_handler:
     """
     def __init__(self, settings_dict: dict):
         self.settings = settings_dict
-        self.algorithm = self.settings['recon algorithm']
-        self.geometry = self.settings['recon geometry']
+        self.algorithm = self.settings['algorithm']
+        self.geometry = self.settings['geometry']
         self.proxy_methods = {
                                 'FDK_CUDA':'FBP_CUDA',
                                 'SIRT3D_CUDA':'SIRT_CUDA',
@@ -35,7 +35,11 @@ class astra_tomo_handler:
             self.iterations = self.settings['iterations']
         else:
             self.iterations = 1
-        self.pixel_size = self.settings['camera pixel size']
+        self.pixel_size = self.settings['pixel pitch']
+
+        options = {}
+        if 'options' in self.settings:
+            options = self.settings['options']
 
     def _gen_fbp_fdk_seed(self, 
                 sinogram,
@@ -47,19 +51,22 @@ class astra_tomo_handler:
         logging.info("Generating FBP Seed")
         seed_settings = self.settings.copy()
         if ndim == 2:
-            seed_settings['recon algorithm'] = 'FBP_CUDA' 
-            seed_settings['recon geometry'] = 'parallel' 
+            seed_settings['algorithm'] = 'FBP_CUDA' 
+            seed_settings['geometry'] = 'parallel' 
         elif ndim == 3:
-            seed_settings['recon algorithm'] = 'FDP_CUDA' 
-            seed_settings['recon geometry'] = 'parallel3d' 
+            seed_settings['algorithm'] = 'FDP_CUDA' 
+            seed_settings['geometry'] = 'parallel3d' 
 
-        seed_settings['FilterType'] = 'ram-lak'
+        seed_settings['options']['FilterType'] = 'ram-lak'
+        opt_handle = self.settings['options']
+        gpuindex = 0 if 'GPUindex' not in opt_handle else opt_handle['GPUindex']
+        seed_settings['options']['GPUindex'] = gpuindex
         seed_settings['fbp_fdk_seed'] = False
         return self.astra_reconstruct_2D(   sinogram,
                                             angles,
                                             settings = seed_settings)
 
-    def _parse_settings_2D(    self,
+    def _parse_settings_2D( self,
                             sinogram,
                             settings,
                             detector_width,
@@ -67,17 +74,15 @@ class astra_tomo_handler:
         """ This function parses the settings dict so that the call to
         reconstruct is more streamlined
         """
-        if settings is None:
-            settings = self.settings
 
         # Re-Assign Algorithm (if needed)
-        algorithm = settings['recon algorithm']
+        algorithm = settings['algorithm']
         if algorithm in self.proxy_methods:
             algorithm = self.proxy_methods[algorithm]
             logging.info(f"Using {algorithm} for 2D Parallel")
         
         # create proj_args  (for 2D scenario)
-        geometry = settings['recon geometry']
+        geometry = settings['geometry']
         if geometry in ['parallel','parallel3d']:
             proj_args = ['parallel',1.0, detector_width,angles]
         elif geometry in ['cone','fanflat']:
@@ -88,20 +93,13 @@ class astra_tomo_handler:
         else:
             assert False, f"Unkonwn geometry {geometry}"
 
-        # Parse Filters/Options
-        filters = {}
-        if 'FilterType' in settings:
-            filters = {'FilterType':settings['FilterType']}
-        elif 'MinConstraint' in settings:
-            filters = {'MinConstraint':settings['MinConstraint']}
-
         # Seed operations
         seed = 0
         if 'fbp_fdk_seed' in settings:
             if settings['fbp_fdk_seed']:
                 seed = self._gen_fbp_fdk_seed(sinogram, angles, ndim = 2)
 
-        return algorithm, geometry, proj_args, filters, seed
+        return algorithm, geometry, proj_args, seed
 
     def _parse_settings_3D(    self,
                             sinogram,
@@ -112,11 +110,8 @@ class astra_tomo_handler:
         """ This function parses the settings dict so that the call to
         reconstruct is more streamlined
         """
-        if settings is None:
-            settings = self.settings
-        
         # create proj_args  (for 2D scenario)
-        geometry = settings['recon geometry']
+        geometry = settings['geometry']
         if geometry == 'parallel3d':
             proj_args = [   geometry,
                             1.0,
@@ -127,21 +122,13 @@ class astra_tomo_handler:
         else:
             assert False, "Haven't implemented non parallel geometry yet"
 
-        # Parse Filters/Options
-        filters = {}
-        if 'FilterType' in settings:
-            filters = {'FilterType':settings['FilterType']}
-        elif 'MinConstraint' in settings:
-            filters = {'MinConstraint':settings['MinConstraint']}
-
         # Seed operations
         seed = 0
         if 'fbp_fdk_seed' in settings:
             if settings['fbp_fdk_seed']:
                 seed = self._gen_fbp_fdk_seed(sinogram, angles, ndim = 3)
 
-
-        return proj_args, filters, seed
+        return proj_args,  seed
 
     def astra_reconstruct_2D(self,
                             sinogram: np.array,
@@ -150,10 +137,13 @@ class astra_tomo_handler:
                             ) -> np.array:
         """
         """
+        if settings is None:
+            settings = self.settings
+
         n_projections, detector_width = sinogram.shape
         vol_geom = astra.create_vol_geom(detector_width,detector_width)
 
-        algorithm,geometry,proj_args,filters,seed = self._parse_settings_2D(
+        algorithm,geometry,proj_args,seed = self._parse_settings_2D(
                                                             sinogram,
                                                             settings,
                                                             detector_width,
@@ -168,7 +158,7 @@ class astra_tomo_handler:
         cfg = astra.astra_dict(algorithm)
         cfg['ReconstructionDataId'] = reconstruction_id
         cfg['ProjectionDataId'] = sino_id
-        cfg['option'] = filters
+        cfg['option'] = {} if 'options' not in settings else settings['options']
         alg_id = astra.algorithm.create(cfg)
         # -----------------------------------------------------
         astra.algorithm.run(alg_id, iterations = self.iterations)
@@ -186,17 +176,18 @@ class astra_tomo_handler:
                             ) -> np.array:
         """
         """
+        if settings is None:
+            settings = self.settings
         n_sino, n_projections, detector_width = sinogram.shape
         vol_geom = astra.create_vol_geom(detector_width,detector_width)
         algorithm = self.algorithm
         geometry = self.geometry
-        proj_args,filters,seed = self._parse_settings_3D(
-                                                            sinogram,
-                                                            settings,
-                                                            detector_width,
-                                                            n_sino,
-                                                            angles
-                                                            )
+        proj_args,seed = self._parse_settings_3D(   sinogram,
+                                                    settings,
+                                                    detector_width,
+                                                    n_sino,
+                                                    angles
+                                                    )
         proj_geom = astra.create_proj_geom(*proj_args)
         sino_id = astra.data3d.create('-sino', proj_geom, sinogram)
         reconstruction_id = astra.data3d.create('-vol',
@@ -206,7 +197,7 @@ class astra_tomo_handler:
         cfg = astra.astra_dict(algorithm)
         cfg['ReconstructionDataId'] = reconstruction_id
         cfg['ProjectionDataId'] = sino_id
-        cfg['option'] = filters
+        cfg['option'] = self.options
         alg_id = astra.algorithm.create(cfg)
         # -----------------------------------------------------
         astra.algorithm.run(alg_id, iterations = self.iterations)
@@ -232,9 +223,9 @@ class astra_tomo_handler:
                                                 settings = self.settings)
         elif self.geometry in self.geometries_3d and \
                 self.algorithm in self.algorithms_3d:
-            recon = self.astra_reconstruct_3d(   sinogram_volume, 
-                                            angles,
-                                            settings = self.settings)
+            recon = self.astra_reconstruct_3d(  sinogram_volume, 
+                                                angles,
+                                                settings = self.settings)
         else:
             assert False, f"{self.geometry} incompatible wiht {self.algorithm}"
 
