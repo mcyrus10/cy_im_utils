@@ -7,6 +7,18 @@ with button presses, and likewise the jupyter version can operate inside a
 notebook
 
 
+to do:
+    - read in 'recon' config parameters
+    - print the filenames of the 0 and 180 images
+    - how to pass/read multiple 'options' in config 
+    - test that tomo_dataset works in a script
+    - fix crop_patch in jupyter??
+    - batch fdk cone
+    - post-processing (after reconstruction)
+        - write to disk
+        - Apply volumetric median (base class)
+
+
 """
 from sys import path
 path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
@@ -15,6 +27,8 @@ from cy_im_utils.recon_utils import ASTRA_General,astra_2d_simple,astra_tomo_han
 from cy_im_utils.sarepy_cuda import *
 from cy_im_utils.thresholded_median import thresh_median_2D_GPU
 from cy_im_utils.visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
+from cy_im_utils.gpu_utils import median_GPU_batch
+from cy_im_utils.logger import log_setup
 
 from PIL import Image
 from cupyx.scipy.ndimage import rotate as rotate_gpu, median_filter as median_gpu
@@ -53,6 +67,7 @@ class tomo_config_handler:
         self.config = configparser.ConfigParser()
         self.config.read(config_file)
         self.write_data_dict()
+
     
     def write_data_dict(self) -> None:
         """
@@ -74,6 +89,7 @@ class tomo_config_handler:
                 # Path Parsing
                 elif 'paths' in key:
                     sub_val = pathlib.Path(sub_val)
+                    assert sub_val.is_dir(), f"Path {str(sub_val)} does not exist"
                 # unpack list
                 elif '[' in sub_val and ']' in sub_val:
                     temp_list = [e for e in \
@@ -227,7 +243,6 @@ class tomo_dataset:
         self.previous_settings = {}
         self.config = tomo_config_handler(config_file)
         self.settings = self.config.data_dict
-        self.files = []
         logging.info(f"{'='*20} SETTINGS: {'='*20}")
         for key,val in self.settings['pre_processing'].items():
             setattr(self,key,val)
@@ -237,6 +252,10 @@ class tomo_dataset:
                 logging.info(f"\t{sub_key} : {sub_val}")
         logging.info(f"{'='*20} End SETTINGS {'='*20}")
         self.sare_bool = False
+        self.load_field('dark')
+        self.load_field('flat')
+        self.files = []
+
 
     #---------------------------------------------------------------------------
     #                       UTILS
@@ -262,7 +281,7 @@ class tomo_dataset:
         """
         return sorted(list(path_.glob(f"*.{ext}")))
 
-    def fetch_combined_image(self, mode = 'auto', median = 3) -> None:
+    def fetch_combined_image(self, mode = 'auto', median = 1) -> None:
         """ this function composes the 0 + 180 degree image for defining the
         center of rotation. 
 
@@ -323,16 +342,13 @@ class tomo_dataset:
             combined[i] = attenuation
         combined = cp.sum(combined, axis = 0).get()
 
-        tp = self.search_settings('transpose',False)
+        tp = False
+        if 'transpose' in self.settings['pre_processing']:
+            tp = self.settings['pre_processing']['transpose']
 
         combined = combined.T if tp else combined
         self.combined_image = combined
 
-
-        self.viewer.add_image(  combined,
-                                name = 'combined image',
-                                colormap = 'Spectral')
-        
     def free(self, field : str) -> None:
         """
         This can be used to free the projections if they are taking up too much
@@ -441,6 +457,31 @@ class tomo_dataset:
             assert handle['origin to detector distance'] > 0.0, \
                         "origin -  detector distance must be greater than 0"
 
+    def search_settings(self,
+                        search_key: str,
+                        default: "various"
+                        ) -> "various":
+        """ This can search the configuration through all fields for a specific
+        value to see if it exists, if it does not, then the default is
+        returned. This is used to auto-populate the widgets with values when an
+        existing config is read in.
+        Parameters
+        ----------
+            search_key: str
+                the string to match for a parameter in the config
+            default: various
+                the default value to return if the parameter is not found in
+                the config
+        Returns
+        -------
+            either the value from the settings dictionary or the default value
+        """
+        for key,val in self.settings.items():
+            for sub_key,sub_val in val.items():
+                if search_key == sub_key:
+                    return sub_val
+        else:
+            return default
 
     #--------------------------------------------------------------------------
     #                       PRE PROCESSING
@@ -518,19 +559,32 @@ class tomo_dataset:
         maybe a bit clunky, but whatever
         """
         x0,x1,y0,y1 = crop
+        logging.debug(f"--> inside rotated_crop")
+        logging.debug(f"- x0:{x0},x1:{x1},y0:{y0},y1:{y1}")
+        logging.debug(f"dx:{x1-x0},dy:{y1-y0}")
+        logging.debug(f"image.shape = {image.shape}")
         theta_rad = np.deg2rad(theta)
         trig_product = np.abs(np.sin(theta_rad)*np.cos(theta_rad))
         pad_x = np.ceil(trig_product*(y1-y0)).astype(np.uint32)//2
         pad_y = np.ceil(trig_product*(x1-x0)).astype(np.uint32)//2
+        logging.debug(f"--> pad_x,pad_y = {pad_x,pad_y}")
         x_0,x_1,y_0,y_1 = np.ceil([x0-pad_x,x1+pad_x,y0-pad_y,y1+pad_y]
                                                         ).astype(np.uint32)
+        
         slice_2 = (slice(y_0,y_1),slice(x_0,x_1))
+        logging.debug(f"image.shape = {image.shape}")
+        logging.debug(f"slice_2 = {slice_2}")
         image_2 = image[slice_2]
+        logging.debug(f"image2 shape = {image_2.shape}")
         im2_rot = rotate_gpu(image_2,
                          theta,
                          reshape = False)
         slice_3 = (slice(pad_y,pad_y+(y1-y0)),slice(pad_x,pad_x+(x1-x0)))
-        return im2_rot[slice_3]
+        logging.debug(f"slice_3 = {slice_3}")
+        logging.debug(f"im2_rot.shape = {im2_rot.shape}")
+        ret_val = im2_rot[slice_3]
+        logging.debug(f"--> shape of returned array {ret_val.shape}")
+        return ret_val
 
     def load_projections(self,
                         truncate_dataset : int = 1,
@@ -585,9 +639,12 @@ class tomo_dataset:
             # If no new files have been added -> do nothing
             logging.info("No New Files")
             return
-        nx,ny = np.asarray(imread_fcn(new_files[0])).shape
+
+        #nx,ny = np.asarray(imread_fcn(new_files[0])).shape
 
         crop_patch = self.crop_patch
+        logging.info(f"self.crop_patch = {self.crop_patch}")
+        logging.info(f"crop_patch = {crop_patch}")
         norm_patch = self.norm_patch
         #keys = ['x0','x1','y0','y1']
         #crop_patch = [self.settings['crop'][key] for key in keys]
@@ -715,13 +772,6 @@ class tomo_dataset:
             del self.reconstruction
         except:
             pass
-        #self.reconstruction = ASTRA_General(
-        #                                    self.attenuation(ds_interval),
-        #                                    self.settings['recon'],
-        #                                    iterations = iterations,
-        #                                    angles = self.angles,
-        #                                    seed = seed
-        #                                    )
         logging.info("--- reconstructing ---")
         print("--- RECONSTRUCTING ---")
         self.reconstruction = self._reconstructor_.reconstruct_volume(
@@ -758,6 +808,14 @@ class tomo_dataset:
     #--------------------------------------------------------------------------
     #                       POST PROCESSING
     #--------------------------------------------------------------------------
+    def apply_volumetric_median(self, batch_size = 250) -> None:
+        """ Just a wrapper for the big boy
+        """
+        self.reconstruction = median_GPU_batch( self.reconstruction, 
+                                                self.post_median_kernel,
+                                                batch_size = batch_size)
+        
+
     def serialize(self, arr_name : str, path : pathlib.Path ) -> None:
         """
         Save Array as serialized numpy array
@@ -810,6 +868,9 @@ class tomo_dataset:
             im.save(f_name)
 
 def dataset_select_widget(directory = Path(".")):
+    """ This funciton is used in the context of a jupyter notebook to provide a
+    dropdown menu of *.ini files down one directory...
+    """
     config_files = list(sorted(directory.glob("*/*.ini")))
     data_set_select = widgets.Select(options = config_files,
                             layout = Layout(width = '60%',height = '200px'),
@@ -851,6 +912,7 @@ class jupyter_tomo_dataset(tomo_dataset):
         except NameError as err:
             jn = False
         return jn
+
     #--------------------------------------------------------------------------
     #                    Jupyter VISUALIZATION
     #--------------------------------------------------------------------------
@@ -948,8 +1010,8 @@ class recon_algorithms(Enum):
     FBP_CUDA = "FBP_CUDA"
     FDK_CUDA = "FDK_CUDA"
     CGLS_CUDA = "CGLS_CUDA"
-    SART_CUDA = "SART_CUDA"
-    EM_CUDA = "EM_CUDA"
+    SART_CUDA = "SART_CUDA" 
+    #EM_CUDA = "EM_CUDA"                # this just produces zeros
 
     SIRT3D_CUDA = "SIRT3D_CUDA"
     SIRT_CUDA = "SIRT_CUDA"
@@ -991,6 +1053,7 @@ class napari_tomo_gui(tomo_dataset):
     operations grapically in Napari, interactively in Jupyter or in a script
     """
     def __init__(   self) -> None:
+        log_setup("napari_tomo_gui_logging.log")
         self.sare_bool = False
         self.viewer = napari.Viewer()
         self.viewer.title = "NIST Tomography GUI"
@@ -1010,14 +1073,22 @@ class napari_tomo_gui(tomo_dataset):
                             )
 
     def init_operations(self, config_file) -> None:
-        """ Once a config has been selected this widget will be loaded """
+        """ Once a config has been selected this widget will be loaded 
+        This will:
+            - fetch combined image
+            - add it to viewer
+            - load a transmission sample
+            - create the widgets
+
+        """
         super().__init__(config_file)
-        self.load_field('dark')
-        self.load_field('flat')
         self.fetch_combined_image()
+        self.viewer.add_image(  self.combined_image,
+                                name = 'combined image',
+                                colormap = 'Spectral')
+
         self.load_transmission_sample()
         self.dtype = np.float32
-        self.files = []
 
         self.widgets ={
             'Transmission':[
@@ -1037,8 +1108,11 @@ class napari_tomo_gui(tomo_dataset):
                                 self.show_reconstruction(),
                                 self.write_reconstruction_widget(),
                                 self.sare_widget(),
-                                self.sare_apply()
+                                self.sare_apply(),
                                 ],
+            'Post':[
+                                self.post_median_params_widget()
+                ]
                         }
         for i,(key,val) in enumerate(self.widgets.items()):
             handle = self.viewer.window.add_dock_widget( val,
@@ -1074,32 +1148,6 @@ class napari_tomo_gui(tomo_dataset):
         for elem in self.viewer.layers:
             elem.visible = False
 
-    def search_settings(self,
-                        search_key: str,
-                        default: "various"
-                        ) -> "various":
-        """ This can search the configuration through all fields for a specific
-        value to see if it exists, if it does not, then the default is
-        returned. This is used to auto-populate the widgets with values when an
-        existing config is read in.
-
-        Parameters
-        ----------
-            search_key: str
-                the string to match for a parameter in the config
-            default: various
-                the default value to return if the parameter is not found in
-                the config
-        Returns
-        -------
-            either the value from the settings dictionary or the default value
-        """
-        for key,val in self.settings.items():
-            for sub_key,sub_val in val.items():
-                if search_key == sub_key:
-                    return sub_val
-        else:
-            return default
 
     #--------------------------------------------------------------------------
     #              NAPARI WIDGETS AND FUNCTIONS
@@ -1492,12 +1540,6 @@ class napari_tomo_gui(tomo_dataset):
             if med_layer_name in self.viewer.layers:
                 self.viewer.layers.remove(med_layer_name)
 
-            if self.transpose:
-                if med_image.ndim == 2:
-                    med_image = med_image.T
-                elif med_image.ndim == 3:
-                    med_image = np.transpose(med_image,(0,2,1))
-
             self.mute_all()
             self.viewer.add_image(  med_image,
                                     name = med_layer_name,
@@ -1546,6 +1588,11 @@ class napari_tomo_gui(tomo_dataset):
     def select_reconstruction_parameters(self):
         pixel_pitch_init = self.search_settings('camera pixel size',0.0)
         repro_ratio_init = self.search_settings('reproduction ratio',1.0)
+        algorithm_init = self.search_settings('recon algorithm',recon_algorithms.FBP_CUDA)
+        if isinstance(algorithm_init,str):
+            algorithm_init = getattr(recon_algorithms,algorithm_init)
+
+
 
         @magicgui(call_button = 'Select Recon Parameters',
                 Source_detector_distance = {
@@ -1581,7 +1628,7 @@ class napari_tomo_gui(tomo_dataset):
                         }
                     )
         def inner(
-                Algorithm = recon_algorithms.FBP_CUDA,
+                Algorithm = algorithm_init,
                 Geometry = recon_geometry.Parallel,
                 Pixel_pitch: float = 1.0,
                 Reproduction_ratio: float = 1.0,
@@ -1591,7 +1638,8 @@ class napari_tomo_gui(tomo_dataset):
                 fbp_fdk_seed: bool = True,
                 seed_directory= Path.home(),
                 fbp_filters = fbp_fdk_filters.ram_lak,
-                Min_constraint: float = 0.0
+                Min_constraint: float = 0.0,
+                GPUindex: int = 0
                 ):
             """ 
             This GUI helps to generate a config file that the Napari gui can
@@ -1698,7 +1746,7 @@ class napari_tomo_gui(tomo_dataset):
                                       name = 'Reconstruction',
                                       colormap = 'plasma')
             else:
-                print("Not Reconstructed Yet")
+                logging.info("No Reconstruction Exists")
         return inner
 
     def write_reconstruction_widget(self):
@@ -1781,7 +1829,7 @@ class napari_tomo_gui(tomo_dataset):
         return inner
 
     def sare_apply(self):
-        @magicgui(call_button = 'Apply Ring Filter (In Place)')
+        @magicgui(call_button = 'Apply Ring Filter (In-Place)')
         def inner(batch_size: int = 10):
             self.config.update_SARE()
 
@@ -1793,8 +1841,47 @@ class napari_tomo_gui(tomo_dataset):
             self.sare_bool = True
         return inner
 
+    def post_median_params_widget(self):
+        """ This is for selecting the volumetric median kernel that will be
+        applied to the reconstruction volume
+        """
+        @magicgui(call_button = 'Preview Volumetric Median',
+                med_z = {'label':'Median Z',
+                    'value':1,
+                    'step':2},
+                med_x = {'label':'Median X',
+                    'value':1,
+                    'step':2},
+                med_y = {'label':'Median Y',
+                    'value':1,
+                    'step':2}
+                )
+        def inner(  row_apply: int,
+                    med_z: int,
+                    med_x: int,
+                    med_y: int):
+            z_offset = med_z // 2
+            slice_z = slice(row_apply-z_offset,row_apply+z_offset+1)
+            med_kernel = (med_z,med_x,med_y)
+            pre_med = self.reconstruction[row_apply,:,:]
+            med_temp = median_gpu(
+                cp.array(self.reconstruction[slice_z,:,:], dtype = cp.float32),
+                                        med_kernel).get()
+            #print('pre med shape = ',pre_med.shape)
+            #print('med_temp shape = ',med_temp.shape)
+            med_stack = np.stack([pre_med,med_temp[0]])
+            self.mute_all()
+
+            layer_name = 'Volumetric Median' 
+            if layer_name in self.viewer.layers:
+                self.viewer.layers.remove(layer_name)
+            self.viewer.add_image(   med_stack,
+                                            name = layer_name,
+                                            colormap = 'gist_earth'
+                                            )
+        return inner
+
+
 if __name__ == "__main__":
     inst = napari_tomo_gui()
     napari.run()
-    #test_config_gen()
-
