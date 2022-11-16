@@ -20,8 +20,14 @@ to do:
 
 
 """
-from sys import path
-path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
+try:
+    # remote versions can have pip installed, but locally, I am just appending
+    # the path
+    from cy_im_utils.prep import imread
+except ModuleNotFoundError as me:
+    from sys import path
+    path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
+
 from cy_im_utils.prep import radial_zero,field_gpu,imstack_read,center_of_rotation,imread_fit
 from cy_im_utils.recon_utils import ASTRA_General,astra_2d_simple,astra_tomo_handler
 from cy_im_utils.sarepy_cuda import *
