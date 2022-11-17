@@ -7,7 +7,7 @@ import unittest
 
 
 class test_tomo_dataset(unittest.TestCase):
-
+    
     def test_init(self):
         inst.load_transmission_sample()
 
@@ -21,29 +21,31 @@ class test_tomo_dataset(unittest.TestCase):
     def test_load_transmission_sample(self):
         inst.load_transmission_sample()
 
-    def test_cropping(self):
+    def test_cropping_norm(self):
         inst.load_transmission_sample()
-        settings = inst.settings['crop']
-        xy = settings['x0'],settings['y0']
-        dx = settings['x1']-settings['x0']
-        dy = settings['y1']-settings['y0']
-        im = inst.transmission_sample.T
+        im = inst.transmission_sample
         vmin,vmax = np.quantile(im.flatten(),0.1), np.quantile(im.flatten(),0.9)
         fig,ax = plt.subplots()
-        ax.imshow(im, vmin = vmin, vmax = vmax)
-        rectangle = Rectangle(xy, dx, dy, fill = False, color = 'r')
-        ax.add_artist(rectangle)
+        ax.imshow(im, vmin = vmin, vmax = vmax, origin = 'lower')
+        for i,key in enumerate(['crop','norm']):
+            handle = inst.settings[key]
+            xy = handle['x0'],handle['y0']
+            dx = handle['x1']-handle['x0']
+            dy = handle['y1']-handle['y0']
+            color = 'r' if i == 0 else 'b'
+            rectangle = Rectangle(xy, dx, dy, fill = False, color = color)
+            ax.add_artist(rectangle)
         fig.tight_layout()
         print("---> Close Image To Continue <---")
         plt.show()
 
-    #def test_load_projections(self):
-    #    inst.load_projections()
+    def test_load_projections(self):
+        inst.load_projections()
 
 if __name__ == "__main__":
     # ------------------------------------------------------------------------
     #   This Instance Will Be Used By test_tomo_dataset
     # ------------------------------------------------------------------------
-    config_file = ".__test__config__script__.ini"
+    config_file = ".__test__config__script__.yml"
     inst = tomo_dataset(config_file)
     unittest.main()

@@ -1,0 +1,46 @@
+COR:
+  theta: 0.7164348428356807
+  y0: 137
+  y1: 2077
+SARE:
+  la_size: 55
+  sm_size: 9
+  snr: 3.0
+crop:
+  x0: 447
+  x1: 1977
+  y0: 61
+  y1: 2242
+name: __pens__test__
+norm:
+  x0: 186
+  x1: 358
+  y0: 191
+  y1: 2424
+paths:
+  dark_path: D:/Data/Pens/dark
+  flat_path: D:/Data/Pens/flat2
+  projection_path: D:/Data/Pens/projections
+pre_processing:
+  angle_argument: 2
+  dtype: float32
+  extension: fit
+  filename_delimiter: _
+  median_xy: 3
+  thresh median kernels:
+  - 5
+  - 7
+  thresh median z-scores:
+  - 1.0
+  - 1.0
+  transpose: true
+recon:
+  algorithm: FBP_CUDA
+  geometry: parallel
+  options:
+    FilterType: hann
+    GPUindex: 0
+  origin to detector distance: 0.0
+  pixel pitch: 0.009
+  reproduction ratio: 1.0
+  source to origin distance: 0.0

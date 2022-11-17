@@ -117,7 +117,10 @@ class tomo_dataset:
             yaml.safe_dump(cpy,f)
 
     def load_transmission_sample(self, image_index: int = 0):
-        """ This is for loading an image for the median to operate on """
+        """ This is for loading an image for the median to operate on 
+
+
+        """
         proj_path = self.settings['paths']['projection_path']
         ext = self.settings['pre_processing']['extension']
         proj_files = self.fetch_files(proj_path, ext = ext)
@@ -128,7 +131,7 @@ class tomo_dataset:
 
         sample = imread_fcn(proj_files[image_index])
         if self.settings['pre_processing']['transpose']:
-            sample = imread_fcn(proj_files[image_index]).T
+            sample = sample.T
         self.transmission_sample = sample
         self.tm_global_index = image_index
 
@@ -137,7 +140,12 @@ class tomo_dataset:
         """
         return sorted(list(path_.glob(f"*.{ext}")))
 
-    def fetch_combined_image(self, mode = 'auto', median = 1) -> None:
+    def fetch_combined_image(self,
+            mode = 'auto',
+            median = 3,
+            thresh_kernel = 5,
+            thresh_z = 1.0
+            ) -> None:
         """ this function composes the 0 + 180 degree image for defining the
         center of rotation. 
 
@@ -185,16 +193,19 @@ class tomo_dataset:
                 print("file index = ",file_idx)
                 print("closest file = ",str(proj_files[file_idx]))
                 f_180 = proj_files[file_idx]
-
-        ff = cp.array(self.flat, dtype = cp.float32)
-        df = cp.array(self.dark, dtype = cp.float32)
+        med_kernel = (median,median)
+        ff = median_gpu(cp.array(self.flat, dtype = cp.float32), med_kernel)
+        df = median_gpu(cp.array(self.dark, dtype = cp.float32), med_kernel)
 
         for i,f in enumerate([f_0,f_180]):
-            im_temp = cp.asarray(imread_fcn(f), dtype = cp.float32)
+            im_temp = median_gpu(cp.asarray(imread_fcn(f), dtype = cp.float32), 
+                                med_kernel)
             transmission = (im_temp-df)/(ff-df)
             attenuation = -cp.log(transmission)
             attenuation[~cp.isfinite(attenuation)] = 0
-            attenuation = median_gpu(attenuation,(median,median))
+            attenuation = thresh_median_2D_GPU( attenuation,
+                                                thresh_kernel,
+                                                thresh_z)
             combined[i] = attenuation
         combined = cp.sum(combined, axis = 0).get()
 
@@ -1149,10 +1160,7 @@ class napari_tomo_gui(tomo_dataset):
         Note: it also mutes the full image and 
         """
         if 'crop' in self.settings:
-            if self.settings['pre_processing']['transpose']:
-                keys = ['y0','y1','x0','x1']
-            else:
-                keys = ['x0','x1','y0','y1']
+            keys = ['y0','y1','x0','x1']
             x0,x1,y0,y1 = [self.settings['crop'][key] for key in keys]
             verts = np.array([  [x0,y0],
                                 [x0,y1],
