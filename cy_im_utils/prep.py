@@ -157,7 +157,9 @@ def imread_fit(file_name,
     --------
         2D numpy array of median along specified axis (should be 0)
     """
-    im = np.asarray(fits.open(file_name)[0].data.astype(dtype[0]))
+    with fits.open(file_name) as im:
+        im = np.array(im[0].data, dtype = dtype[0])
+
     if im.ndim == 3:
         if device == 'gpu':
             im = cp.array(im, dtype = dtype[1])
@@ -172,7 +174,9 @@ def imread_fit(file_name,
 def imread(im: Path, dtype = np.float32) -> np.array:
     """ super basic wrapper for reading image to np.array
     """
-    return np.asarray(Image.open(im), dtype = dtype)
+    with Image.open(im) as im_:
+        im_ = np.array(im_, dtype = dtype)
+    return im_
     
 def get_y_vec(img: np.array, axis = 0) -> np.array:
     """

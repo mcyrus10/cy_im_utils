@@ -1,26 +1,31 @@
 COR:
-  theta: 0.7164348428356807
-  y0: 137
-  y1: 2077
+  theta: 0.8203653092547202
+  y0: 113
+  y1: 2031
 SARE:
-  la_size: 55
-  sm_size: 9
+  la_size: 45
+  sm_size: 3
   snr: 3.0
 crop:
-  x0: 447
-  x1: 1977
-  y0: 61
-  y1: 2242
-name: __pens__test__
+  x0: 93
+  x1: 2268
+  y0: 425
+  y1: 2002
+name: __pens__unittest__
 norm:
-  x0: 186
-  x1: 358
-  y0: 191
-  y1: 2424
+  x0: 226
+  x1: 2427
+  y0: 111
+  y1: 384
 paths:
   dark_path: D:/Data/Pens/dark
   flat_path: D:/Data/Pens/flat2
   projection_path: D:/Data/Pens/projections
+post_processing:
+  median kernel:
+  - 3
+  - 3
+  - 3
 pre_processing:
   angle_argument: 2
   dtype: float32
@@ -38,7 +43,7 @@ recon:
   algorithm: FBP_CUDA
   geometry: parallel
   options:
-    FilterType: hann
+    FilterType: hamming
     GPUindex: 0
   origin to detector distance: 0.0
   pixel pitch: 0.009

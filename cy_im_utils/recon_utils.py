@@ -40,6 +40,7 @@ class astra_tomo_handler:
         options = {}
         if 'options' in self.settings:
             options = self.settings['options']
+        self.options = options
 
     def _gen_fbp_fdk_seed(self, 
                 sinogram,
@@ -104,7 +105,7 @@ class astra_tomo_handler:
     def _parse_settings_3D(    self,
                             sinogram,
                             settings,
-                            detector_width,
+                            detector_rows,
                             detector_cols,
                             angles):
         """ This function parses the settings dict so that the call to
@@ -116,11 +117,24 @@ class astra_tomo_handler:
             proj_args = [   geometry,
                             1.0,
                             1.0,
-                            detector_width,
+                            detector_rows,
                             detector_cols,
                             angles]
+        elif geometry == 'cone':
+            source_detector = settings['source to origin distance']
+            origin_detector = settings['origin to detector distance']
+            proj_args = [   geometry,
+                            1.0,
+                            1.0,
+                            detector_rows,
+                            detector_cols,
+                            angles,
+                            (source_detector + origin_detector)/self.pixel_size,
+                            0
+                            ]
         else:
-            assert False, "Haven't implemented non parallel geometry yet"
+            assert False, "Only cone and parallel3D have been implemented"
+
 
         # Seed operations
         seed = 0
@@ -179,13 +193,17 @@ class astra_tomo_handler:
         if settings is None:
             settings = self.settings
         n_sino, n_projections, detector_width = sinogram.shape
-        vol_geom = astra.create_vol_geom(detector_width,detector_width)
+        detector_rows,detector_cols = n_sino,detector_width
+        vol_geom = astra.creators.create_vol_geom(  detector_cols,
+                                                    detector_cols,
+                                                    detector_rows)
+
         algorithm = self.algorithm
         geometry = self.geometry
         proj_args,seed = self._parse_settings_3D(   sinogram,
                                                     settings,
+                                                    detector_rows,
                                                     detector_width,
-                                                    n_sino,
                                                     angles
                                                     )
         proj_geom = astra.create_proj_geom(*proj_args)
@@ -223,7 +241,7 @@ class astra_tomo_handler:
                                                 settings = self.settings)
         elif self.geometry in self.geometries_3d and \
                 self.algorithm in self.algorithms_3d:
-            recon = self.astra_reconstruct_3d(  sinogram_volume, 
+            recon = self.astra_reconstruct_3D(  sinogram_volume, 
                                                 angles,
                                                 settings = self.settings)
         else:

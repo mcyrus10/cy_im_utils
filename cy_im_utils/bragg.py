@@ -53,12 +53,10 @@ class bragg_dataset:
                                 ))
         return monochromatic_files
 
-
     def calc_n_reconstructions(self) -> int:
         lambda_0 = self.wavelengths[0]
         files = self.fetch_wavelength_files(self.wavelengths[0])
         return len(files)
-
     
     def fetch_wavelength_files(self, wavelength: str) -> list:
         """
@@ -113,7 +111,6 @@ class bragg_dataset:
         """
         n_lambda,nx,ny = arr.shape
         return np.reshape(np.transpose(arr,(1,2,0)),(nx*ny,n_lambda)).copy()
-
 
     def fit_to_erf( self,
                     data: np.array,
