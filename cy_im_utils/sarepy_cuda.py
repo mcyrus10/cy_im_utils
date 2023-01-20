@@ -11,37 +11,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#============================================================================
+# ============================================================================
 # Author: Nghia T. Vo
 # E-mail: nghia.vo@diamond.ac.uk
-# Description: Original implementation of stripe artifact removal methods, 
+# Description: Original implementation of stripe artifact removal methods,
 # Nghia T. Vo, Robert C. Atwood, and Michael Drakopoulos, "Superior
 # techniques for eliminating ring artifacts in X-ray micro-tomography," Optics
 # Express 26, 28396-28412 (2018).
 # https://doi.org/10.1364/OE.26.028396
-#============================================================================
+# ============================================================================
 # Translation to Python GPU (Cuda-enabled )
 # Translator: M. Cyrus Daugherty
 # E-mail: michael.daugherty@nist.gov
 # Description: GPU adaptation of Vo et al.'s SAREPY
 # Required Libraries: numba, cupy
-#------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 #
 #                       SAREPY GPU FUNCTIONS
 #
-#------------------------------------------------------------------------------
-from cupyx.scipy.ndimage import gaussian_filter,median_filter,binary_dilation,uniform_filter1d
+# -----------------------------------------------------------------------------
+from cupyx.scipy.ndimage import gaussian_filter, median_filter, binary_dilation, uniform_filter1d
 from numba import cuda
 import cupy as cp
 
+
 @cuda.jit('void(float32[:,:,:],int32[:,:,:],float32[:,:,:])')
-def invert_sort_GPU(input_arr : cp.array,
-                    index_arr : cp.array,
-                    output_arr : cp.array
+def invert_sort_GPU(input_arr: cp.array,
+                    index_arr: cp.array,
+                    output_arr: cp.array
                     ) -> None:
     """
     This function reverses? (inverts?) the sort after the median
-    
+
     parameters:
     -----------
     input_arr: (float32) 3 dimensional cp.array
@@ -52,46 +53,49 @@ def invert_sort_GPU(input_arr : cp.array,
 
     output_arr: (float32) 3 dimensional cp.array
         the variable for holding the reverse sorted sinogram
-    
-    """
-    n_proj,n_sino,detector_width = input_arr.shape
-    i,j,k = cuda.grid(3)
-    if i < n_proj and j < n_sino and k < detector_width:
-        proj_index = int(index_arr[i,j,k])
-        val = input_arr[i,j,k]
-        output_arr[proj_index,j,k] = val
 
-def remove_stripe_based_normalization(  sinogram: cp.array,
-                                        sigma: float,
-                                        in_place: bool = False
-                                        ) -> cp.array:
+    """
+    n_proj, n_sino, detector_width = input_arr.shape
+    i, j, k = cuda.grid(3)
+    if i < n_proj and j < n_sino and k < detector_width:
+        proj_index = int(index_arr[i, j, k])
+        val = input_arr[i, j, k]
+        output_arr[proj_index, j, k] = val
+
+
+def remove_stripe_based_normalization(sinogram: cp.array,
+                                      sigma: float,
+                                      in_place: bool = False
+                                      ) -> cp.array:
     """
     Still needs testing for robustness
     This is from SAREPY
-    
-    I removed the num_chunks since you process these in batches? 
+
+    I removed the num_chunks since you process these in batches?
     """
-    n_proj,n_sino,detector_width = sinogram.shape
+    n_proj, n_sino, detector_width = sinogram.shape
     if not in_place:
         sinogram = cp.copy(sinogram)
     else:
         print("Mutating sinograms in place")
-    listindex = cp.array_split(cp.arange(n_proj),1)
+    listindex = cp.array_split(cp.arange(n_proj), 1)
     for pos in listindex:
         bindex = cp.asnumpy(pos[0])
         eindex = cp.asnumpy(pos[-1] + 1)
-        listmean = cp.mean(sinogram[bindex:eindex], axis = 0)
-        list_filtered = gaussian_filter(listmean,sigma)
+        listmean = cp.mean(sinogram[bindex:eindex], axis=0)
+        list_filtered = gaussian_filter(listmean, sigma)
         listcoe = list_filtered - listmean
-        matcoe = cp.tile(listcoe, (eindex - bindex, 1)).reshape(n_proj,n_sino,detector_width)
-        sinogram[bindex:eindex, :] = sinogram[bindex:eindex,:] + matcoe
+        matcoe = cp.tile(listcoe, (eindex - bindex, 1)
+                         ).reshape(n_proj, n_sino, detector_width)
+        sinogram[bindex:eindex, :] = sinogram[bindex:eindex, :] + matcoe
     return sinogram
+
 
 def remove_stripe_based_sorting_GPU(sinogram,
                                     size,
-                                    dim = 1,
-                                    in_place = False,
-                                    threads_per_block = (8,8,8)
+                                    dim=1,
+                                    in_place=False,
+                                    threads_per_block=(8, 8, 8)
                                     ) -> cp.array:
     """
     This is from SAREPY but modified a little bit since the syntax becomes a
@@ -104,22 +108,23 @@ def remove_stripe_based_sorting_GPU(sinogram,
     float32,uint32,float32. I also changed the order of the input indices so
     that it is consistent with ASTRA, this can obviously be changed, but be
     careful and test the output to make sure it still works correctly
-    
+
     Parameters:
     -----------
-    sinogram: cupy 3D array 
-        input sinogram stack with index order (projection,sinogram,detector_width)
+    sinogram: cupy 3D array
+        input sinogram stack with index order
+        (projection,sinogram,detector_width)
     size: int
         size of median filter kernel
     dim: int
         dimensionality of the median filter 1 -> 1D median, 2 -> 2D median
     threads_per_block: tuple of 3 integers
         block size for CUDA jit -> Product of these 3 integers must be less
-        than 1024 with my GPU! 
-    
+        than 1024 with my GPU!
+
     """
-    n_proj,n_sino,detector_width = sinogram.shape
-    list_index = cp.arange(0.0,n_proj,1.0)
+    n_proj, n_sino, detector_width = sinogram.shape
+    list_index = cp.arange(0.0, n_proj, 1.0)
     mat_index = cp.tile(cp.tile(list_index, (detector_width,1)),(n_sino,1)).reshape(sinogram.shape)
     #---------------------------------------------------------------------------
     # THIS REQUIRES TRAVERSING THE ARRAYS TWICE, BUT I DON'T UNDERSTAND THE

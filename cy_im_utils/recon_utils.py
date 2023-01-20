@@ -375,6 +375,7 @@ def ASTRA_General(  attn: np.array,
     Hopefully this is sufficiently generic to handle arbitrariness...
     
     """
+    logging.warning("This funciton is deprecated, use astra_tomo_handler")
     known_algos = ['FDK_CUDA','SIRT3D_CUDA','CGLS3D_CUDA','FP3D_CUDA','FP3D_CUDA']
     warning = "unknown ASTRA 3D algorithm"
     assert data_dict['recon algorithm'] in known_algos, warning

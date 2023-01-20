@@ -9,7 +9,6 @@ from sys import path
 path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
 from cy_im_utils.recon_utils import astra_tomo_handler
 
-
 class test_tomo_dataset(unittest.TestCase):
     """ This tests the different methods of tomo_dataset to make sure that it
     will still work correctly inside a script, etc.
@@ -64,7 +63,6 @@ class test_tomo_dataset(unittest.TestCase):
         med_kernel = (3,3,3)
         print(inst_1.reconstruction.shape)
         inst_1.apply_volumetric_median()
-
 
 if __name__ == "__main__":
     config_file = ".__test__config__pens__.yml"

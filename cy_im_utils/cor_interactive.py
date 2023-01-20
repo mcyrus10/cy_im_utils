@@ -1,6 +1,6 @@
 """
 
-more modular
+more modular jupyter widget for finding center of rotation of tomogram
 
 """
 from PIL import Image
@@ -18,22 +18,30 @@ import matplotlib
 import matplotlib.pyplot as plt
 import cupy as cp
 import numpy as np
-from .prep import center_of_rotation
+from .prep import center_of_rotation,imread_fit
 
 
 
 def imread_fcn(x):
-    return np.array(Image.open(x), dtype = np.float32)
+    str_f_name = str(x)
+    if ".tif" in str_f_name:
+        return np.array(Image.open(x), dtype = np.float32)
+    elif ".fit" in str_f_name:
+        return imread_fit(x)
+    else:
+        logging.warning("Unknown file extension for image reading")
+        return None
 
 class center_of_rotation_interact:
     def __init__(   self,
-                    data_dict, 
+                    tomo_dataset,
                     ff : np.array, 
                     df : np.array,
-                    angles: list = [0,180],
+                    d_theta: float = 180.0,
                     apply_thresh: float = None 
                     ):
-        self.data_dict = data_dict
+        self.handle = tomo_dataset
+        self.data_dict = tomo_dataset.settings
         self.keys = list(data_dict.keys())
         self.proj_path = data_dict['paths']['projection_path']
         self.ext = data_dict['pre_processing']['extension']
@@ -49,8 +57,7 @@ class center_of_rotation_interact:
         else:
             cor_y0,cor_y1 = 0,ff.shape[-1]
     
-        self.fetch_combined_image()
-
+        self.handle.fetch_combined_image(d_theta = d_theta)
 
     def fetch_combined_image(   self,
             med_kernel: int = 3,
@@ -80,7 +87,6 @@ class center_of_rotation_interact:
 
         self.x_max,self.y_max = combined.shape
         self.combined = combined
-
 
     def update_crop_norm(   self,
                             crop_y0: int,
@@ -139,93 +145,88 @@ class center_of_rotation_interact:
                                             horizontalalignment = 'left',
                                             color = 'w',
                                             rotation = 90)
-    
 
     def cor_calculate(self,cor_y0,cor_y1):
-            ##---------------------------------------------------------------------
-            ##  DEBUGGING TIP: OVERRIDING THE CONTROL OF THE INTERACT TO DEBUG
-            #crop_patch = [356,1982,731,2385]
-            #norm_patch = [111,251,192,2385]
-            ##---------------------------------------------------------------------
-            #plt.close('all')
-            self.ax[1].clear()
-            self.ax[1].axis(True)
-            #fig,ax = plt.subplots(1,2, figsize = (10,5))
-            #plt.show()
-            self.y0,self.y1 = cor_y0,cor_y1
-            y0,y1 = cor_y0, cor_y1
-            crop_patch = self.crop_patch
-            norm_patch = self.norm_patch
-            if y1 > crop_patch[3]-crop_patch[2]:
-                print("COR y1 exceeds window size")
-            else:
-                #--------------------------------------------------------------
-                # Trying to be Smart about the Figures
-                #--------------------------------------------------------------
-                self.plot_crop_norm()
+        """
+        ##  DEBUGGING TIP: OVERRIDING THE CONTROL OF THE INTERACT TO DEBUG
+        #crop_patch = [356,1982,731,2385]
+        #norm_patch = [111,251,192,2385]
+        """
+        self.ax[1].clear()
+        self.ax[1].axis(True)
+        self.y0,self.y1 = cor_y0,cor_y1
+        y0,y1 = cor_y0, cor_y1
+        crop_patch = self.crop_patch
+        norm_patch = self.norm_patch
+        if y1 > crop_patch[3]-crop_patch[2]:
+            print("COR y1 exceeds window size")
+        else:
+            #--------------------------------------------------------------
+            # Trying to be Smart about the Figures
+            #--------------------------------------------------------------
+            self.plot_crop_norm()
 
-                slice_x = slice(crop_patch[0],crop_patch[1])
-                slice_y = slice(crop_patch[2],crop_patch[3])
-                cor_image = self.combined_local[slice_y,slice_x]
-                cor_image[~np.isfinite(cor_image)] = 0
-                cor = center_of_rotation(cor_image, y0,y1, ax = [])
-                theta = np.tan(cor[0])*(180/np.pi)
-                rot = rotate_cpu(cor_image,-theta, reshape = False)
-                cor2 = center_of_rotation(rot, y0, y1,   ax = [])
-                #--------------------------------------------------------
-                # MODIFY CROP PATCH IN PLACE CENTERS THE IMAGE ON THE COR
-                #crop_nx = crop_patch[1]-crop_patch[0]
-                crop_nx = crop_patch[1]-crop_patch[0]
-                dx = int(np.round(cor2[1])-crop_nx//2)
-                print(f"dx = {dx}")
-                print(f"intercept (should be center) = {cor2[1]}")
-                crop_patch[0] += dx
-                crop_patch[1] += dx
+            slice_x = slice(crop_patch[0],crop_patch[1])
+            slice_y = slice(crop_patch[2],crop_patch[3])
+            cor_image = self.combined_local[slice_y,slice_x]
+            cor_image[~np.isfinite(cor_image)] = 0
+            cor = center_of_rotation(cor_image, y0,y1, ax = [])
+            theta = np.tan(cor[0])*(180/np.pi)
+            rot = rotate_cpu(cor_image,-theta, reshape = False)
+            cor2 = center_of_rotation(rot, y0, y1,   ax = [])
+            #--------------------------------------------------------
+            # MODIFY CROP PATCH IN PLACE CENTERS THE IMAGE ON THE COR
+            #crop_nx = crop_patch[1]-crop_patch[0]
+            crop_nx = crop_patch[1]-crop_patch[0]
+            dx = int(np.round(cor2[1])-crop_nx//2)
+            print(f"dx = {dx}")
+            print(f"intercept (should be center) = {cor2[1]}")
+            crop_patch[0] += dx
+            crop_patch[1] += dx
 
-                slice_x_corr = slice(crop_patch[0],crop_patch[1])
-                slice_y_corr = slice(crop_patch[2],crop_patch[3])
-                #--------------------------------------------------------
-                cor_image2 = self.combined_local[slice_y_corr,slice_x_corr]
-                cor_image2[~np.isfinite(cor_image2)] = 0
-                cor_image2 = rotate_cpu(cor_image2,-theta,reshape=False)
-                # Adjusted cor image re-cropped to pad
-                cor3 = center_of_rotation(  cor_image2,
-                                            y0,
-                                            y1,
-                                            ax = self.ax[1],
-                                           image_center = True)
-                self.ax[1].set_title(f"Rotated ({theta:.3f} deg) and Cropped")
-                xy = (crop_patch[0],crop_patch[2])
-                dx = crop_patch[1]-crop_patch[0]
-                dy = crop_patch[3]-crop_patch[2]
-                adjusted_crop = Rectangle(xy,dx,dy, color = 'b', fill = False)
-                self.ax[0].add_artist(adjusted_crop)
-                self.ax[0].text(crop_patch[1],crop_patch[2],
-                                    'Crop Patch Centered',
-                                    verticalalignment = 'bottom',
-                                    horizontalalignment = 'left',
-                                    color = 'b',
-                                    rotation = 90)
-                print(f"crop_patch:{crop_patch}")
-                print(f"self.crop_patch:{self.crop_patch}")
-                self.fig.tight_layout()
-                self.data_dict['crop']['x0'] = crop_patch[0]
-                self.data_dict['crop']['x1'] = crop_patch[1]
-                self.data_dict['crop']['y0'] = crop_patch[2]
-                self.data_dict['crop']['y1'] = crop_patch[3]
-                self.data_dict['crop']['dx'] = crop_patch[1]-crop_patch[0]
-                self.data_dict['crop']['dy'] = crop_patch[3]-crop_patch[2]
-                self.data_dict['norm']['x0'] = norm_patch[0]
-                self.data_dict['norm']['x1'] = norm_patch[1]
-                self.data_dict['norm']['y0'] = norm_patch[2]
-                self.data_dict['norm']['y1'] = norm_patch[3]
-                self.data_dict['norm']['dx'] = norm_patch[1]-norm_patch[0]
-                self.data_dict['norm']['dy'] = norm_patch[3]-norm_patch[2]
-                self.data_dict['norm']['dy'] = norm_patch[3]-norm_patch[2]
-                self.data_dict['COR']['y0'] = cor_y0
-                self.data_dict['COR']['y1'] = cor_y1
-                self.data_dict['COR']['theta'] = theta
-
+            slice_x_corr = slice(crop_patch[0],crop_patch[1])
+            slice_y_corr = slice(crop_patch[2],crop_patch[3])
+            #--------------------------------------------------------
+            cor_image2 = self.combined_local[slice_y_corr,slice_x_corr]
+            cor_image2[~np.isfinite(cor_image2)] = 0
+            cor_image2 = rotate_cpu(cor_image2,-theta,reshape=False)
+            # Adjusted cor image re-cropped to pad
+            cor3 = center_of_rotation(  cor_image2,
+                                        y0,
+                                        y1,
+                                        ax = self.ax[1],
+                                       image_center = True)
+            self.ax[1].set_title(f"Rotated ({theta:.3f} deg) and Cropped")
+            xy = (crop_patch[0],crop_patch[2])
+            dx = crop_patch[1]-crop_patch[0]
+            dy = crop_patch[3]-crop_patch[2]
+            adjusted_crop = Rectangle(xy,dx,dy, color = 'b', fill = False)
+            self.ax[0].add_artist(adjusted_crop)
+            self.ax[0].text(crop_patch[1],crop_patch[2],
+                                'Crop Patch Centered',
+                                verticalalignment = 'bottom',
+                                horizontalalignment = 'left',
+                                color = 'b',
+                                rotation = 90)
+            print(f"crop_patch:{crop_patch}")
+            print(f"self.crop_patch:{self.crop_patch}")
+            self.fig.tight_layout()
+            self.data_dict['crop']['x0'] = crop_patch[0]
+            self.data_dict['crop']['x1'] = crop_patch[1]
+            self.data_dict['crop']['y0'] = crop_patch[2]
+            self.data_dict['crop']['y1'] = crop_patch[3]
+            self.data_dict['crop']['dx'] = crop_patch[1]-crop_patch[0]
+            self.data_dict['crop']['dy'] = crop_patch[3]-crop_patch[2]
+            self.data_dict['norm']['x0'] = norm_patch[0]
+            self.data_dict['norm']['x1'] = norm_patch[1]
+            self.data_dict['norm']['y0'] = norm_patch[2]
+            self.data_dict['norm']['y1'] = norm_patch[3]
+            self.data_dict['norm']['dx'] = norm_patch[1]-norm_patch[0]
+            self.data_dict['norm']['dy'] = norm_patch[3]-norm_patch[2]
+            self.data_dict['norm']['dy'] = norm_patch[3]-norm_patch[2]
+            self.data_dict['COR']['y0'] = cor_y0
+            self.data_dict['COR']['y1'] = cor_y1
+            self.data_dict['COR']['theta'] = theta
 
     def interact(   self,  
                     figsize : tuple = (10,5),

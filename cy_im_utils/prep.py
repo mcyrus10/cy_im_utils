@@ -21,10 +21,10 @@ import logging
 from .gpu_utils import GPU_curry
 
 
-def imstack_read(   files: list,
-                    dtype = np.float32,
-                    tqdm_read = True
-                    ) -> np.array: 
+def imstack_read(files: list,
+                 dtype=np.float32,
+                 tqdm_read=True
+                 ) -> np.array:
     """
     Boilerplate image stack reader: takes a list of file names and writes the
     images to a 3D array (image stack)
@@ -37,25 +37,26 @@ def imstack_read(   files: list,
 
     Returns
     -------
-    im_stack : 3D np.array of imagems 
+    im_stack : 3D np.array of imagems
     """
     n_images = len(files)
-    h,w = np.asarray(Image.open(files[0]), dtype = dtype).shape
-    im_stack = np.zeros([n_images,h,w], dtype = dtype)
+    h, w = np.asarray(Image.open(files[0]), dtype=dtype).shape
+    im_stack = np.zeros([n_images, h, w], dtype=dtype)
     if tqdm_read:
-        iterator = tqdm(enumerate(files), desc = 'Reading image files')
+        iterator = tqdm(enumerate(files), desc='Reading image files')
     else:
         iterator = enumerate(files)
-    for i,f in iterator:
-        im = np.asarray(Image.open(f), dtype = dtype)
+    for i, f in iterator:
+        im = np.asarray(Image.open(f), dtype=dtype)
         im_stack[i] = im
     return im_stack
 
-def field(files, median_spatial = 3, dtype = np.float32): 
+
+def field(files, median_spatial=3, dtype=np.float32):
     """
     parameters
     ----------
-    files: list 
+    files: list
         Image files for the field (dark/flat)
 
     median_spatial: int
@@ -88,7 +89,8 @@ def field(files, median_spatial = 3, dtype = np.float32):
     print(delete_me.shape)
     print(med)
     return median_filter(temp , size = med).astype(dtype)
-        
+
+
 def field_gpu(files, median_spatial: int = 3, dtype = np.float32): 
     """
     parameters
@@ -126,7 +128,8 @@ def field_gpu(files, median_spatial: int = 3, dtype = np.float32):
    
     logging.debug(f"z_median shape = {z_median.shape}")
     return median_filter_gpu(z_median,size = median_spatial).get()
-        
+
+
 def imread_fit(file_name,
         axis = 0,
         device = 'gpu',
@@ -171,13 +174,15 @@ def imread_fit(file_name,
     else:
         assert False,"Unknown Shape of image (should be 2D or 3D"
 
+
 def imread(im: Path, dtype = np.float32) -> np.array:
     """ super basic wrapper for reading image to np.array
     """
     with Image.open(im) as im_:
         im_ = np.array(im_, dtype = dtype)
     return im_
-    
+
+
 def get_y_vec(img: np.array, axis = 0) -> np.array:
     """
     Snagged this from a stack overflow post
@@ -187,6 +192,7 @@ def get_y_vec(img: np.array, axis = 0) -> np.array:
     s[axis] = -1
     i = np.arange(n).reshape(s)
     return np.round(np.sum(img * i, axis = axis) / np.sum(img, axis = axis), 1)
+
 
 def center_of_rotation( image: np.array ,
                         coord_y0 : int,
@@ -247,7 +253,8 @@ def center_of_rotation( image: np.array ,
         ax.set_title("Center of Rotation")
         ax.legend()
     return com_fit
-    
+
+
 def GPU_rotate_inplace( volume: np.array ,
                         plane : str,
                         theta : float,
@@ -342,6 +349,46 @@ def GPU_rotate_inplace( volume: np.array ,
                                                             )
     del volume_gpu
 
+
+def rotated_crop(   image: cp.array,
+                    theta: float,
+                    crop: list
+                    ) -> cp.array:
+    """ This pads the array so that the rotation does not introduce zeroes,
+    maybe a bit clunky, but whatever. Notebook in 'Experimentation' has the
+    trig math, explanation, etc.
+
+    Parameters:
+    -----------
+        image: cp.array - the global image to be crop-rotated
+        theta: float - the angle in (degrees) to rotate the image through
+        crop: array-like - the coordinates of the crop x0,x1,y0,y1
+
+    Returns:
+    --------
+        cropped image rotated through theta with the dimensions of the
+        specified crop (not reshaped) and padded with the original image (not
+        zeros)
+
+    """
+    x0,x1,y0,y1 = crop
+    theta_rad = np.deg2rad(theta)
+    trig_product = np.abs(np.sin(theta_rad)*np.cos(theta_rad))
+    pad_x = np.ceil(trig_product*(y1-y0)).astype(np.uint32)//2
+    pad_y = np.ceil(trig_product*(x1-x0)).astype(np.uint32)//2
+    x_0,x_1,y_0,y_1 = np.ceil([x0-pad_x,x1+pad_x,y0-pad_y,y1+pad_y]
+                                                    ).astype(np.uint32)
+    
+    slice_2 = (slice(y_0,y_1),slice(x_0,x_1))
+    image_2 = image[slice_2]
+    im2_rot = gpu_ndimage.rotate(image_2,
+                                 theta,
+                                 reshape = False)
+    slice_3 = (slice(pad_y,pad_y+(y1-y0)),slice(pad_x,pad_x+(x1-x0)))
+    ret_val = im2_rot[slice_3]
+    return ret_val
+
+
 @njit(parallel = True)
 def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
     """
@@ -370,6 +417,7 @@ def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
             if r > radius-radius_offset:
                 arr[i,j] = 0
 
+
 @njit
 def make_circular_2d_mask(   input_arr: np.array,
                     radius: float,
@@ -384,5 +432,3 @@ def make_circular_2d_mask(   input_arr: np.array,
         for j in prange(ny):
             if ((i-x_center)**2 + (j-y_center)**2)**(0.5) < radius:
                 input_arr[i,j] = True
-
-
