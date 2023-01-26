@@ -1,5 +1,5 @@
 # conda env create --file environment.yml
-name: NIST_tomo
+name: NIST_tomo_experimental
 channels:
   - astra-toolbox
   - conda-forge
@@ -7,7 +7,7 @@ dependencies:
   - python=3.9
   - astra-toolbox           # reconstructions
   - cupy                    # cuda - numpy wrappers
-  - cudatoolkit=11.2        # have to specify version for my computer
+  - cudatoolkit=11.3        # have to specify version for my computer
   - astropy                 # for reading .fit files
   - ipympl                  
   - ipython                 # interactive command-line environment
