@@ -5,7 +5,10 @@ NEED TO ADD SCIPY LICENSE FOR SSIM AND PSNR!!
 """
 from cupyx.scipy.ndimage.filters import uniform_filter
 from cupyx.scipy.signal import convolve
-from skimage.filters import threshold_multiotsu
+try:
+    from skimage.filters import threshold_multiotsu
+except ImportError as ie:
+    print(ie)
 import cupy as cp
 import cupyx.scipy.ndimage as ndimage_GPU
 import numpy as np
