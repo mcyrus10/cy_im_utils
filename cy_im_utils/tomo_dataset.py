@@ -7,10 +7,15 @@ with button presses, and likewise the jupyter version can operate inside a
 notebook
 
 to do:
-    - batch fdk cone
     - update all documentation and function/method annotations
-    - control digit width in write_image stack
+    - batch fdk cone
     - control filtration parameters for opposing image stack
+    - error handling:
+        - not reading angles in file name
+    - reproduction ratio, pixel pitch, etc. <-- how does it effect
+      reconstruction?
+    - linear angular distribution based on number of files instead of reading
+      in angle from file name
 
 """
 try:
@@ -18,19 +23,23 @@ try:
     # the path
     from cy_im_utils.prep import imread
 except ModuleNotFoundError as me:
+    print(me)
     from sys import path
     path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
 
-from cy_im_utils.prep import radial_zero,field_gpu,imstack_read,\
-        center_of_rotation,imread_fit,rotated_crop
-from cy_im_utils.recon_utils import ASTRA_General,astra_2d_simple,astra_tomo_handler
+from cy_im_utils.prep import radial_zero, field_gpu, center_of_rotation, \
+        imread_fit, rotated_crop
+from cy_im_utils.recon_utils import ASTRA_General, astra_2d_simple, \
+        astra_tomo_handler
 from cy_im_utils.sarepy_cuda import remove_all_stripe_GPU
 from cy_im_utils.thresholded_median import thresh_median_2D_GPU
-from cy_im_utils.visualization import COR_interact,SAREPY_interact,orthogonal_plot,median_2D_interact
+from cy_im_utils.visualization import COR_interact, SAREPY_interact,\
+        orthogonal_plot, median_2D_interact
 from cy_im_utils.gpu_utils import median_GPU_batch
 from cy_im_utils.logger import log_setup
-
-from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual,RadioButtons,Text,IntRangeSlider,interactive,widgets,Layout
+from ipywidgets import IntSlider, FloatSlider, HBox, VBox, interactive_output,\
+        interact, interact_manual, RadioButtons, Text, IntRangeSlider,\
+        interactive, widgets, Layout
 from matplotlib.patches import Rectangle
 from PIL import Image
 from cupyx.scipy.ndimage import median_filter as median_gpu
@@ -1823,8 +1832,9 @@ class napari_tomo_gui(tomo_dataset):
                   prefix='reconstruction',
                   extension='tif'):
             nz = self.reconstruction.shape[0]
-            for i in tqdm(range(nz)):
-                f_name = Output_dir / f'{prefix}_{i:0d}.{extension}'
+            tqdm_write = tqdm(range(nz), desc='writing image stack')
+            for i in tqdm_write:
+                f_name = Output_dir / f'{prefix}_{i:06d}.{extension}'
                 Image.fromarray(self.reconstruction[i]).save(f_name)
         return inner
 

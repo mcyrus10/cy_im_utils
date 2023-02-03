@@ -28,5 +28,5 @@ def write_volume(volume: np.array,
     tqdm_writer = tqdm(range(nz), desc="writing images")
     for j in tqdm_writer:
         im = Image.fromarray(volume[j, :, :])
-        im_path = path / f"{prefix}_{j: 05d}.{extension}"
+        im_path = path / f"{prefix}_{j:06d}.{extension}"
         im.save(im_path)

@@ -1,22 +1,20 @@
-"""
-todo:
-
-"""
-from cupyx.scipy.ndimage import median_filter
-from scipy.interpolate import make_interp_spline, RegularGridInterpolator
-from cupyx.scipy.interpolate import RegularGridInterpolator as rgi_gpu
-import cupy as cp
-import numpy as np
-import logging
-import napari
-from magicgui import magicgui
-import matplotlib.pyplot as plt
 from PIL import Image
-from multiprocessing import Pool
-from functools import partial
-from magicgui.tqdm import tqdm
+from cupyx.scipy.interpolate import RegularGridInterpolator as rgi_gpu
+from cupyx.scipy.ndimage import median_filter
 from enum import Enum
+from functools import partial
+from magicgui import magicgui
+from magicgui.tqdm import tqdm
+from multiprocessing import Pool
 from napari.qt.threading import thread_worker
+from pathlib import Path
+from scipy.interpolate import make_interp_spline, RegularGridInterpolator
+import cupy as cp
+import logging
+import matplotlib.pyplot as plt
+import napari
+import numpy as np
+from post import write_volume
 
 
 class interp_methods(Enum):
@@ -51,7 +49,6 @@ class gpu_unwrap:
         self.points = points_dict
         keys = sorted(list(points_dict.keys()))
         self.index_0, self.index_1 = keys[0], keys[1]
-        print("--->", keys)
         self.nz = self.index_1 - self.index_0
         self.nx, self.ny = volume[0].shape
         self.sampling = sampling
@@ -79,9 +76,9 @@ class gpu_unwrap:
                          points_array: cp.array,
                          ) -> tuple:
         """
-        This processes the points retrieved from napari and sequences them so the
-        spiral has a continuously increasing angle (not capped at 360), and also
-        returns the x and y points from the path (point sequence)
+        This processes the points retrieved from napari and sequences them so
+        the spiral has a continuously increasing angle (not capped at 360), and
+        also returns the x and y points from the path (point sequence)
         """
         nx, ny = self.nx, self.ny
         x_ = points_array[:, -1]
@@ -103,6 +100,28 @@ class gpu_unwrap:
             rolling_angle += d_theta
             theta[i] = rolling_angle
         return x_, y_, theta
+
+    def compute_arc_length(self, spl, theta: np.array):
+        """
+        numerically integrates the length of the spline and returns the angular
+        array such that each point on the spline gets one sample.
+        """
+        diff = np.inf
+        num_samples = 100
+        j = 0
+        while diff > 1:
+            angle_new = cp.linspace(cp.min(theta), cp.max(theta), num_samples)
+            x_new, y_new = spl(cp.asnumpy(angle_new)).T
+            x_new, y_new = [cp.array(arr) for arr in [x_new, y_new]]
+            length = cp.sum(np.sqrt(
+                    (x_new[:-1]-x_new[1:])**2 + (y_new[:-1]-y_new[1:])**2)
+                            )
+            diff = length-num_samples
+            num_samples = int(cp.round(length))
+            j += 1
+            if j > 10:
+                logging.warning(f"arc length not converged in {j} iterations")
+        return angle_new
 
     def prep_splines(self, volume):
         """
@@ -138,28 +157,6 @@ class gpu_unwrap:
             x_new_2d.append(x_new)
             y_new_2d.append(y_new)
         return dx_norm_2d, dy_norm_2d, x_new_2d, y_new_2d
-
-    def compute_arc_length(self, spl, theta: np.array):
-        """
-        numerically integrates the length of the spline and returns the angular
-        array such that each point on the spline gets one sample.
-        """
-        diff = np.inf
-        num_samples = 100
-        j = 0
-        while diff > 1:
-            angle_new = cp.linspace(cp.min(theta), cp.max(theta), num_samples)
-            x_new, y_new = spl(cp.asnumpy(angle_new)).T
-            x_new, y_new = [cp.array(arr) for arr in [x_new, y_new]]
-            length = cp.sum(np.sqrt(
-                    (x_new[:-1]-x_new[1:])**2 + (y_new[:-1]-y_new[1:])**2)
-                            )
-            diff = length-num_samples
-            num_samples = int(cp.round(length))
-            j += 1
-            if j > 10:
-                logging.warning(f"arc length not converged in {j} iterations")
-        return angle_new
 
     def compute_volume_interp_points(self,
                                      x_new_2d: list,
@@ -246,11 +243,11 @@ class gpu_unwrap:
 
         remainder = n_recon % batch_size
         if remainder > 0:
-            print(f"remainder = {remainder}")
-            interpolator = self.fetch_interpolator(volume,
-                                               index_start=n_recon-remainder,
-                                                   index_end=n_recon
-                                                   )
+            interpolator = self.fetch_interpolator(
+                                        volume,
+                                        index_start=n_recon-remainder,
+                                        index_end=n_recon
+                                        )
 
             slice_ = slice(n_recon-remainder, n_recon, 1)
             new_vol[slice_] = interpolator(cp.array(coords_vectorized[slice_],
@@ -273,6 +270,7 @@ class napari_unwrapper:
                         'clone': self.clone_path(),
                         'show_layer_unwrapped': self.show_layer_unwrapped(),
                         'unwrap_volume': self.unwrap_volume(),
+                        'write_unwrapped': self.write_unwrapped(),
                         }
         for key, val in dock_widgets.items():
             self.viewer.window.add_dock_widget(val,
@@ -302,6 +300,7 @@ class napari_unwrapper:
         @magicgui(call_button="Reset Splines")
         def inner():
             self.splines = {}
+            logging.info("Resetting Splines Dictionary")
         return inner
 
     def clone_path(self) -> None:
@@ -310,7 +309,7 @@ class napari_unwrapper:
                                      'min': 0,
                                      'max': 1e6})
         def inner(destination_layer: int = 0):
-            temp = inst.viewer.layers[-1].data[0]
+            temp = inst.viewer.layers[-1].data[0].copy()
             temp[:, 0] = destination_layer
             inst.viewer.add_shapes(temp,
                                    shape_type='path',
@@ -373,7 +372,7 @@ class napari_unwrapper:
                   layer_no={'min': 0, 'max': 1e6, 'value': 0},
                   )
         def inner(layer_no: int,
-                  sampling: int = 1,
+                  sampling: int = 20,
                   reshape_factor: int = 400,
                   interpolation_method: interp_methods = interp_methods.nearest
                   ):
@@ -391,6 +390,7 @@ class napari_unwrapper:
             ax[0].imshow(im)
             ax[0].scatter(points[:, -1], points[:, -2])
             ax[1].imshow(resample_unroll(temp, reshape_factor).T)
+            ax[1].grid(True)
             plt.show()
         return inner
 
@@ -406,9 +406,10 @@ class napari_unwrapper:
                   interp_method=interp_methods.linear
                   ):
             points_dict = {}
-            indices = []
-            for key, val in self.splines.items():
-                indices.append(key)
+            indices = sorted(list(self.splines.keys()))
+            print("indices:", indices)
+            for key in indices:
+                val = self.splines[key]
                 x_local, y_local = val['x_'], val['y_']
                 points_dict[key] = np.stack([y_local, x_local]).T
 
@@ -429,13 +430,24 @@ class napari_unwrapper:
 
         return inner
 
+    def write_unwrapped(self):
+        @magicgui(call_button='write unwrapped volume',
+                  output_dir={'label': 'output directory',
+                              'mode': 'd'}
+                  )
+        def inner(output_dir: Path = Path.home(),
+                  prefix: str = 'unwrapped',
+                  extension: str = 'tif'):
+            volume = self.viewer.layers['unwrapped'].data
+            write_volume(volume, output_dir, prefix, extension)
+        return inner
+
     def mute_all(self) -> None:
         """
         helper function to toggle visibiltiy of all items to off
         """
         for elem in self.viewer.layers:
             elem.visible = False
-
 
 
 def points_processor(points_array: np.array,
@@ -478,7 +490,8 @@ def interpolate(y1, y2, x3, x1, x2):
       y1|     x     |
         |           |
         |           |
-        -----x1----x3---x2----
+        ----------------------
+             x1    x3   x2
     """
     return y1 + (x3 - x1) * (y2 - y1) / (x2 - x1)
 
@@ -574,7 +587,7 @@ def unwrap_wrapper(index: int,
     if isinstance(image_files, list):
         im = imread(image_files[index])
     else:
-        im = np.array(image_files[index], dtype = np.float32)
+        im = np.array(image_files[index], dtype=np.float32)
     nx, ny = im.shape
     y_temp = interpolate(points_dict[index_0][:, -2],
                          points_dict[index_1][:, -2],
@@ -648,8 +661,6 @@ def resample_unroll(input_image: np.array,
         slice_ = slice(j*resample_length, (j+1)*resample_length)
         temp.append(input_image[slice_, :])
     return np.hstack(temp)
-
-
 
 
 if __name__ == "__main__":

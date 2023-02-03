@@ -1,8 +1,5 @@
 # cy_im_utils (Cyrus' Image Utils)
 
-To do:
-- add logging (as needed for debugging and info)
-
 KEEP IT SIMPLE STUPID:
 **This should mostly just be functions, unless a class is really appropriate,
 it will be simpler most of the time to just deal with numpy arrays.**
@@ -79,3 +76,5 @@ This will execute (add) once per thread rather than spreading hte computation ac
     int blockSize = 256;
     int numBlocks = (N+blockSize-1) / blockSize;
     add<<<numBlocks, blockSize>>>(N,x,y);
+
+

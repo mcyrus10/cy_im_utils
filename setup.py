@@ -2,18 +2,18 @@ from setuptools import setup
 from setuptools import find_packages
 
 # load README file
-with open(file = "README.md", mode = 'r') as readme_handle:
+with open(file="README.md", mode='r') as readme_handle:
     long_description = readme_handle.read()
 
 setup(
-        name = 'cy_im_utils',
-        author = 'M. Cyrus Daugherty',
-        author_email = 'michael.daugherty@nist.gov',
+        name='cy_im_utils',
+        author='M. Cyrus Daugherty',
+        author_email='michael.daugherty@nist.gov',
         #    major. minor. maintenance
-        version = '0.0.1',
-        description = "Image processing utils for tomography",
-        long_description = long_description,
-        long_description_content_type = 'text/markdown',
+        version='0.0.1',
+        description="Image processing utils for tomography",
+        long_description=long_description,
+        long_description_content_type='text/markdown',
         install_requires=[
             "numpy>=1.21.5",
             "cupy>=10.1.0",
@@ -27,5 +27,4 @@ setup(
             ],
         keywords='tomography',
         packages=find_packages(where="cy_im_utils")
-
         )
