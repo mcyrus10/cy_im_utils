@@ -465,14 +465,14 @@ def ASTRA_forward_project_2D(   recon_image : np.array,
     astra.projector.delete(proj_id)
     return sinogram
 
-def astra_back_project_local_function(   sinogram : np.array,
-                                        algorithm : str = 'BP_CUDA',
-                                        pixel_size : float = 0.0087,
-                                        angles = None,
-                                        geom = 'parallel',
-                                        iterations = 1,
-                                        seed = 0
-                                        ) -> np.array:
+def astra_back_project_local_function(sinogram : np.array,
+                                      algorithm : str = 'BP_CUDA',
+                                      pixel_size : float = 0.0087,
+                                      angles = None,
+                                      geom = 'parallel',
+                                      iterations = 1,
+                                      seed = 0
+                                      ) -> np.array:
     """
     This is being used by the iterative reconstruction method(s)
 
@@ -510,11 +510,11 @@ def astra_back_project_local_function(   sinogram : np.array,
     astra.algorithm.delete(alg_id)
     return reconstruction
 
-def astra_forward_project_local_function(  recon_image : np.array,
-                            angles = None,
-                            geom = 'parallel',
-                            pixel_size = 0.0087
-                            ) -> np.array:
+def astra_forward_project_local_function(recon_image: np.array,
+                                         angles=None,
+                                         geom='parallel',
+                                         pixel_size=0.0087
+                                         ) -> np.array:
     """
     This is being used by the iterative method(s)
 

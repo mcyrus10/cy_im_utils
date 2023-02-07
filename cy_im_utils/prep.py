@@ -389,7 +389,7 @@ def rotated_crop(   image: cp.array,
     return ret_val
 
 
-@njit(parallel = True)
+@njit(parallel=True)
 def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
     """
     This function is for making values outside the radius of a circle at the
@@ -408,14 +408,14 @@ def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
     --------
     None (operates in-place)
     """
-    nx,ny = arr.shape
+    nx, ny = arr.shape
     assert nx == ny, "This function only accepts square images"
     radius = nx//2
     for i in prange(nx):
         for j in prange(ny):
             r = ((i-nx//2)**2+(j-ny//2)**2)**(1./2.)
             if r > radius-radius_offset:
-                arr[i,j] = 0
+                arr[i, j] = 0
 
 
 @njit

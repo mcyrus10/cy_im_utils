@@ -3,7 +3,11 @@
 NEED TO ADD SCIPY LICENSE FOR SSIM AND PSNR!!
 
 """
-from cupyx.scipy.ndimage.filters import uniform_filter
+try:
+    from cupyx.scipy.ndimage.filters import uniform_filter
+except ModuleNotFoundError as me:
+    print(f"{me}, possible cupy version error??")
+    from cupyx.scipy.ndimage import uniform_filter
 from cupyx.scipy.signal import convolve
 try:
     from skimage.filters import threshold_multiotsu
