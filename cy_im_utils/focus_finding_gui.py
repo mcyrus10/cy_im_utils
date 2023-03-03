@@ -4,14 +4,18 @@ Basically a copy of Dan's IDL code for finding focus
 
 """
 from PIL import Image
-from magicgui import magicgui
-from magicgui.tqdm import tqdm
 from functools import partial
+try:
+    from magicgui import magicgui
+    from magicgui.tqdm import tqdm
+    import napari
+except:
+    print("errors importing napari and/or magicgui")
+
 from pathlib import Path
-from scipy.special import erf
 from scipy.optimize import least_squares
+from scipy.special import erf
 import matplotlib.pyplot as plt
-import napari
 import numpy as np
 
 plt.style.use("dark_background")
@@ -144,7 +148,10 @@ class napari_focus_gui:
         plt.show()
 
 
-def fit_x_focus(crop_image, show_erfs: bool = False):
+def fit_x_focus(crop_image,
+                x_plot=None,
+                show_erfs: bool = False,
+                plot: bool = True) -> np.array:
     crop_median = np.median(crop_image, axis=1)
     n_curves, n_points = crop_median.shape
     out = []
@@ -175,12 +182,16 @@ def fit_x_focus(crop_image, show_erfs: bool = False):
             fig_.tight_layout()
     out = np.stack(out)
     sigmas = out[:, 3]
-    fig, ax = plt.subplots(1, 1)
-    ax.plot(range(n_curves), sigmas, marker='x', linestyle='')
-    fit_2 = np.polyfit(range(n_curves), sigmas, 10)
-    x_2 = np.arange(0, n_curves, 0.1)
-    ax.plot(x_2, np.polyval(fit_2, x_2), linestyle='--')
-    plt.show()
+    if plot:
+        fig, ax = plt.subplots(1, 1)
+        if x_plot is None:
+            x_plot = range(n_curves)
+        ax.plot(x_plot, sigmas, marker='x', linestyle='')
+        fit_2 = np.polyfit(range(n_curves), sigmas, 10)
+        x_2 = np.arange(0, n_curves, 0.1)
+        x_2_plot = np.linspace(x_plot[0], x_plot[-1], len(x_2))
+        ax.plot(x_2_plot, np.polyval(fit_2, x_2), linestyle='--')
+        plt.show()
     return out
 
 

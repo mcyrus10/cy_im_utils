@@ -46,6 +46,7 @@ from cupyx.scipy.ndimage import median_filter as median_gpu
 from dask.array import array as dask_array
 from enum import Enum
 from functools import partial
+from tqdm import tqdm
 try:
     from magicgui import magicgui
     from magicgui.tqdm import tqdm
@@ -89,7 +90,7 @@ class tomo_dataset:
         logging.info(f"{'='*20} SETTINGS: {'='*20}")
         for key, val in self.settings['pre_processing'].items():
             setattr(self, key, val)
-        print("------>", self.settings)
+        #print("------>", self.settings)
         for key, val in self.settings.items():
             if isinstance(val, dict):
                 logging.info(f"{key}:")
@@ -586,7 +587,7 @@ class tomo_dataset:
             logging.info(f"{mode} field is None -> returning 2D array of zeros")
             proj_path = self.settings['paths'][f'projection_path']
             ext_projections = self.settings['pre_processing']['extension']
-            proj_files = list(proj_path.glob(f"*{ext_projections}*"))
+            proj_files = sorted(list(proj_path.glob(f"*{ext_projections}*")))
             proj_image = self.imread(proj_files[0])
             field = np.zeros_like(proj_image, dtype=np.float32)
 
@@ -601,7 +602,7 @@ class tomo_dataset:
                 ext = self.settings['pre_processing']['extension']
 
             logging.info(f"Reading {mode} field from {field_path}")
-            files = list(field_path.glob(f"*{ext}*"))
+            files = sorted(list(field_path.glob(f"*{ext}*")))
             logging.info(f"\tnum files = {len(files)}")
             logging.info("\tshape files = "
                               f"{np.array(self.imread(files[0])).shape}")
@@ -659,9 +660,9 @@ class tomo_dataset:
 
         proj_path = self.settings['paths']['projection_path']
         ext = self.settings['pre_processing']['extension']
-        all_files = list(
-                        proj_path.glob(f"*{ext}*")
-                        )[::truncate_dataset]
+        all_files = sorted(list(
+                                proj_path.glob(f"*{ext}*")
+                                ))[::truncate_dataset]
 
         new_files = []
         for file_ in all_files:
@@ -1229,6 +1230,7 @@ class napari_tomo_gui(tomo_dataset):
                                 self.cor_wrapper(),
                                 self.median_widget(),
                                 self.load_images(),
+                                self.flip_tm_lr(),
                                 self.show_transmission(),
                                 self.reset_transmission(),
                                 ],
@@ -1977,6 +1979,12 @@ class napari_tomo_gui(tomo_dataset):
             def thread_apply_vol_median():
                 self.apply_volumetric_median(batch_size=batch_size)
             thread_apply_vol_median()
+        return inner
+
+    def flip_tm_lr(self):
+        @magicgui(call_button='Flip Transmission LR')
+        def inner():
+            self.transmission = self.transmission[:, :, ::-1]
         return inner
 
 

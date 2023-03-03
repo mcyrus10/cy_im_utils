@@ -118,7 +118,7 @@ def structural_similarity_GPU(im1: cp.array,
     if dtype is not float32 this needs to be supplied
 
     """
-    assert im1.shape == im2.shape, "Image stacks must have same shape"
+    assert im1.shape == im2.shape, f"im1.shape:{im1.shape} != im2.shape: {im2.shape}"
     assert len(im1.shape) == 3, "Image stacks must have 3 dimensions"
     assert im1.dtype == cp.float32, "Only implemented for float32 currently"
     K1 = kwargs.pop('K1', 0.01)

@@ -5,7 +5,6 @@
 -------------------------------------------------------------------------------
 
 """
-
 from PIL import Image
 from astropy.io import fits
 from cupyx.scipy import ndimage as gpu_ndimage
@@ -74,28 +73,27 @@ def field(files, median_spatial=3, dtype=np.float32):
     elif '.fit' in files[0].suffix:
         read_fcn = imread_fit
 
-
     im0 = np.asarray(read_fcn(files[0]))
     shape = im0.shape
-    temp = np.zeros([len(files),shape[0],shape[1]])
+    temp = np.zeros([len(files), shape[0], shape[1]])
 
-    for i,f in tqdm(enumerate(files)):
-        temp[i,:,:] = np.asarray(read_fcn(f))
+    for i, f in tqdm(enumerate(files)):
+        temp[i, :, :] = np.asarray(read_fcn(f))
 
-    temp = np.median(temp,axis = 0)
+    temp = np.median(temp, axis=0)
     print(temp.shape)
     med = int(median_spatial)
-    delete_me = gaussian_filter(temp, sigma = 1)
+    delete_me = gaussian_filter(temp, sigma=1)
     print(delete_me.shape)
     print(med)
-    return median_filter(temp , size = med).astype(dtype)
+    return median_filter(temp, size=med).astype(dtype)
 
 
-def field_gpu(files, median_spatial: int = 3, dtype = np.float32): 
+def field_gpu(files, median_spatial: int = 3, dtype=np.float32):
     """
     parameters
     ----------
-    files: list 
+    files: list
         Image files for the field (dark/flat)
     median_spatial: int
         Median spatial filter size
@@ -113,19 +111,19 @@ def field_gpu(files, median_spatial: int = 3, dtype = np.float32):
 
     im0 = np.asarray(read_fcn(files[0]))
     shape = im0.shape
-    temp = np.zeros([len(files),shape[0],shape[1]])
+    temp = np.zeros([len(files), shape[0], shape[1]])
     # Determine the file extension
 
-    tqdm_file_read = tqdm(enumerate(files), desc = "reading images")
-    for i,f in tqdm_file_read:
-        temp[i,:,:] = np.asarray(read_fcn(f))
-    
+    tqdm_file_read = tqdm(enumerate(files), desc="reading images")
+    for i, f in tqdm_file_read:
+        temp[i, :,:] = np.asarray(read_fcn(f))
+
     # median along main axis
-    z_median = cp.zeros(shape, dtype = dtype)
+    z_median = cp.zeros(shape, dtype=dtype)
     for elem in range(shape[0]):
-        med_temp = cp.median(cp.array(temp[:,elem,:]), axis = 0)
+        med_temp = cp.median(cp.array(temp[:, elem, :]), axis=0)
         z_median[elem] = med_temp
-   
+
     logging.debug(f"z_median shape = {z_median.shape}")
     return median_filter_gpu(z_median,size = median_spatial).get()
 
