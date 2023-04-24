@@ -116,7 +116,7 @@ def field_gpu(files, median_spatial: int = 3, dtype=np.float32):
 
     tqdm_file_read = tqdm(enumerate(files), desc="reading images")
     for i, f in tqdm_file_read:
-        temp[i, :,:] = np.asarray(read_fcn(f))
+        temp[i, :, :] = np.asarray(read_fcn(f))
 
     # median along main axis
     z_median = cp.zeros(shape, dtype=dtype)
@@ -125,14 +125,14 @@ def field_gpu(files, median_spatial: int = 3, dtype=np.float32):
         z_median[elem] = med_temp
 
     logging.debug(f"z_median shape = {z_median.shape}")
-    return median_filter_gpu(z_median,size = median_spatial).get()
+    return median_filter_gpu(z_median, size=median_spatial).get()
 
 
 def imread_fit(file_name,
-        axis = 0,
-        device = 'gpu',
-        dtype = [np.float32,cp.float32],
-        ) -> np.array: 
+               axis=0,
+               device='gpu',
+               dtype=[np.float32, cp.float32],
+               ) -> np.array:
     """
     This function reads in a 'fit' file (which has an odd number of frames
     stacked in a 3d array), and it takes the median along the 0 axis to return
@@ -173,15 +173,14 @@ def imread_fit(file_name,
         assert False,"Unknown Shape of image (should be 2D or 3D"
 
 
-def imread(im: Path, dtype = np.float32) -> np.array:
+def imread(im: Path, dtype=np.float32) -> np.array:
     """ super basic wrapper for reading image to np.array
     """
     with Image.open(im) as im_:
-        im_ = np.array(im_, dtype = dtype)
-    return im_
+        return np.array(im_, dtype=dtype)
 
 
-def get_y_vec(img: np.array, axis = 0) -> np.array:
+def get_y_vec(img: np.array, axis=0) -> np.array:
     """
     Snagged this from a stack overflow post
     """
@@ -189,14 +188,14 @@ def get_y_vec(img: np.array, axis = 0) -> np.array:
     s = [1] * img.ndim
     s[axis] = -1
     i = np.arange(n).reshape(s)
-    return np.round(np.sum(img * i, axis = axis) / np.sum(img, axis = axis), 1)
+    return np.round(np.sum(img * i, axis=axis) / np.sum(img, axis=axis), 1)
 
 
-def center_of_rotation( image: np.array ,
-                        coord_y0 : int,
-                        coord_y1 : int,
-                        ax : plt.axis = [],
-                        image_center : bool = True): 
+def center_of_rotation(image: np.array,
+                       coord_y0: int,
+                       coord_y1: int,
+                       ax: plt.axis = [],
+                       image_center: bool = True):
     """
     Parameters
     ----------
@@ -209,7 +208,7 @@ def center_of_rotation( image: np.array ,
     image_center: bool
         For visual inspection of the fit (shows where the center of the image
         is relative to the calculated center of mass and curve fit
-    
+
     Returns
     -------
     numpy array:
@@ -221,13 +220,13 @@ def center_of_rotation( image: np.array ,
     combined[~np.isfinite(combined)] = 0     #<-----------------------------------
     height,width = combined.shape       # rows, cols
     axis = 1
-    COM = get_y_vec(combined,axis)
+    COM = get_y_vec(combined, axis)
     subset2 = COM[coord_y0:coord_y1]
-    y = np.arange(coord_y0,coord_y1)
-    com_fit = np.polyfit(y,subset2,1)
+    y = np.arange(coord_y0, coord_y1)
+    com_fit = np.polyfit(y, subset2, 1)
     # Plotting
     if ax:
-        ax.plot(np.polyval(com_fit,[0,height-1]),[0,height-1],
+        ax.plot(np.polyval(com_fit, [0, height-1]), [0, height-1],
                                                         'k-',
                                                         linewidth = 1,
                                                         label = 'Curve Fit')
@@ -253,11 +252,11 @@ def center_of_rotation( image: np.array ,
     return com_fit
 
 
-def GPU_rotate_inplace( volume: np.array ,
-                        plane : str,
-                        theta : float,
-                        batch_size : int
-                        ) -> None:
+def GPU_rotate_inplace(volume: np.array,
+                       plane: str,
+                       theta: float,
+                       batch_size: int
+                       ) -> None:
     """
     Note: if you are unsure which plane to rotate about refer to
     visualization.orthogonal_plot which will show the planes labeled
@@ -266,7 +265,7 @@ def GPU_rotate_inplace( volume: np.array ,
     dimensions of the array to allow the entirety of the rotated image). This
     means that if the window is not large enough it will crop the edge of the
     image
-    
+
     The plane string controls the slicing functions that generate the
     batch-wise slices stepping through the volume this allows a SINLGE LOOP to
     be created that generically calls slice_x_ and slice_y_ to get these
@@ -275,18 +274,19 @@ def GPU_rotate_inplace( volume: np.array ,
     slice is static for all cases (not a lambda).  This might be abstractable
     to a higher degree but I find this format to be readable and less error
     prone.
-    
+
     parameters
     ----------
     volume: np.array
         volume to be rotated (len volume.shape == 3)
     plane: str
-        about which plane to apply rotation: 'xz' -> about y-axis; 'yz' about x-axis
+        about which plane to apply rotation: 'xz' -> about y-axis; 'yz' about
+        x-axis
     theta: float
         angle to rotate through
     batch_size: int
         size of batch to send to GPU
-        
+
     Returns:
         None -> Operates in-place on *volume*
 
@@ -297,12 +297,12 @@ def GPU_rotate_inplace( volume: np.array ,
     message = "WARNING: This function is deprecated, use GPU_curry in gpu_utils to achieve this"
     logging.info(message)
     print(message)
-    nx,ny,nz = volume.shape
+    nx, ny, nz = volume.shape
     # Only the slices that are unique to the axes are re-defined, so all slices
     # are defined generically here
-    slice_x_ = lambda j: slice(0,nx,1)
-    slice_y_ = lambda j: slice(0,ny,1)
-    slice_z_ = lambda j: slice(0,nz,1)
+    slice_x_ = lambda j: slice(0, nx, 1)
+    slice_y_ = lambda j: slice(0, ny, 1)
+    slice_z_ = lambda j: slice(0, nz, 1)
     slice_x_rem = slice_x_("")
     slice_y_rem = slice_y_("")
     slice_z_rem = slice_z_("")
@@ -348,10 +348,10 @@ def GPU_rotate_inplace( volume: np.array ,
     del volume_gpu
 
 
-def rotated_crop(   image: cp.array,
-                    theta: float,
-                    crop: list
-                    ) -> cp.array:
+def rotated_crop(image: cp.array,
+                 theta: float,
+                 crop: list
+                 ) -> cp.array:
     """ This pads the array so that the rotation does not introduce zeroes,
     maybe a bit clunky, but whatever. Notebook in 'Experimentation' has the
     trig math, explanation, etc.
@@ -369,20 +369,20 @@ def rotated_crop(   image: cp.array,
         zeros)
 
     """
-    x0,x1,y0,y1 = crop
+    x0, x1, y0, y1 = crop
     theta_rad = np.deg2rad(theta)
     trig_product = np.abs(np.sin(theta_rad)*np.cos(theta_rad))
     pad_x = np.ceil(trig_product*(y1-y0)).astype(np.uint32)//2
     pad_y = np.ceil(trig_product*(x1-x0)).astype(np.uint32)//2
-    x_0,x_1,y_0,y_1 = np.ceil([x0-pad_x,x1+pad_x,y0-pad_y,y1+pad_y]
-                                                    ).astype(np.uint32)
-    
-    slice_2 = (slice(y_0,y_1),slice(x_0,x_1))
+    x_0, x_1, y_0, y_1 = np.ceil([x0-pad_x, x1+pad_x, y0-pad_y, y1+pad_y]
+                                 ).astype(np.uint32)
+
+    slice_2 = (slice(y_0, y_1), slice(x_0, x_1))
     image_2 = image[slice_2]
     im2_rot = gpu_ndimage.rotate(image_2,
                                  theta,
-                                 reshape = False)
-    slice_3 = (slice(pad_y,pad_y+(y1-y0)),slice(pad_x,pad_x+(x1-x0)))
+                                 reshape=False)
+    slice_3 = (slice(pad_y, pad_y+(y1-y0)), slice(pad_x, pad_x+(x1-x0)))
     ret_val = im2_rot[slice_3]
     return ret_val
 
@@ -417,16 +417,16 @@ def radial_zero(arr: np.array, radius_offset: int = 0) -> None:
 
 
 @njit
-def make_circular_2d_mask(   input_arr: np.array,
-                    radius: float,
-                    x_center: int,
-                    y_center: int
-                    ) -> None:
+def make_circular_2d_mask(input_arr: np.array,
+                          radius: float,
+                          x_center: int,
+                          y_center: int
+                          ) -> None:
     """
     this is pretty useful
     """
-    nx,ny = input_arr.shape
+    nx, ny = input_arr.shape
     for i in prange(nx):
         for j in prange(ny):
             if ((i-x_center)**2 + (j-y_center)**2)**(0.5) < radius:
-                input_arr[i,j] = True
+                input_arr[i, j] = True

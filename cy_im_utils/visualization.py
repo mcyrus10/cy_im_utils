@@ -249,6 +249,52 @@ def colors(x) -> str:
     return matplotlib.colors.to_hex(f"#{col[x%len(col)]}")
 
 
+def image_array_1D(images: dict,
+                   fig_kwargs: dict = {},
+                   vmin_max_key=None,
+                   low: float = 0.01,
+                   high: float = 0.99,
+                   row_col: str = 'row',
+                   cmap: str = 'viridis'
+                   ) -> tuple:
+    """
+    This is just the mega basic template for 1D image array
+    Note the shape is inferred from the number of images and the row_col string
+    argument determines the orientation
+
+    Parameters:
+    ===========
+        images: dict - label: image
+        fig_kwargs: dict - these get passed directly to plt.subplots(**....)
+        vmin_max_key: various - if you want to use a single vmin, vmax for all
+                           images, this is the key of that image, if this
+                           argument is ignored, no min,max is used
+        low: float - this is the low quantile for the vmin/max
+        high: float - this is the upper quantile for the vmin/max
+        row_col: str - this sets the orientation of the figure
+        cmap: str
+
+    Returns:
+    ========
+        tuple - fig,ax
+    """
+    n_im = len(images)
+    layout = (1, n_im) if row_col.lower() == 'row' else (n_im, 1)
+    if vmin_max_key is None:
+        im_kwargs = {}
+    else:
+        vmin, vmax = (np.quantile(images[vmin_max_key].flatten(), low),
+                      np.quantile(images[vmin_max_key].flatten(), high))
+        im_kwargs = {'vmin': vmin, 'vmax': vmax}
+
+    fig, ax = plt.subplots(*layout, **fig_kwargs)
+    for i, (label, image) in enumerate(images.items()):
+        ax[i].imshow(image, **im_kwargs, cmap=cmap)
+        ax[i].set_title(label)
+    fig.tight_layout()
+    return fig, ax
+
+
 def image_array(image_array: np.array,
                 sharex: bool = True,
                 sharey: bool = True,
