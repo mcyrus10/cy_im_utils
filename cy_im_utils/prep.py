@@ -9,9 +9,9 @@ from PIL import Image
 from astropy.io import fits
 from cupyx.scipy import ndimage as gpu_ndimage
 from cupyx.scipy.ndimage import median_filter as median_filter_gpu
-from numba import njit,cuda,prange
+from numba import njit, cuda, prange
 from pathlib import Path
-from scipy.ndimage import median_filter,gaussian_filter
+from scipy.ndimage import median_filter, gaussian_filter
 from tqdm import tqdm
 import cupy as cp
 import numpy as np
@@ -20,9 +20,62 @@ import logging
 from .gpu_utils import GPU_curry
 
 
+def imread_fit(file_name,
+               axis=0,
+               device='gpu',
+               dtype=np.float32,
+               ) -> np.array:
+    """
+    This function reads in a 'fit' file (which has an odd number of frames
+    stacked in a 3d array), and it takes the median along the 0 axis to return
+    a single 2D array
+
+
+    Parameters:
+    -----------
+    file_name: string
+        name of the file to open
+
+    axis: int
+        axis along which to take the median for the combination
+
+    device: string
+        'cpu': compute the median on the CPU
+        'gpu': compute the median on the GPU (FASTER)
+
+    dtype: list
+        list with first element as cpu dtype, second elemement is gpu dtype
+
+    returns:
+    --------
+        2D numpy array of median along specified axis (should be 0)
+    """
+    with fits.open(file_name) as im:
+        im = np.array(im[0].data, dtype=dtype)
+
+    if im.ndim == 3:
+        if device == 'gpu':
+            im = cp.array(im, dtype=dtype)
+            return cp.asnumpy(cp.median(im, axis=axis))
+        else:
+            return np.median(im, axis=axis)
+    elif im.ndim == 2:
+        return im
+    else:
+        assert False, "Unknown Shape of image (should be 2D or 3D"
+
+
+def imread(im: Path, dtype=np.float32) -> np.array:
+    """ super basic wrapper for reading image to np.array
+    """
+    with Image.open(im) as im_:
+        return np.array(im_, dtype=dtype)
+
+
 def imstack_read(files: list,
                  dtype=np.float32,
-                 tqdm_read=True
+                 tqdm_read=True,
+                 imread_fun=imread
                  ) -> np.array:
     """
     Boilerplate image stack reader: takes a list of file names and writes the
@@ -39,14 +92,14 @@ def imstack_read(files: list,
     im_stack : 3D np.array of imagems
     """
     n_images = len(files)
-    h, w = np.asarray(Image.open(files[0]), dtype=dtype).shape
+    h, w = imread_fun(files[0]).shape
     im_stack = np.zeros([n_images, h, w], dtype=dtype)
     if tqdm_read:
         iterator = tqdm(enumerate(files), desc='Reading image files')
     else:
         iterator = enumerate(files)
     for i, f in iterator:
-        im = np.asarray(Image.open(f), dtype=dtype)
+        im = imread_fun(f, dtype=dtype)
         im_stack[i] = im
     return im_stack
 
@@ -126,58 +179,6 @@ def field_gpu(files, median_spatial: int = 3, dtype=np.float32):
 
     logging.debug(f"z_median shape = {z_median.shape}")
     return median_filter_gpu(z_median, size=median_spatial).get()
-
-
-def imread_fit(file_name,
-               axis=0,
-               device='gpu',
-               dtype=[np.float32, cp.float32],
-               ) -> np.array:
-    """
-    This function reads in a 'fit' file (which has an odd number of frames
-    stacked in a 3d array), and it takes the median along the 0 axis to return
-    a single 2D array
-
-
-    Parameters:
-    -----------
-    file_name: string
-        name of the file to open
-
-    axis: int
-        axis along which to take the median for the combination
-
-    device: string
-        'cpu': compute the median on the CPU
-        'gpu': compute the median on the GPU (FASTER)
-
-    dtype: list
-        list with first element as cpu dtype, second elemement is gpu dtype
-
-    returns: 
-    --------
-        2D numpy array of median along specified axis (should be 0)
-    """
-    with fits.open(file_name) as im:
-        im = np.array(im[0].data, dtype = dtype[0])
-
-    if im.ndim == 3:
-        if device == 'gpu':
-            im = cp.array(im, dtype = dtype[1])
-            return cp.asnumpy(cp.median(im, axis = axis))
-        else:
-            return np.median(im, axis = axis)
-    elif im.ndim == 2:
-        return im
-    else:
-        assert False,"Unknown Shape of image (should be 2D or 3D"
-
-
-def imread(im: Path, dtype=np.float32) -> np.array:
-    """ super basic wrapper for reading image to np.array
-    """
-    with Image.open(im) as im_:
-        return np.array(im_, dtype=dtype)
 
 
 def get_y_vec(img: np.array, axis=0) -> np.array:
