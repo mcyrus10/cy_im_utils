@@ -14,7 +14,7 @@ import logging
 import matplotlib.pyplot as plt
 import napari
 import numpy as np
-from post import write_volume
+from .post import write_volume
 
 
 class interp_methods(Enum):
@@ -123,7 +123,7 @@ class gpu_unwrap:
                 logging.warning(f"arc length not converged in {j} iterations")
         return angle_new
 
-    def prep_splines(self, volume):
+    def prep_splines(self, volume) -> tuple:
         """
         ...
         """
@@ -206,7 +206,8 @@ class gpu_unwrap:
 
     def fetch_interpolator(self, image_stack, index_start, index_end):
         """
-
+        This returns the RegularGridInterpolator which allows you to
+        interpolate the volume
         """
         _, nx, ny = image_stack.shape
         nz = index_end - index_start
@@ -224,7 +225,7 @@ class gpu_unwrap:
                            volume: np.array,
                            coords_vectorized: np.array,
                            batch_size: int = 10,
-                           interp_method: str = 'linear'):
+                           interp_method: str = 'linear') -> np.array:
         """
         this slices the batches and interpolates the volume on the GPU
         """
@@ -278,10 +279,21 @@ class napari_unwrapper:
                                                add_vertical_stretch=False,
                                                area='right')
 
-    def _spline_fetch_(self):
+    def _spline_fetch_(self) -> list:
+        """
+
+        This function isolates which image frame is in the viewer, and uses it
+        to call fetch_spline
+
+        Note: A 'path' group should be highlighted in the napari viewer not points
+
+        """
         assert isinstance(self.viewer.layers[0],
                           napari.layers.image.image.Image), \
             "Layer 0 is not an image layer"
+        assert not isinstance(self.viewer.layers[-1],
+                          napari.layers.points.points.Points), \
+            "Use 'path' (shapes) not 'points' for spline points"
         points = self.viewer.layers[-1].data[0]
         # 3D image or image stack, whatever
         if points.shape[-1] == 3:
@@ -531,7 +543,7 @@ def unwrap_layer(im: np.array,
     dy_norm = dx_new / norm_arr
     vector_multiplier = np.linspace(-sampling, sampling, sampling*2)
     # =====================================================================
-    print(dx_norm)
+    #print(dx_norm)
     dx = dx_norm[:, None] @ vector_multiplier[None, :]
     dy = dy_norm[:, None] @ vector_multiplier[None, :]
     x_coords = x_new[:, None] + dx
@@ -649,10 +661,10 @@ def resample_unroll(input_image: np.array,
                     ) -> np.array:
     """
     this function reshapes the unrolled image so that it can be more easily
-    viewed (i.e., the aspect ratio makes the image visible)
-    the re-sample length is how wide the rows of the image will be.
-    it does discard some pixels to make the image divisible if it is not
-    perfectly divisible by resample_length
+    viewed (i.e., the aspect ratio makes the image visible) the re-sample
+    length is how wide the rows of the image will be.  it does discard some
+    pixels to make the image divisible if it is not perfectly divisible by
+    resample_length
     """
     nx, ny = input_image.shape
     n_samples = nx // resample_length

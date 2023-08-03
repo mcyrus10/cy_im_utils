@@ -332,12 +332,12 @@ class tomo_dataset:
 
     def fetch_imread_function(self):
         extension = self.settings['pre_processing']['extension']
-        assert extension in ['tif', 'fit'], f'unknown extension: {extension}'
-        imread_functions = {
-                            'tif': self._imread_,
-                            'fit': imread_fit
-                            }
-        return imread_functions[extension]
+        if extension[-3:] == 'tif':
+            return self._imread_
+        elif extension[-3:] == 'fit':
+            return imread_fit
+        else:
+            assert False, f"extension unknown: ({extension})"
 
     def check_reconstruction_config(self) -> None:
         """ This is to make sure that geometries are compatible so the user does
@@ -583,7 +583,7 @@ class tomo_dataset:
         field_path = self.settings['paths'][f'{mode}_path']
 
         # This conditional is for the case of no field existing
-        if field_path is None:
+        if (field_path is None) or (str(field_path) == "None"):
             logging.info(f"{mode} field is None -> returning 2D array of zeros")
             proj_path = self.settings['paths'][f'projection_path']
             ext_projections = self.settings['pre_processing']['extension']
@@ -605,11 +605,11 @@ class tomo_dataset:
             files = sorted(list(field_path.glob(f"*{ext}*")))
             logging.info(f"\tnum files = {len(files)}")
             logging.info("\tshape files = "
-                              f"{np.array(self.imread(files[0])).shape}")
+                         f"{np.array(self.imread(files[0])).shape}")
             nx, ny = np.asarray(self.imread(files[0])).shape
             field = field_gpu(files, 3)
         field = self.median_operations_wrapper(
-                                cp.array(field, dtype = np.float32)).get()
+                                cp.array(field, dtype=np.float32)).get()
         setattr(self, mode, field)
 
     def median_operations_wrapper(self, image: cp.array) -> cp.array:
@@ -659,6 +659,7 @@ class tomo_dataset:
         self.update_config()
 
         proj_path = self.settings['paths']['projection_path']
+        assert proj_path.is_dir(), "Projection images path does not exist"
         ext = self.settings['pre_processing']['extension']
         all_files = sorted(list(
                                 proj_path.glob(f"*{ext}*")

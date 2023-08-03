@@ -20,6 +20,7 @@ import logging
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 
 
 def constrain_contrast(im, quantile_low=0.01, quantile_high=0.99):
@@ -249,8 +250,37 @@ def colors(x) -> str:
     return matplotlib.colors.to_hex(f"#{col[x%len(col)]}")
 
 
+def plot_arrows(num_arrows: int, ax, alpha: float = 1, highlight=None) -> None:
+    """
+    this plots a circular array of arrows for visualizing projection angles
+    """
+    theta_spread = 360   # degrees
+    factor = 0.25
+    scale = 5
+    width = 0.005
+    angles = np.deg2rad(np.linspace(0,
+                        theta_spread,
+                        num_arrows,
+                        endpoint=False))
+    x_1, y_1 = np.cos(angles), np.sin(angles)
+    x_0, y_0 = x_1*factor, y_1*factor
+    kwargs = {
+            'scale': scale,
+            'color': 'b',
+            'width': width,
+            'alpha': alpha
+             }
+    ax.quiver(x_0, y_0, -x_1, -y_1, **kwargs)
+    if highlight is not None:
+        kwargs['alpha'] = 1
+        ax.quiver(x_0[highlight], y_0[highlight],
+                  -x_1[highlight], -y_1[highlight],
+                  **kwargs)
+    ax.axis("equal")
+
+
 def image_array_1D(images: dict,
-                   fig_kwargs: dict = {},
+                   fig_kwargs: dict = {'sharex': True, 'sharey': True},
                    vmin_max_key=None,
                    low: float = 0.01,
                    high: float = 0.99,
@@ -288,6 +318,7 @@ def image_array_1D(images: dict,
         im_kwargs = {'vmin': vmin, 'vmax': vmax}
 
     fig, ax = plt.subplots(*layout, **fig_kwargs)
+    ax = [ax] if n_im == 1 else ax
     for i, (label, image) in enumerate(images.items()):
         ax[i].imshow(image, **im_kwargs, cmap=cmap)
         ax[i].set_title(label)
@@ -1539,3 +1570,32 @@ def bragg_interact(data_dict: dict,
 
     out = interactive_output(inner, control_dict)
     display(ui, out)
+
+
+def dose_reduction_artifact_figure(data_path: Path,
+                                   ds_factor: int,
+                                   colormap: str = 'viridis',
+                                   fig_kwargs: dict = {
+                                            'nrows': 2, 'ncols': 2,
+                                            'sharex': 'col', 'sharey': 'col'}
+                                   ) -> tuple:
+    """
+    I've made this figure a million times. Time to standardize
+    """
+    from PIL import Image
+    sinogram = np.array(Image.open(data_path), dtype=np.float32)
+    nx, ny = sinogram.shape
+    fig, ax = plt.subplots(**fig_kwargs)
+    theta = np.linspace(0, 2*np.pi, ny, endpoint=False)
+    for j, ds in enumerate([1, ds_factor]):
+        sino_local = sinogram[::ds]
+        reco_local = astra_2d_simple(sinogram[::ds], angles=theta[::ds])
+        if j == 0:
+            vmin, vmax = contrast(sino_local)
+            vmin_, vmax_ = contrast(reco_local)
+        ax[j, 0].imshow(sino_local, vmin=vmin, vmax=vmax)
+        ax[j, 1].imshow(reco_local, vmin=vmin_, vmax=vmax_)
+        for a in ax[j]:
+            a.axis(False)
+    fig.tight_layout()
+    return fig, ax
