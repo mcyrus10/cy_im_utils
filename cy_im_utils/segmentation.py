@@ -40,7 +40,8 @@ def apply_segmentation(neutron,
         mask = mask.reshape(nx, ny)
         segmented[mask] = j+1
     unlabeled = segmented == 0
-    med_filtered = median_filter(segmented.astype(np.float32), (med_kernel, med_kernel))
+    med_filtered = median_filter(segmented.astype(np.float32), (med_kernel,
+                                                                med_kernel))
     segmented[unlabeled] = med_filtered[unlabeled]
     return segmented
 
@@ -50,6 +51,7 @@ def process_frame(frame_no: int,
                   x_ray_files: list,      # provide partial
                   phases: dict,           # provide partial
                   pad: tuple,             # provide partial
+                  kernel: int = 1
                   ) -> None:
     """ This is meant to be called by multiprocessing.pool
     """
@@ -252,7 +254,6 @@ class bivariate_segmentation:
                                        cax=self.cbaxes)
         self.cbar.set_ticklabels(["unlabeld"]+list(self.phases.keys()))
 
-
     def integrate_phase(self, name) -> None:
         """ this is called by the interactive function
             - adds the selected (vertices) to the phase dictionary
@@ -374,6 +375,7 @@ class bivariate_segmentation:
             phases = self.phases
         segmentation = self.apply_segmentation(frame,
                                                phases,
+                                               median_image=1, 
                                                axis=axis)
         if ax is None:
             fig, ax = plt.subplots(1, 1, figsize=figsize)

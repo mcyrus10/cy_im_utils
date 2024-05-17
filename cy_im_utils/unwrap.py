@@ -14,7 +14,34 @@ import logging
 import matplotlib.pyplot as plt
 import napari
 import numpy as np
-from .post import write_volume
+
+
+def write_volume(volume: np.array,
+                 path: Path,
+                 prefix: str,
+                 extension: str = 'tif'
+                 ) -> None:
+    """
+    This function will write a reconstruction volume to disk as images, if the
+    directory (path) does not exist, it will create the new directory.
+
+    Parameters:
+    -----------
+    volume: Numpy 3D array
+        reconstructed volume
+    path: string
+        path to the new reconstruction directory
+    file_name: string
+        name of the output files
+    extension: string
+        extension of the output files
+    """
+    nz, nx, ny = volume.shape
+    tqdm_writer = tqdm(range(nz), desc="writing images")
+    for j in tqdm_writer:
+        im = Image.fromarray(volume[j, :, :])
+        im_path = path / f"{prefix}_{j:06d}.{extension}"
+        im.save(im_path)
 
 
 class interp_methods(Enum):
@@ -678,3 +705,4 @@ def resample_unroll(input_image: np.array,
 if __name__ == "__main__":
     inst = napari_unwrapper()
     napari.run()
+

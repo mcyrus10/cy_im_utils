@@ -8,7 +8,8 @@ import logging
 def GPU_curry(function,
               arr: np.array,
               axis: int = 0,
-              batch_size: int = 20
+              batch_size: int = 20,
+              dtype=cp.float32
               ) -> None:
     """
     This is a generic template for dispatching a function over a GPU array that
@@ -39,12 +40,14 @@ def GPU_curry(function,
     """
     assert len(arr.shape) == 3, "Must be 3D array"
     nx, ny, nz = arr.shape
-    def slice_x_(): return slice(0, nx, 1)
-    def slice_y_(): return slice(0, ny, 1)
-    def slice_z_(): return slice(0, nz, 1)
-    slice_x_rem = slice_x_()
-    slice_y_rem = slice_y_()
-    slice_z_rem = slice_z_()
+
+    def slice_x_(x): return slice(0, nx, 1)
+    def slice_y_(x): return slice(0, ny, 1)
+    def slice_z_(x): return slice(0, nz, 1)
+
+    slice_x_rem = slice_x_(None)
+    slice_y_rem = slice_y_(None)
+    slice_z_rem = slice_z_(None)
     def slice_batch(j): return slice(j*batch_size, (j+1)*batch_size, 1)
     if axis == 0:
         slice_x_ = slice_batch
@@ -63,12 +66,12 @@ def GPU_curry(function,
         iterator = range(nz//batch_size)
 
     for j in tqdm(iterator):
-        slice_x = slice_x_()
-        slice_y = slice_y_()
-        slice_z = slice_z_()
-        arr[slice_x,slice_y,slice_z] = cp.asnumpy(function(cp.array(arr[slice_x, slice_y, slice_z])))
+        slice_x = slice_x_(j)
+        slice_y = slice_y_(j)
+        slice_z = slice_z_(j)
+        arr[slice_x, slice_y, slice_z] = cp.asnumpy(function(cp.array(arr[slice_x, slice_y, slice_z], dtype = dtype)))
     if remainder > 0:
-        arr[slice_x_rem, slice_y_rem, slice_z_rem] = cp.asnumpy(function(cp.array(arr[slice_x_rem, slice_y_rem, slice_z_rem])))
+        arr[slice_x_rem, slice_y_rem, slice_z_rem] = cp.asnumpy(function(cp.array(arr[slice_x_rem, slice_y_rem, slice_z_rem], dtype = dtype)))
 
 
 def z_median(arr: np.array,

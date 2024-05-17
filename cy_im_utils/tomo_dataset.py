@@ -7,6 +7,9 @@ with button presses, and likewise the jupyter version can operate inside a
 notebook
 
 to do:
+    - hard coded translation (move left-right after tilt correction)
+    - "Flip transmission LR" should have a boolean effect like transpose where
+      all subsequent images are flipped...
     - update all documentation and function/method annotations
     - batch fdk cone
     - control filtration parameters for opposing image stack
@@ -26,6 +29,7 @@ except ModuleNotFoundError as me:
     print(me)
     from sys import path
     path.append("C:\\Users\\mcd4\\Documents\\cy_im_utils")
+    path.append("/home/mcd4/cy_im_utils")
 
 from cy_im_utils.prep import radial_zero, field_gpu, center_of_rotation, \
         imread_fit, rotated_crop
@@ -65,6 +69,9 @@ import numpy as np
 import os
 import shutil
 import yaml
+import platform
+
+__system_platform__ = platform.system()
 
 
 class tomo_dataset:
@@ -79,6 +86,7 @@ class tomo_dataset:
         logging.info("-"*80)
         self.previous_settings = {}
         self.config_filename = config_file
+        self.center_shift = 0
 
         with open(self.config_filename, 'r') as f:
             self.settings = yaml.safe_load(f)
@@ -90,7 +98,7 @@ class tomo_dataset:
         logging.info(f"{'='*20} SETTINGS: {'='*20}")
         for key, val in self.settings['pre_processing'].items():
             setattr(self, key, val)
-        #print("------>", self.settings)
+        # print("------>", self.settings)
         for key, val in self.settings.items():
             if isinstance(val, dict):
                 logging.info(f"{key}:")
@@ -494,10 +502,10 @@ class tomo_dataset:
                                , 1)
         theta_final = np.polyval(theta_fit, 0)
         rot_ = rotated_crop(
-                                combined_cupy,
-                                -theta_final,
-                                [y0, y1, x0, x1]
-                                ).get()
+                            combined_cupy,
+                            -theta_final,
+                            [y0, y1, x0, x1]
+                            ).get()
 
         cor_final = center_of_rotation(rot_, cor_y0, cor_y1, ax=ax[1])
 
@@ -531,6 +539,7 @@ class tomo_dataset:
                                 [y0, y1, x0, x1]
                                 ).get()
 
+        ax[2].cla()
         cor3 = center_of_rotation(crop2rot, cor_y0, cor_y1, ax=ax[2])
 
         self.settings['crop'] = {
@@ -739,7 +748,7 @@ class tomo_dataset:
     # -------------------------------------------------------------------------
     #                       PROCESSING
     # -------------------------------------------------------------------------
-    def remove_all_stripe_ops(self, id0: int, id1: int) -> None:
+    def _remove_all_stripe_ops_(self, id0: int, id1: int) -> None:
         """
         SAREPY_CUDA takes sinogram as the index 1 (of 0,1,2) right now!!
 
@@ -775,7 +784,7 @@ class tomo_dataset:
         """
         logging.info("REMOVING STRIPE ARTIFACTS")
         n_sino, _, _ = self.transmission.shape
-        self.gpu_curry_loop(self.remove_all_stripe_ops,
+        self.gpu_curry_loop(self._remove_all_stripe_ops_,
                             n_sino,
                             batch_size,
                             tqdm_string="Stripe Artifact Removal")
@@ -783,9 +792,9 @@ class tomo_dataset:
     def attenuation(self, ds_factor: int) -> np.array:
         """ wrapper to compute attenuation array as float32
         """
-        return -np.log(
-                       self.transmission[:, ::ds_factor, :],
-                       where=self.transmission[:, ::ds_factor, :] > 0
+        tm_handle = self.transmission[:, ::ds_factor, :]
+        return -np.log(tm_handle,
+                       where=tm_handle > 0
                        ).astype(np.float32)
 
     def reconstruct(self,
@@ -810,8 +819,14 @@ class tomo_dataset:
             pass
         logging.info("--- reconstructing ---")
         print("--- RECONSTRUCTING ---")
+        attn = self.attenuation(ds_interval)
+        center_shift = self.center_shift
+        if center_shift != 0:
+            attn = np.roll(attn, center_shift, axis=2)
+            logging.info(f"Reconstructing with center-shifted {center_shift}")
+
         self.reconstruction = self._reconstructor_.reconstruct_volume(
-                                self.attenuation(ds_interval),
+                                attn,
                                 self.angles[::ds_interval]
                                 )
 
@@ -826,7 +841,10 @@ class tomo_dataset:
         else:
             assert False, "No filename_delimiter in config"
         angle_position = int(self.settings['pre_processing']['angle_argument'])
-        f_name = str(file_name).split("\\")[-1]
+        f_name = {
+                'Windows': str(file_name).split("\\")[-1],
+                'Linux': str(file_name).split("/")[-1]
+                }[__system_platform__]
         angle_str = f_name.split(delimiter)[angle_position]
         angle_float = float(angle_str.replace("d", ".").replace("p", ''))
         return np.deg2rad(angle_float)
@@ -1071,70 +1089,68 @@ class jupyter_tomo_dataset(tomo_dataset):
         """
         """
         self._tpose_state = False
-        self.fetch_combined_image(d_theta = d_theta)
+        self.fetch_combined_image(d_theta=d_theta)
         # This is for calculating vmin and vmax for imshows
-        self.fig,self.ax = plt.subplots(1,2, figsize = figsize)
+        self.fig, self.ax = plt.subplots(1, 2, figsize=figsize)
         self.ax[1].axis(False)
         plt.show()
 
-        #---------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # NOTE TO SELF:
-        #   These assignements look backward (x0, 0 -> y_max, etc.) but they are
-        #   fixing the problem of plt.imshow transposing the image
-        #---------------------------------------------------------------------------
-        kwargs = {'continuous_update':False,'min':0}
-        y_max,x_max = self.combined_image.shape
-        max_crop = max([y_max,x_max])
-        crop_x0 = IntSlider(description = "crop x$_0$", max=max_crop, **kwargs)
-        crop_dx = IntSlider(description = "crop $\Delta$x", max=max_crop, **kwargs)
-        crop_y0 = IntSlider(description = "crop y$_0$", max=max_crop, **kwargs)
-        crop_dy = IntSlider(description = "crop $\Delta$y", max=max_crop, **kwargs)
-        norm_x0 = IntSlider(description = "norm x$_0$", max=max_crop, **kwargs)
-        norm_dx = IntSlider(description = "norm $\Delta$x", max=max_crop, **kwargs)
-        norm_y0 = IntSlider(description = "norm y$_0$", max=max_crop, **kwargs)
-        norm_dy = IntSlider(description = "norm $\Delta$y", max=max_crop, **kwargs)
+        #   These assignements look backward (x0, 0 -> y_max, etc.) but they
+        #   are fixing the problem of plt.imshow transposing the image
+        # ---------------------------------------------------------------------
+        kwargs = {'continuous_update': False, 'min': 0}
+        y_max, x_max = self.combined_image.shape
+        max_crop = max([y_max, x_max])
+        crop_x0 = IntSlider(description="crop x$_0$", max=max_crop, **kwargs)
+        crop_dx = IntSlider(description="crop $\Delta$x", max=max_crop, **kwargs)
+        crop_y0 = IntSlider(description="crop y$_0$", max=max_crop, **kwargs)
+        crop_dy = IntSlider(description="crop $\Delta$y", max=max_crop, **kwargs)
+        norm_x0 = IntSlider(description="norm x$_0$", max=max_crop, **kwargs)
+        norm_dx = IntSlider(description="norm $\Delta$x", max=max_crop, **kwargs)
+        norm_y0 = IntSlider(description="norm y$_0$", max=max_crop, **kwargs)
+        norm_dy = IntSlider(description="norm $\Delta$y", max=max_crop, **kwargs)
 
-
-        cor_y0  = IntSlider(description = "COR y$_0$",  max=max_crop, **kwargs)
-        cor_y1  = IntSlider(description = "COR y$_1$",  max=max_crop, **kwargs)
-
+        cor_y0 = IntSlider(description="COR y$_0$",  max=max_crop, **kwargs)
+        cor_y1 = IntSlider(description="COR y$_1$",  max=max_crop, **kwargs)
 
         transpose_init = "False" if 'transpose' not in self.settings['pre_processing'] \
                         else str(self.settings['pre_processing']['transpose'])
         print(f"transpose init = {transpose_init}")
-        tpose = RadioButtons(options = ['False','True'],
-                            value = transpose_init,
-                            description = "Transpose")
+        tpose = RadioButtons(options=['False', 'True'],
+                             value=transpose_init,
+                             description="Transpose")
 
         row0 = HBox([tpose])
-        row1 = HBox([crop_x0,crop_dx,crop_y0,crop_dy])
-        row2 = HBox([norm_x0,norm_dx,norm_y0,norm_dy])
-        ui = VBox([row0,row1,row2])
+        row1 = HBox([crop_x0, crop_dx, crop_y0, crop_dy])
+        row2 = HBox([norm_x0, norm_dx, norm_y0, norm_dy])
+        ui = VBox([row0, row1, row2])
 
         control_dict = {
-                    'crop_y0':crop_y0,
-                    'crop_dy':crop_dy,
-                    'crop_x0':crop_x0,
-                    'crop_dx':crop_dx,
-                    'norm_x0':norm_x0,
-                    'norm_dx':norm_dx,
-                    'norm_y0':norm_y0,
-                    'norm_dy':norm_dy,
-                    'tpose':tpose
+                    'crop_y0': crop_y0,
+                    'crop_dy': crop_dy,
+                    'crop_x0': crop_x0,
+                    'crop_dx': crop_dx,
+                    'norm_x0': norm_x0,
+                    'norm_dx': norm_dx,
+                    'norm_y0': norm_y0,
+                    'norm_dy': norm_dy,
+                    'tpose': tpose
                         }
 
-        crop_norm_partial = partial(self._update_crop_norm_, d_theta = d_theta)
+        crop_norm_partial = partial(self._update_crop_norm_, d_theta=d_theta)
         out = interactive_output(crop_norm_partial, control_dict)
-        display(ui,out)
+        display(ui, out)
 
         interact_2 = interactive.factory()
-        manual_2 = interact_2.options(manual = True,
-                                    manual_name = 'Refresh COR Calc'
-                                    )
-        out_2 = manual_2(   self._cor_calculate_wrapper_,
-                            cor_y0 = cor_y0,
-                            cor_y1 = cor_y1,
-                            name = "Refresh COR")
+        manual_2 = interact_2.options(manual=True,
+                                      manual_name='Refresh COR Calc'
+                                      )
+        out_2 = manual_2(self._cor_calculate_wrapper_,
+                         cor_y0=cor_y0,
+                         cor_y1=cor_y1,
+                         name="Refresh COR")
 
 
 class recon_algorithms(Enum):
@@ -1185,7 +1201,7 @@ class napari_tomo_gui(tomo_dataset):
     This class inherits from tomo_dataset and instantiates a napari instance
     that can modify and reconstruct a dataset
     """
-    def __init__(self) -> None:
+    def __init__(self, mode: str = 'User') -> None:
         log_setup("napari_tomo_gui_logging.log")
         self.sare_bool = False
         self.viewer = napari.Viewer()
@@ -1198,10 +1214,11 @@ class napari_tomo_gui(tomo_dataset):
         self.config_handles = []
         for key, val in config_select_widget.items():
             self.config_handles.append(
-                                       self.viewer.window.add_dock_widget(val,
-                                                   name=key,
-                                                   add_vertical_stretch=True,
-                                                   area='right')
+                                       self.viewer.window.add_dock_widget(
+                                           val,
+                                           name=key,
+                                           add_vertical_stretch=True,
+                                           area='right')
                                       )
 
     def init_operations(self, config_file) -> None:
@@ -1237,11 +1254,10 @@ class napari_tomo_gui(tomo_dataset):
                                 ],
             'Reconstruction': [
                                 self.select_reconstruction_parameters(),
-                                self.preview_reconstruction(),
-                                self.reconstruct_interact(),
-                                self.show_reconstruction(),
                                 self.sare_widget(),
                                 self.sare_apply(),
+                                self.reconstruct_interact(),
+                                self.show_reconstruction(),
                                 ],
             'Post Processing': [
                                 self.post_median_params_widget(),
@@ -1769,27 +1785,6 @@ class napari_tomo_gui(tomo_dataset):
 
         return inner
 
-    def preview_reconstruction(self):
-        @magicgui(call_button="Preview 2D Reconstruction",
-                  sinogram_index={'label': 'Sinogram Index (row)',
-                                  'value': 1,
-                                  'min': 0,
-                                  'max': 1e9}
-                  )
-        def inner(sinogram_index: int):
-            sinogram = self.transmission[sinogram_index]
-            attn = -np.log(sinogram, where=sinogram > 0)
-            reconstruction = self._reconstructor_.astra_reconstruct_2D(attn,
-                                                                       self.angles)
-            self.mute_all()
-            name = 'recon preview'
-            if name in self.viewer.layers:
-                self.viewer.layers.remove(name)
-            self.viewer.add_image(reconstruction,
-                                  name=name,
-                                  colormap='viridis')
-        return inner
-
     def reconstruct_interact(self):
         @magicgui(call_button="Reconstruct",
                   radial_zero={'label': "Cylindrical mask",
@@ -1844,9 +1839,10 @@ class napari_tomo_gui(tomo_dataset):
     def sare_widget(self):
         snr_init = self.search_settings('snr', 1.0)
         la_size_init = self.search_settings('la_size', 1)
-        sm_size_init = self.search_settings('sa_size', 1)
+        sm_size_init = self.search_settings('sm_size', 1)
+        center_shift_init = self.search_settings('center_shift', 0)
 
-        @magicgui(call_button='Preview Ring Filter',
+        @magicgui(call_button='Preview Ring Filtered Reconstruction',
                   row={'label': 'Sinogram Index (row)',
                        'value': 0,
                        'min': 0,
@@ -1854,13 +1850,23 @@ class napari_tomo_gui(tomo_dataset):
                   snr={'value': snr_init},
                   la_size={'value': la_size_init, 'step': 2, 'min': 1},
                   sm_size={'value': sm_size_init, 'step': 2, 'min': 1},
+                  center_shift={"widget_type": "IntSlider",
+                                "max": 30,
+                                "min": -30,
+                                "value": center_shift_init,
+                                "step": 1,
+                                "label": "center shift"}
                   )
         def inner(row: int,
                   snr: float,
                   la_size: int,
                   sm_size: int,
+                  center_shift: int,
                   ):
             sinogram_local = self.transmission[row, :, :].copy()
+            if center_shift != 0:
+                sinogram_local = np.roll(sinogram_local, center_shift, axis = 1)
+                self.center_shift = center_shift
 
             filtered = remove_all_stripe_GPU(
                     cp.array(sinogram_local[:, None, :], dtype=cp.float32),
@@ -1905,8 +1911,8 @@ class napari_tomo_gui(tomo_dataset):
                                   name=recon_layer_name,
                                   colormap='viridis')
 
-            keys = ['snr', 'la_size', 'sm_size']
-            vals = [snr, la_size, sm_size]
+            keys = ['snr', 'la_size', 'sm_size', 'center_shift']
+            vals = [snr, la_size, sm_size, center_shift]
             self.settings['SARE'] = {key: val for key, val in zip(keys, vals)}
         return inner
 
@@ -1986,6 +1992,7 @@ class napari_tomo_gui(tomo_dataset):
         @magicgui(call_button='Flip Transmission LR')
         def inner():
             self.transmission = self.transmission[:, :, ::-1]
+            logging.info("Flipped transmission LR")
         return inner
 
 

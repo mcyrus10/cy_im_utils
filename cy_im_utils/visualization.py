@@ -226,7 +226,7 @@ def stack_diff_image(im_1: np.array, im_2: np.array) -> np.array:
         im_temp: np.array 3d (3 channel image) 8 bit
 
     """
-    im_temp = np.dstack([im_1, im_2, im_2])
+    im_temp = np.dstack([im_1, np.zeros_like(im_1), im_2])
     im_temp -= np.min(im_temp)
     max_ = max([im_1.max(), im_2.max()])
     im_temp = (im_temp * 255) / max_

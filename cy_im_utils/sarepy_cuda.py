@@ -162,7 +162,7 @@ def remove_stripe_based_sorting_GPU(sinogram,
 def remove_large_stripe_GPU(sinogram: cp.array,
                             snr: float,
                             size: int,
-                            drop_ratio: cp.array = cp.array(0.1),
+                            drop_ratio: float = 0.1,
                             norm: bool = True,
                             threads_per_block: tuple = (8, 8, 8)
                             ) -> cp.array:
@@ -193,6 +193,7 @@ def remove_large_stripe_GPU(sinogram: cp.array,
 
     """
     sinogram = cp.copy(sinogram).astype(cp.float32)
+    drop_ratio = cp.array(drop_ratio)
     drop_ratio = cp.clip(drop_ratio, 0.0, 0.8)
     sino_sort = cp.sort(sinogram, axis=0)
     n_row, n_sino, n_col = sinogram.shape
@@ -387,7 +388,7 @@ def remove_all_stripe_GPU(sinogram: cp.array,
                           snr: float,
                           la_size: int,
                           sm_size: int,
-                          drop_ratio=cp.array(0.1),
+                          drop_ratio: float = 0.1,
                           norm: bool = True,
                           dim: int = 1):
     sinogram = remove_unresponsive_and_fluctuating_stripe_GPU(sinogram,

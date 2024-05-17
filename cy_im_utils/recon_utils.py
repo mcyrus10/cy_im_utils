@@ -451,10 +451,11 @@ def ASTRA_General(attn: np.array,
     return reconstruction
 
 
-def ASTRA_forward_project_2D(recon_image: np.array,
+def ASTRA_forward_project_2D(recon_image,
                              angles=None,
                              geom='parallel',
-                             ) -> np.array:
+                             suppress_warning=False
+                             ):
     """
     Args:
     -----
@@ -469,6 +470,8 @@ def ASTRA_forward_project_2D(recon_image: np.array,
     --------
         sinogram image
     """
+    if not suppress_warning:
+        print("Warning: Use ASTRA_forward_project_3D if you are iterating over rows")
     detector_width = recon_image.shape[0]
     vol_geom = astra.create_vol_geom(detector_width, detector_width)
     proj_geom = astra.create_proj_geom(geom, 1.0, detector_width, angles)
@@ -476,6 +479,36 @@ def ASTRA_forward_project_2D(recon_image: np.array,
     _, sinogram = astra.create_sino(recon_image, proj_id)
     astra.projector.delete(proj_id)
     return sinogram
+
+
+def ASTRA_forward_project_3D(input_volume,
+                             angles=None,
+                             ):
+    """
+    Args:
+    -----
+        input_volume: np.array (3D)
+            ground truth volume 
+        angles: np.array (optional)
+            angles of the projections
+
+    Returns:
+    --------
+        projection image stack
+    """
+    detector_rows, detector_width, detector_width_2 = input_volume.shape
+    assert detector_width == detector_width_2, "non-square detector_width"
+    vol_geom = astra.creators.create_vol_geom(detector_width,
+                                              detector_width,
+                                              detector_rows)
+    phantom_id = astra.data3d.create('-vol', vol_geom, data=input_volume)
+    proj_geom = astra.create_proj_geom('parallel3d', 1, 1, detector_rows,
+                                       detector_width, angles)
+    _, projections = astra.creators.create_sino3d_gpu(phantom_id,
+                                                      proj_geom,
+                                                      vol_geom)
+    astra.data3d.delete([phantom_id])
+    return projections
 
 
 def astra_back_project_local_function(sinogram: np.array,

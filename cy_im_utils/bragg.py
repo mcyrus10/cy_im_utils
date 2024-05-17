@@ -445,8 +445,8 @@ class erf_gauss_fit:
                   impose_xlim: bool = False,
                   thresh: float = 10):
         """
-        After much tomfoolery this is the probing figure that allows you to click
-        on a pixel and view the Bragg spectrum of that voxel
+        After much tomfoolery this is the probing figure that allows you to
+        click on a pixel and view the Bragg spectrum of that voxel
 
         It is bespoke but could be used as a template for some other data
         visualization for 4D Arrays
@@ -465,15 +465,15 @@ class erf_gauss_fit:
 
         arr_dict = {
                 'Reconstruction image': self.test_frame[0],
-                '$\chi ^2$': chi_squares_erf,
+                #'$\chi ^2$': chi_squares_erf,
                 'Uncert (center erf)': cent_erf_uncert,
-                'Uncert (center gauss)': cent_gauss_uncert,
+                #'Uncert (center gauss)': cent_gauss_uncert,
                 # '$\sigma$ (erf)': self.output_erf[0][:, 3].reshape(nx, ny),
-                'Diff (composite-erf)': composite-center_erf,
+                #'Diff (composite-erf)': composite-center_erf,
                 'Center (of erf)': center_erf,
                 'Center (of gaussian)': center_gauss,
                 # 'Center (combined (hard thresh))': combined,
-                'Center (composite)': composite,
+                #'Center (composite)': composite,
                    }
 
         mask_ = self.test_frame[0] > 0.1
@@ -502,8 +502,9 @@ class erf_gauss_fit:
         # Spectrum and Derivative plot array
         ax_spec = [fig.add_subplot(2, 3, 4)]
         ax_spec.append(fig.add_subplot(2, 3, 5))
-        ax_spec.append(ax_spec[0].twinx())
+        ax_spec.append(ax_spec[1].twinx())
         ax_spec.append(fig.add_subplot(2, 3, 6))
+
 
         # These are for history so they can be removed...
         vlines = np.zeros(len(arr_dict), dtype=object)
@@ -540,7 +541,8 @@ class erf_gauss_fit:
 
             [a_.cla() for a_ in ax_spec]
 
-            # Erf Fits
+
+            # Erf fits
             for q, a_ in enumerate(ax_spec[:2]):
                 a_.scatter(x_erf, self.data[lindex], marker='o',
                            color=colors(1), facecolor='k')
@@ -552,8 +554,8 @@ class erf_gauss_fit:
 
                 a_.axvline(cent_erf, color='r', linewidth=0.5)
                 a_.plot(cent_erf, y_erf, 'wd', markerfacecolor='r')
-                if q == 1:
-                    a_.set_title(f"xy:{x_,y_}; Center = {cent_erf:.3f}")
+                if q == 0:
+                    a_.set_title(f"erf$_{{model}}$\nxy:{x_,y_}; Center = {cent_erf:.3f}")
 
             # Gaussian Fits
             for q, a_ in enumerate(ax_spec[2:]):
@@ -567,8 +569,10 @@ class erf_gauss_fit:
                 a_.axvline(cent_gauss, color='b', linewidth=0.5)
                 a_.plot(cent_gauss, y_gauss, 'wd', markerfacecolor='b')
                 if q == 1:
-                    a_.set_title(f"xy:{x_,y_}; Center = {cent_gauss:.3f}")
+                    a_.set_title(f"gauss$_{{model}}$\nxy:{x_,y_}; Center = {cent_gauss:.3f}")
 
+
+            ax_spec[3].yaxis.tick_right()
             for a_ in ax_spec:
                 a_.set_xlabel("$\lambda$ ($\AA$)")
                 d_lambda = self.lambda_local[1] - self.lambda_local[0]
@@ -580,6 +584,130 @@ class erf_gauss_fit:
         fig.canvas.mpl_connect('button_press_event', onclick)
 
         return fig, ax
+
+    def probe_fig_manuscript(self, figsize, cmap='Spectral',
+                  subplots_adjust_kwargs={},
+                  impose_xlim: bool = False,
+                  thresh: float = 10):
+        """
+        After much tomfoolery this is the probing figure that allows you to
+        click on a pixel and view the Bragg spectrum of that voxel
+
+        It is bespoke but could be used as a template for some other data
+        visualization for 4D Arrays
+
+        """
+        fontsize = 14
+        n_lambda, nx, ny = self.shape
+        center_erf = self.output_erf[0][:, 2].reshape(nx, ny)
+        chi_squares_erf = self.output_erf[2].reshape(nx, ny)
+        cent_erf_uncert = self.erf_uncert[2].reshape(nx, ny)
+        center_gauss = self.output_gaussian[0][:, 1].reshape(nx, ny)
+        cent_gauss_uncert = self.gaussian_uncert[1].reshape(nx, ny)
+        # combined = center_erf.copy()
+        # combined[mask] = center_gauss[mask]
+        composite = self.compute_composite(thresh).reshape(nx, ny).get()
+
+        arr_dict = {
+                'Reconstruction image': self.test_frame[0],
+                #'$\chi ^2$': chi_squares_erf,
+                #'Uncert (center erf)': cent_erf_uncert,
+                #'Uncert (center gauss)': cent_gauss_uncert,
+                # '$\sigma$ (erf)': self.output_erf[0][:, 3].reshape(nx, ny),
+                #'Diff (composite-erf)': composite-center_erf,
+                'Center (of erf)': center_erf,
+                #'Center (of gaussian)': center_gauss,
+                # 'Center (combined (hard thresh))': combined,
+                #'Center (composite)': composite,
+                   }
+
+        mask_ = self.test_frame[0] > 0.1
+        # Image Array
+        center_counter = 0
+        fig, ax = plt.subplots(2, len(arr_dict), figsize=figsize,
+                               sharex=True, sharey=True)
+        for i, (key, arr_) in enumerate(arr_dict.items()):
+            arr = arr_.copy()
+            arr *= mask_
+            nan_mask = ~np.isfinite(arr)
+            arr[nan_mask] = 0
+            ax[0, i].set_title(key, fontsize=fontsize)
+            ax[0, i].axis(False)
+            ax[1, i].axis(False)
+            if center_counter == 0:
+                try:
+                    vmin, vmax = contrast(arr[arr != 0])
+                except:
+                    print("failed to make contrast")
+            if "Center" in key:
+                center_counter += 1
+
+            ax[0, i].imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax)
+
+        # Spectrum and Derivative plot array
+        ax_spec = fig.add_subplot(2, 1, 2)
+        #ax_spec.append(fig.add_subplot(2, 3, 5))
+        #ax_spec.append(ax_spec[1].twinx())
+        #ax_spec.append(fig.add_subplot(2, 3, 6))
+
+
+        # These are for history so they can be removed...
+        vlines = np.zeros(len(arr_dict), dtype=object)
+        hlines = np.zeros(len(arr_dict), dtype=object)
+
+        def onclick(event):
+            """
+            This defines what happens when a subplot is clicked on...
+                - plotting the spectrum and difference of the clicked voxel
+            """
+            index = np.round([event.xdata, event.ydata]).astype(int)
+            x_, y_ = index
+            lindex = lindex_calc(index, ny)
+            x_gauss = self.lambda_gauss
+            x_erf = self.lambda_local
+            fit_gauss = gaussian_1d(np.array(self.output_gaussian[0][lindex]),
+                                    x_gauss)
+            fit_erf = error_function(np.array(self.output_erf[0][lindex]),
+                                     x_erf)
+            cent_erf = center_erf[index[1], index[0]]
+            y_erf = error_function(self.output_erf[0][lindex],
+                                   np.array([cent_erf]))
+            cent_gauss = center_gauss[index[1], index[0]]
+            y_gauss = gaussian_1d(self.output_gaussian[0][lindex], cent_gauss)
+            
+            for z, a_ in enumerate(ax[0]):
+                try:
+                    vlines[z].remove()
+                    hlines[z].remove()
+                except:
+                    pass
+                vlines[z] = a_.axvline(index[0], color='k', linewidth=0.5)
+                hlines[z] = a_.axhline(index[1], color='k', linewidth=0.5)
+
+            ax_spec.cla()
+            ax_spec.set_xlabel("$\lambda$ (nm)")
+            ax_spec.set_ylabel("Attenuation (mm$^{-1}$)")
+
+            # Erf fits
+            for q, a_ in enumerate([ax_spec]):
+                a_.scatter(x_erf/10, self.data[lindex], marker='o',
+                           color=colors(1), facecolor='k')
+                a_.plot(x_erf/10, fit_erf, marker='.', color=colors(1))
+                a_.errorbar(cent_erf/10, y_erf,
+                            xerr=cent_erf_uncert[index[1], index[0]]/10,
+                            capsize=10,
+                            color='r')
+
+                a_.axvline(cent_erf/10, color='r', linewidth=0.5)
+                a_.plot(cent_erf/10, y_erf, 'wd', markerfacecolor='r')
+                if q == 0:
+                    a_.set_title(f"erf$_{{model}}$\nxy:{x_,y_}; Center = {cent_erf/10:.3f} nm")
+
+        fig.subplots_adjust(**subplots_adjust_kwargs)
+        fig.canvas.mpl_connect('button_press_event', onclick)
+
+        return fig, ax
+
 
     def erf_gauss_fit_wrapper(self,
                               sigma: float,
@@ -759,8 +887,8 @@ def erf_param_uncertainty(ix, ip, iweights, ichi_squares):
     jacobian = cp.ones([nx[0], num_p[0], nchunk], dtype=cp.float32)
     argx = (ix[:, None] - p[2, :]) / (np.sqrt(2.0) * p[3, :])
     jacobian[:, 1, :] = 0.5 * (1 + gpu_erf(argx))
-    jacobian[:,  2, :] = -0.5 * p[1, :] * cp.exp(-argx * argx) / (np.sqrt(2.0)*p[3, :])
-    jacobian[:,  3, :] = jacobian[:, 2, :] * (ix[:, None]-p[2, :]) / p[3, :]
+    jacobian[:, 2, :] = -0.5 * p[1, :] * cp.exp(-argx * argx) / (np.sqrt(2.0)*p[3, :])
+    jacobian[:, 3, :] = jacobian[:, 2, :] * (ix[:, None]-p[2, :]) / p[3, :]
 
     covariance = cp.transpose(jacobian,  (1, 0, 2)).copy()
 
@@ -777,7 +905,8 @@ def erf_param_uncertainty(ix, ip, iweights, ichi_squares):
     # diagonal for each n
     uncert = cp.abs(cp.einsum('iij->ij', covariance))
 
-    ndof = 1/(nx[0]-num_p[0])  # gpufit returns chi^2, reduce it by # of degrees of freedom
+    # gpufit returns chi^2, reduce it by # of degrees of freedom
+    ndof = 1 / (nx[0] - num_p[0])  
     chi_squares_ = cp.sqrt(cp.array(ichi_squares, dtype=cp.float32)[idx]*ndof)
 
     parameter_uncert = chi_squares_[None, :]*cp.sqrt(uncert)

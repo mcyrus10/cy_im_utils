@@ -15,6 +15,7 @@ dependencies:
   - ipywidgets              # interactive plots in jupyter
   - jupyterlab
   - matplotlib
+  - mpi4py
   - napari                  # n-dimensional data viewer
   - notebook
   - numba                   # python function compiler
@@ -26,3 +27,4 @@ dependencies:
   - tqdm                    # progress bars
   - pip:
       - jupyterlab_vim      # this optional
+      - stl-to-voxel        # voxelizing meshes...
