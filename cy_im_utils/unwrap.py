@@ -9,6 +9,9 @@ from multiprocessing import Pool
 from napari.qt.threading import thread_worker
 from pathlib import Path
 from scipy.interpolate import make_interp_spline, RegularGridInterpolator
+from scipy.optimize import least_squares
+from scipy.signal import find_peaks
+from skimage.transform import warp_polar
 import cupy as cp
 import logging
 import matplotlib.pyplot as plt
@@ -44,6 +47,13 @@ def write_volume(volume: np.array,
         im.save(im_path)
 
 
+def imread(file) -> np.array:
+    """
+    the hits
+    """
+    return np.asarray(Image.open(file), dtype=np.float32)
+
+
 class interp_methods(Enum):
     nearest = 'nearest'
     linear = 'linear'
@@ -72,7 +82,8 @@ class gpu_unwrap:
                  volume,                    # array-like
                  batch_size: int = 10,
                  sampling: int = 1,
-                 interp_method: str = 'linear') -> None:
+                 interp_method: str = 'linear',
+                 ) -> None:
         self.points = points_dict
         keys = sorted(list(points_dict.keys()))
         self.index_0, self.index_1 = keys[0], keys[1]
@@ -168,6 +179,8 @@ class gpu_unwrap:
                                      xy.get(),
                                      bc_type=boundary_condition)
             # =================================================================
+            # This should allow you to hard-code the arc length sampling so
+            # each row should have the same length?
             if i == 0:
                 angle_new = self.compute_arc_length(spl, theta)
 
@@ -292,6 +305,11 @@ class napari_unwrapper:
         self.splines = {}
         dock_widgets = {
                         'reset_splines': self.reset_splines(),
+                        'polar_transform': self.polar_transform(),
+                        'snap_points_to_peaks': self.snap_points_to_peaks(),
+                        'snap_points_to_vert_grid': self.snap_points_to_vert_grid(),
+                        'polar_points_to_path': self.polar_points_to_path(),
+                        'points_to_sprial': self.points_to_spiral(),
                         'center': self.center_x_widget(),
                         'fit_spline': self.fit_spline(),
                         'show_spline': self.show_spline(),
@@ -331,6 +349,18 @@ class napari_unwrapper:
         assert image.ndim == 2, 'image has more than 2 dimensions'
 
         return list(fetch_spline(points, image)) + [layer_no]
+
+    def _points_to_image_(self) -> np.array:
+        """
+        This converts the points to an image array so they can be sorted, etc.
+        """
+        polar_im = self.viewer.layers[-2].data
+        image_rep = np.zeros_like(polar_im)
+        points_handle = self.viewer.layers[-1].data
+        for elem in points_handle:
+            x_, y_ = [int(round(elem[j])) for j in range(2)]
+            image_rep[x_, y_] = 1
+        return image_rep
 
     def reset_splines(self):
         """
@@ -434,6 +464,10 @@ class napari_unwrapper:
         return inner
 
     def unwrap_volume(self):
+        """
+        This widget takes all the splines (2+) and interpolates between the
+        adjacent ones (havent tested, but the sort should work here...)
+        """
         @magicgui(call_button='unwrap volume',
                   sampling={'label': 'sampling',
                             'min': 1,
@@ -446,19 +480,41 @@ class napari_unwrapper:
                   ):
             points_dict = {}
             indices = sorted(list(self.splines.keys()))
+            n_layers = len(indices)
+            assert n_layers >= 2, "Need at least 2 layers to interpolate between"
             print("indices:", indices)
             for key in indices:
                 val = self.splines[key]
                 x_local, y_local = val['x_'], val['y_']
                 points_dict[key] = np.stack([y_local, x_local]).T
 
-            vol_slice = slice(indices[0], indices[1], 1)
-            im = np.array(inst.viewer.layers[0].data[vol_slice])
-            new_volume = gpu_unwrap(points_dict=points_dict,
-                                    volume=im,                 # array-like
-                                    batch_size=batch_size,
-                                    sampling=sampling,
-                                    interp_method=interp_method.name).new_vol
+
+            # This section takes each set of interpolation rows and
+            # interpolates between them adds them to a list that is then
+            # concatenated to form the "new_volume)"
+            unwrap_holder = []
+            for j in range(n_layers-1):
+                key_1, key_2 = indices[j], indices[j+1]
+                vol_slice = slice(key_1, key_2, 1)
+                im = np.array(inst.viewer.layers[0].data[vol_slice])
+                local_points_dict = {
+                                    key_1: points_dict[key_1],
+                                    key_2: points_dict[key_2],
+                                    }
+                new_volume = gpu_unwrap(points_dict=local_points_dict,
+                                        volume=im,                 # array-like
+                                        batch_size=batch_size,
+                                        sampling=sampling,
+                                        interp_method=interp_method.name,
+                                        ).new_vol
+                unwrap_holder.append(new_volume)
+            
+            shapes = np.stack([elem.shape for elem in unwrap_holder])
+            limiting_dimension = shapes[:, 1].min()
+            print(f"limiting size = {limiting_dimension}")
+            new_volume = np.vstack(
+                [elem[:, :limiting_dimension, :] for elem in unwrap_holder]
+                                   ).astype(np.float32)
             self.mute_all()
             if 'unwrapped' in self.viewer.layers:
                 self.viewer.layers.remove('unwrapped')
@@ -487,6 +543,137 @@ class napari_unwrapper:
         """
         for elem in self.viewer.layers:
             elem.visible = False
+
+    def polar_transform(self):
+        @magicgui(call_button='Polar Transform Image',
+                  layer_no={'min': 0, 'max': 1e6, 'value': 0},
+                  angular_samples={'min': 0, 'max': 1e6, 'value': 720},
+                  center_x={'min': 0, 'max': 1e6, 'value': 0},
+                  center_y={'min': 0, 'max': 1e6, 'value': 0},
+                  )
+        def inner(layer_no: int,
+                  angular_samples: int,
+                  center_x: int,
+                  center_y: int,
+                  ):
+            im_handle = self.viewer.layers[0].data[layer_no]
+            nx_, ny_ = im_handle.shape
+            self.output_shape = (angular_samples, nx_//2)
+            self.center = (center_x, center_y)
+            polar_image = warp_polar(im_handle,
+                                     radius=nx_/2,
+                                     center=self.center,
+                                     output_shape=self.output_shape
+                                     )
+            self.mute_all()
+            self.viewer.add_image(polar_image, colormap='Spectral')
+        return inner
+
+    def snap_points_to_peaks(self):
+        @magicgui(call_button='Find Peaks',
+                  height={'min': -1e6, 'max': 1e6, 'value': 0.0},
+                  vert_spacing={'min': 0, 'max': 1e6, 'value': 25},
+                  distance={'min': 0, 'max': 1e6, 'value': 30},
+                  )
+        def inner(
+                height: float,
+                vert_spacing: int,
+                distance: int
+                ):
+            all_peaks = []
+            polar_im = self.viewer.layers[-1].data
+            self.vert_spacing = vert_spacing
+            for i, row in enumerate(polar_im):
+                if i % vert_spacing != 0:
+                    continue
+                peaks = find_peaks(row, height=height, distance=distance)
+                for j, p in enumerate(peaks[0]):
+                    all_peaks.append([i, p])
+            inst.viewer.add_points(all_peaks)
+        return inner
+
+    def snap_points_to_vert_grid(self):
+        @magicgui(call_button='Snap points to vert grid')
+        def inner():
+            assertion_bool = isinstance(self.viewer.layers[-1], napari.layers.points.points.Points)
+            assert assertion_bool, "Top Layer should be a points layer"
+            for elem in self.viewer.layers[-1].data:
+                if elem[0] % self.vert_spacing != 0:
+                    print("repariing point")
+                    factor = np.round(elem[0] / self.vert_spacing)
+                    elem[0] = factor*self.vert_spacing
+        return inner
+
+    def points_to_spiral(self):
+        """
+        since the peak finding goes from top to bottom the consecutive points
+        are arrange radially not angularly so this function re-sorts the points
+        (under some conditions) so they follow a sprial clockwise or counter
+        clockwise
+
+        Note: Haven't tested clockwise
+        """
+        @magicgui(call_button='Points to Spiral')
+        def inner(counter_clockwise: bool):
+            points_type = napari.layers.points.points.Points
+            assertion_bool = isinstance(self.viewer.layers[-1], points_type)
+            assert assertion_bool, "Top Layer should be a points layer"
+            image_rep = self._points_to_image_()
+            non_zero = np.nonzero(image_rep)
+            unique_rows = len(np.unique(non_zero[0]))
+            square_qmark = len(non_zero[1])/unique_rows
+            assert square_qmark % 1 == 0, "jagged array"
+            square_qmark = int(square_qmark)
+            non_zero = np.vstack(non_zero).reshape(2,
+                                                   unique_rows,
+                                                   square_qmark)
+            if counter_clockwise:
+                non_zero = non_zero[:, ::-1, :]
+            ccw_points = non_zero.transpose(0, 2, 1).reshape(2, -1).T
+            self.viewer.add_points(ccw_points)
+        return inner
+
+    def polar_points_to_path(self):
+        @magicgui(call_button='Polar points to path',
+                  layer_no={'min': 0, 'max': 1e6, 'value': 0},
+                  )
+        def inner(layer_no: int):
+            if self.center is None:
+                print("Polar Transformed image Center not Set")
+                return None
+            theta = 2*np.pi*self.viewer.layers[-1].data[:, 0]/self.output_shape[0]
+            rad = self.viewer.layers[-1].data[:, 1]
+            x_ = np.sin(theta)*rad + self.center[0]
+            y_ = np.cos(theta)*rad + self.center[1]
+            z_ = np.ones_like(x_)*layer_no
+            points = np.array([z_, x_, y_]).T
+            self.viewer.add_shapes(points, shape_type='path')
+        return inner
+
+
+
+
+def gaussian_1d(params: np.array, x: np.array) -> np.array:
+    """
+    From gpufit (gauss_1d.cuh)
+        params[0]: amplitude
+        params[1]: center coordinate
+        params[2]: width
+        params[3]: offset
+
+        x = x-array
+
+    returns:
+        gauss 1d
+    """
+    argx = (x - params[1]) * (x - params[1]) / (2 * params[2] * params[2])
+    ex = np.exp(-argx)
+    return params[0] * ex + params[3]
+
+
+def _residual_(params, x, data):
+    model = gaussian_1d(params, x)
+    return model - data
 
 
 def points_processor(points_array: np.array,
@@ -535,13 +722,6 @@ def interpolate(y1, y2, x3, x1, x2):
     return y1 + (x3 - x1) * (y2 - y1) / (x2 - x1)
 
 
-def imread(file):
-    """
-    the hits
-    """
-    return np.asarray(Image.open(file), dtype=np.float32)
-
-
 def fetch_spline(points_array, image, boundary_condition='natural') -> tuple:
     x_, y_, theta = points_processor(points_array, image)
     spl = make_interp_spline(theta, np.stack([x_, y_]).T, bc_type=boundary_condition)
@@ -570,7 +750,7 @@ def unwrap_layer(im: np.array,
     dy_norm = dx_new / norm_arr
     vector_multiplier = np.linspace(-sampling, sampling, sampling*2)
     # =====================================================================
-    #print(dx_norm)
+    # print(dx_norm)
     dx = dx_norm[:, None] @ vector_multiplier[None, :]
     dy = dy_norm[:, None] @ vector_multiplier[None, :]
     x_coords = x_new[:, None] + dx
@@ -705,4 +885,3 @@ def resample_unroll(input_image: np.array,
 if __name__ == "__main__":
     inst = napari_unwrapper()
     napari.run()
-
