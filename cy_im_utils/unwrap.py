@@ -1,6 +1,6 @@
 from PIL import Image
 from cupyx.scipy.interpolate import RegularGridInterpolator as rgi_gpu
-from cupyx.scipy.ndimage import median_filter
+from cupyx.scipy import ndimage
 from enum import Enum
 from functools import partial
 from magicgui import magicgui
@@ -91,7 +91,8 @@ class gpu_unwrap:
         self.nx, self.ny = volume[0].shape
         self.sampling = sampling
         dx_norm_2d, dy_norm_2d, x_new_2d, y_new_2d = self.prep_splines(volume)
-        coords_vectorized = self.compute_volume_interp_points(x_new_2d,
+        coords_vectorized = self.compute_volume_interp_points(
+                                                              x_new_2d,
                                                               y_new_2d,
                                                               dx_norm_2d,
                                                               dy_norm_2d,
@@ -109,35 +110,6 @@ class gpu_unwrap:
         """
         mempool = cp.get_default_memory_pool()
         mempool.free_all_blocks()
-
-    def points_processor(self,
-                         points_array: cp.array,
-                         ) -> tuple:
-        """
-        This processes the points retrieved from napari and sequences them so
-        the spiral has a continuously increasing angle (not capped at 360), and
-        also returns the x and y points from the path (point sequence)
-        """
-        nx, ny = self.nx, self.ny
-        x_ = points_array[:, -1]
-        y_ = points_array[:, -2]
-        dx = x_ - ny//2
-        dy = y_ - nx//2
-        angles = cp.rad2deg(cp.arctan(dx/dy))
-        angles[dy > 0] += 180
-        angles[(dx > 0) * (dy < 0)] += 360
-        diff_angles = cp.diff(angles)
-        theta = cp.zeros_like(angles)
-        n_angles = len(angles)
-        rolling_angle = 0
-        for i in range(1, n_angles):
-            if diff_angles[i-1] > 0:
-                d_theta = cp.abs(angles[i]-360 - angles[i-1])
-            else:
-                d_theta = angles[i-1] - angles[i]
-            rolling_angle += d_theta
-            theta[i] = rolling_angle
-        return x_, y_, theta
 
     def compute_arc_length(self, spl, theta: np.array):
         """
@@ -168,10 +140,14 @@ class gpu_unwrap:
         dx_norm_2d, dy_norm_2d = [], []
         x_new_2d, y_new_2d = [], []
         for i, (index_local, val) in enumerate(self.points.items()):
-            x_temp = cp.array(val[:, 1], dtype=cp.float32)
-            y_temp = cp.array(val[:, 0], dtype=cp.float32)
+            x_temp = cp.array(val[0][:, 1], dtype=cp.float32)
+            y_temp = cp.array(val[0][:, 0], dtype=cp.float32)
+            center_x, center_y = val[1], val[2]
+            print("inside gpu unwrap -> center x,y", center_x, center_y)
 
-            x_, y_, theta = self.points_processor(cp.stack([x_temp, y_temp]).T)
+            x_, y_, theta = points_processor(cp.stack([x_temp, y_temp]).T,
+                                             center_x=center_x,
+                                             center_y=center_y)
 
             xy = cp.stack([x_, y_]).T.astype(cp.float32)
             boundary_condition = 'natural'
@@ -303,20 +279,27 @@ class napari_unwrapper:
         self.viewer = napari.Viewer()
         self.viewer.title = "NIST Unwrapping GUI"
         self.splines = {}
+        self.centers = {}
         dock_widgets = {
-                        'reset_splines': self.reset_splines(),
-                        'polar_transform': self.polar_transform(),
-                        'snap_points_to_peaks': self.snap_points_to_peaks(),
-                        'snap_points_to_vert_grid': self.snap_points_to_vert_grid(),
-                        'polar_points_to_path': self.polar_points_to_path(),
-                        'points_to_sprial': self.points_to_spiral(),
-                        'center': self.center_x_widget(),
-                        'fit_spline': self.fit_spline(),
-                        'show_spline': self.show_spline(),
-                        'clone': self.clone_path(),
-                        'show_layer_unwrapped': self.show_layer_unwrapped(),
-                        'unwrap_volume': self.unwrap_volume(),
-                        'write_unwrapped': self.write_unwrapped(),
+                        'spline ops': [
+                            self.reset_splines(),
+                            self.set_spline_center(),
+                            self.fit_spline(),
+                            self.show_spline(),
+                            self.clone_path(),
+                            ],
+                        'polar_ops': [
+                                      self.polar_transform(),
+                                      self.snap_points_to_peaks(),
+                                      self.snap_points_to_vert_grid(),
+                                      self.points_to_spiral(),
+                                      self.polar_points_to_path(),
+                                      ],
+                        'unwrap ops': [
+                                    self.show_layer_unwrapped(),
+                                    self.unwrap_volume(),
+                                    self.write_unwrapped(),
+                                    ]
                         }
         for key, val in dock_widgets.items():
             self.viewer.window.add_dock_widget(val,
@@ -330,14 +313,15 @@ class napari_unwrapper:
         This function isolates which image frame is in the viewer, and uses it
         to call fetch_spline
 
-        Note: A 'path' group should be highlighted in the napari viewer not points
+        Note: A 'path' group should be highlighted in the napari viewer not
+        points
 
         """
         assert isinstance(self.viewer.layers[0],
                           napari.layers.image.image.Image), \
             "Layer 0 is not an image layer"
         assert not isinstance(self.viewer.layers[-1],
-                          napari.layers.points.points.Points), \
+                              napari.layers.points.points.Points), \
             "Use 'path' (shapes) not 'points' for spline points"
         points = self.viewer.layers[-1].data[0]
         # 3D image or image stack, whatever
@@ -348,7 +332,14 @@ class napari_unwrapper:
             image = self.viewer.layers[0].data
         assert image.ndim == 2, 'image has more than 2 dimensions'
 
-        return list(fetch_spline(points, image)) + [layer_no]
+        center_x, center_y = self.center
+        print("Info:")
+        print("\tlayer #", layer_no)
+        print("\tcenter x", center_x)
+        print("\tcenter y", center_y)
+        return list(fetch_spline(points,
+                                 center_x=center_x,
+                                 center_y=center_y)) + [layer_no, center_x, center_y]
 
     def _points_to_image_(self) -> np.array:
         """
@@ -386,31 +377,34 @@ class napari_unwrapper:
                                    edge_color='b')
         return inner
 
-    def center_x_widget(self):
-        """
-        This widget plots a point in the center of the image
-        """
-        @magicgui(call_button="Plot Image Center")
+    def fit_spline(self):
+        @magicgui(call_button="fit spline")
         def inner():
-            image_temp = self.viewer.layers[0].data
-            nx, ny = image_temp.shape[-2:]
-            center_coords = np.array([[nx//2, ny//2]])
+            assert None not in self.center, "Set center of spiral"
+            x_, y_, theta, spl, layer_no, center_x, center_y = self._spline_fetch_()
+            self.splines[layer_no] = {'x_': x_,
+                                      'y_': y_,
+                                      'theta': theta,
+                                      'spl': spl,
+                                      'center x': center_x,
+                                      'center y': center_y,
+                                      }
+        return inner
+
+    def set_spline_center(self):
+        @magicgui(call_button="set spline center",
+                  center_xy={'label': 'center x,y'}
+                  )
+        def inner(center_xy: str):
+            temp = center_xy.split(",")
+            self.center = [int(elem) for elem in temp]
+            center_coords = np.array([[self.center[0], self.center[1]]])
             self.viewer.add_points(center_coords,
                                    name='center',
                                    symbol='cross',
                                    size=50,
                                    face_color='r',)
 
-        return inner
-
-    def fit_spline(self):
-        @magicgui(call_button="fit spline")
-        def inner():
-            x_, y_, theta, spl, layer_no = self._spline_fetch_()
-            self.splines[layer_no] = {'x_': x_,
-                                      'y_': y_,
-                                      'theta': theta,
-                                      'spl': spl}
         return inner
 
     def show_spline(self):
@@ -439,22 +433,29 @@ class napari_unwrapper:
     def show_layer_unwrapped(self):
         @magicgui(call_button='unwrap single layer',
                   layer_no={'min': 0, 'max': 1e6, 'value': 0},
+                  reshape_factor={'min': 0, 'max': 1e6, 'value': 400}
                   )
         def inner(layer_no: int,
+                  reshape_factor: int,
                   sampling: int = 20,
-                  reshape_factor: int = 400,
                   interpolation_method: interp_methods = interp_methods.nearest
                   ):
             points = inst.viewer.layers[-1].data[0]
             im = np.array(inst.viewer.layers[0].data[layer_no])
             y_temp, x_temp = points[:, -2], points[:, -1]
-            x_, y_, theta, spl = fetch_spline(points, im)
+            center_x, center_y = self.center
+            x_, y_, theta, spl = fetch_spline(points,
+                                              center_x=center_x,
+                                              center_y=center_y)
             angle_new = calculate_arc_length(spl, theta)
             temp = unwrap_layer(im,
                                 sampling=sampling,
                                 points=np.stack([y_temp, x_temp]).T,
                                 angle_new=angle_new,
-                                interp_method=interpolation_method.name)
+                                interp_method=interpolation_method.name,
+                                center_x=center_x,
+                                center_y=center_y,
+                                )
             fig, ax = plt.subplots(1, 2)
             ax[0].imshow(im)
             ax[0].scatter(points[:, -1], points[:, -2])
@@ -486,7 +487,8 @@ class napari_unwrapper:
             for key in indices:
                 val = self.splines[key]
                 x_local, y_local = val['x_'], val['y_']
-                points_dict[key] = np.stack([y_local, x_local]).T
+                center_x, center_y = val['center x'], val['center y']
+                points_dict[key] = np.stack([y_local, x_local]).T, center_x, center_y
 
 
             # This section takes each set of interpolation rows and
@@ -501,14 +503,15 @@ class napari_unwrapper:
                                     key_1: points_dict[key_1],
                                     key_2: points_dict[key_2],
                                     }
-                new_volume = gpu_unwrap(points_dict=local_points_dict,
+                new_volume = gpu_unwrap(
+                                        points_dict=local_points_dict,
                                         volume=im,                 # array-like
                                         batch_size=batch_size,
                                         sampling=sampling,
                                         interp_method=interp_method.name,
                                         ).new_vol
                 unwrap_holder.append(new_volume)
-            
+
             shapes = np.stack([elem.shape for elem in unwrap_holder])
             limiting_dimension = shapes[:, 1].min()
             print(f"limiting size = {limiting_dimension}")
@@ -548,23 +551,28 @@ class napari_unwrapper:
         @magicgui(call_button='Polar Transform Image',
                   layer_no={'min': 0, 'max': 1e6, 'value': 0},
                   angular_samples={'min': 0, 'max': 1e6, 'value': 720},
-                  center_x={'min': 0, 'max': 1e6, 'value': 0},
-                  center_y={'min': 0, 'max': 1e6, 'value': 0},
+                  center_xy={'label': 'center x,y'},
+                  sigma={'min': 1e-6, 'max': 1e6, 'value': 1.0}
                   )
         def inner(layer_no: int,
                   angular_samples: int,
-                  center_x: int,
-                  center_y: int,
+                  center_xy: str,
+                  sigma: float
                   ):
             im_handle = self.viewer.layers[0].data[layer_no]
             nx_, ny_ = im_handle.shape
             self.output_shape = (angular_samples, nx_//2)
+            center_x, center_y = [int(elem) for elem in center_xy.split(",")]
             self.center = (center_x, center_y)
             polar_image = warp_polar(im_handle,
                                      radius=nx_/2,
                                      center=self.center,
                                      output_shape=self.output_shape
                                      )
+            polar_image = ndimage.gaussian_filter1d(
+                                cp.array(polar_image, dtype=cp.float32),
+                                sigma=sigma
+                                ).get()
             self.mute_all()
             self.viewer.add_image(polar_image, colormap='Spectral')
         return inner
@@ -647,10 +655,10 @@ class napari_unwrapper:
             y_ = np.cos(theta)*rad + self.center[1]
             z_ = np.ones_like(x_)*layer_no
             points = np.array([z_, x_, y_]).T
+            self.mute_all()
             self.viewer.add_shapes(points, shape_type='path')
+            self.viewer.layers[0].visible = True
         return inner
-
-
 
 
 def gaussian_1d(params: np.array, x: np.array) -> np.array:
@@ -677,18 +685,21 @@ def _residual_(params, x, data):
 
 
 def points_processor(points_array: np.array,
-                     image_array: np.array
+                     center_x: float = None,
+                     center_y: float = None,
                      ) -> tuple:
     """
     This processes the points retrieved from napari and sequences them so the
     spiral has a continuously increasing angle (not capped at 360), and also
     returns the x and y points from the path (point sequence)
     """
-    nx, ny = image_array.shape
+    print("center of spline x = ", center_x)
+    print("center of spline y = ", center_y)
+
     x_ = points_array[:, -1]
     y_ = points_array[:, -2]
-    dx = x_ - ny//2
-    dy = y_ - nx//2
+    dx = x_ - center_y
+    dy = y_ - center_x
     angles = np.rad2deg(np.arctan(dx/dy))
     angles[dy > 0] += 180
     angles[(dx > 0) * (dy < 0)] += 360
@@ -722,8 +733,12 @@ def interpolate(y1, y2, x3, x1, x2):
     return y1 + (x3 - x1) * (y2 - y1) / (x2 - x1)
 
 
-def fetch_spline(points_array, image, boundary_condition='natural') -> tuple:
-    x_, y_, theta = points_processor(points_array, image)
+def fetch_spline(points_array,
+                 boundary_condition='natural',
+                 center_x: float = None,
+                 center_y: float = None
+                 ) -> tuple:
+    x_, y_, theta = points_processor(points_array, center_x=center_x, center_y=center_y)
     spl = make_interp_spline(theta, np.stack([x_, y_]).T, bc_type=boundary_condition)
     return x_, y_, theta, spl
 
@@ -733,13 +748,15 @@ def unwrap_layer(im: np.array,
                  sampling: int,
                  angle_new: np.array = None,
                  boundary_condition: str = 'natural',
-                 interp_method: str = 'nearest'
+                 interp_method: str = 'nearest',
+                 center_x: int = None,
+                 center_y: int = None,
                  ):
     """
     single layer unwrapper, generic, wrap it to go higher
     """
     nx, ny = im.shape
-    x_, y_, theta = points_processor(points, im)
+    x_, y_, theta = points_processor(points, center_x=center_x, center_y=center_y)
     spl = make_interp_spline(theta, np.stack([x_, y_]).T, bc_type=boundary_condition)
     # =====================================================================
     x_new, y_new = spl(angle_new).T
