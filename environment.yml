@@ -1,6 +1,6 @@
 # conda env create --file environment.yml
 #  gpufit??
-name: NIST_tomo_experimental
+name: im_proc
 channels:
   - astra-toolbox
   - conda-forge

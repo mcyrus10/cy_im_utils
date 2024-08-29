@@ -1,4 +1,5 @@
-""" This is basically my implementation of the bivariate histogram segmentation
+""" 
+This is basically my implementation of the bivariate histogram segmentation
 from NIF Volume Fusion. To run the interactive functions the instance needs to
 be in a jupyter notebook. The processing can be executed externally.
 """

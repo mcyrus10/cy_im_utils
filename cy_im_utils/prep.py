@@ -6,7 +6,7 @@
 
 """
 from PIL import Image
-from astropy.io import fits
+#from astropy.io import fits
 from cupyx.scipy import ndimage as gpu_ndimage
 from cupyx.scipy.ndimage import median_filter as median_filter_gpu
 from numba import njit, cuda, prange
