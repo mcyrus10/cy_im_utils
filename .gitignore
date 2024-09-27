@@ -7,3 +7,4 @@ cy_im_utils/*.yml
 .mypy_cache
 debugging
 sync_to_nvision.sh
+cy_im_utils/tomography/__pycache__/

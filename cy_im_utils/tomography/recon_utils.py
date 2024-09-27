@@ -8,7 +8,7 @@ try:
     from .TV import TV_grad
 except:
     print("ERROR LOADING TV ")
-from .prep import radial_zero
+from ..prep import radial_zero
 
 
 class astra_tomo_handler:

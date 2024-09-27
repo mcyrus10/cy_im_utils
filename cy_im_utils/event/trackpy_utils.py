@@ -9,15 +9,22 @@ import pandas as pd
 import trackpy as tp
 
 
-def imsd_powerlaw_fit(imsd_dict) -> tuple:
+def imsd_powerlaw_fit(imsd_dict,
+        start_index: int = 0, 
+        end_index: int = None, 
+        ) -> tuple:
     """
     This performs the log-log fit on all the imsd curves
     """
-    time = imsd_dict.index.values
+    if end_index is None:
+        end_index = len(imsd_dict.index.values)
+    fit_slice = slice(start_index, end_index)
+    time = imsd_dict.index.values[fit_slice]
     log_t = np.log(time)
     ones = np.ones_like(log_t)
     A_mat = np.vstack([ones, log_t]).T
-    b_mat = np.log(imsd_dict.values, where = imsd_dict.values > 0)
+    imsd_handle = imsd_dict.values[fit_slice, :]
+    b_mat = np.log(imsd_handle, where = imsd_handle > 0)
     A, n = np.linalg.lstsq(A_mat, b_mat, rcond = -1)[0]
     fits = np.exp(A)[None,:] * time[:,None] ** n[None,:]
     if np.isnan(fits[0]).sum() > 0:
@@ -25,14 +32,27 @@ def imsd_powerlaw_fit(imsd_dict) -> tuple:
     return A, n, fits
 
 
-def imsd_linear_fit(imsd_dict) -> tuple:
+def imsd_linear_fit(imsd_dict: pd.DataFrame,
+                    start_index: int = 0,
+                    end_index: int = None,
+                    ) -> tuple:
     """
     This performs the linear fit on all the imsd curves
+
+    Parameters:
+    -----------
+        imsd_dict : pandas dataframe - output of imsd individual msd curve for
+                                       each particle
+        start index : int - for slicing irregular parts of MSD curve
+        end index: int 
     """
-    time = imsd_dict.index.values
+    if end_index is None:
+        end_index = len(imsd_dict.index.values)
+    fit_slice = slice(start_index, end_index)
+    time = imsd_dict.index.values[fit_slice]
     ones = np.ones_like(time)
     A_mat = np.vstack([ones, time]).T
-    b_mat = imsd_dict.values
+    b_mat = imsd_dict.values[fit_slice, :]
     b, m = np.linalg.lstsq(A_mat, b_mat, rcond = -1)[0]
     fits = m[None,:] * time[:,None] + b[None,:]
     if np.isnan(fits[0]).sum() > 0:
@@ -54,7 +74,8 @@ class event_tracks:
 
     def _fetch_valid_indices_(self, min_length: int) -> np.array:
         """
-        captures only the "valid" particles that meet the criteria greater than length...
+        captures only the "valid" particles that meet the criteria greater than
+        length...
         """
         data = self.data
         unique_elements = data['obj id'].unique()

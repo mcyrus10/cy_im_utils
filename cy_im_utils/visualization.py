@@ -4,8 +4,8 @@ the hits
 
 """
 from .prep import center_of_rotation
-from .recon_utils import astra_2d_simple, TV_POCS
-from .sarepy_cuda import remove_all_stripe_GPU
+from .tomography.recon_utils import astra_2d_simple, TV_POCS
+from .tomography.sarepy_cuda import remove_all_stripe_GPU
 from .thresholded_median import thresh_median_2D_GPU
 from cupyx.scipy.ndimage import median_filter as median_gpu
 from ipywidgets import IntSlider,FloatSlider,HBox,VBox,interactive_output,interact,interact_manual,RadioButtons,Text,IntRangeSlider
