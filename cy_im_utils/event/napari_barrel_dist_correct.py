@@ -104,15 +104,18 @@ class barrel_dist_corr_gui:
 
     def _estimate_checkerbaord_(self):
         @magicgui(call_button="Find Checkerboard")
-        def inner(image_layer: int,
+        def inner(image_layers: str,
                   pattern_x: int,
                   pattern_y: int
                 ):
             from cv2 import findChessboardCorners
-            image_handle = self.viewer.layers[0].data[image_layer].copy()
+            image_layers = [int(elem) for elem in image_layers.split(",")]
+            image_handle = self.viewer.layers[0].data[image_layers].copy()
+            image_handle = np.median(image_handle, axis = 0)
+            self.viewer.add_image(image_handle)
             pattern_size = (pattern_x, pattern_y)
             retval, corners = findChessboardCorners(
-                    image = image_handle,
+                    image = image_handle.astype(np.uint8),
                     patternSize = pattern_size)
             self.viewer.add_points(np.squeeze(corners)[:,::-1], name = "Points")
         return inner
