@@ -36,6 +36,14 @@ def parse_args() -> argparse.ArgumentParser:
                         default = 10_000,
                         help = "delta t (us)",
                         )
+    parser.add_argument("--time_init",
+                        "-t0",
+                        dest="t0",
+                        type = int,
+                        default = 0,
+                        help = "start time",
+                        )
+
     parser.add_argument("--frame_max",
                         type = float,
                         default = np.inf,
@@ -60,12 +68,12 @@ def parse_args() -> argparse.ArgumentParser:
     return parser.parse_args()
 
 
-def raw_to_numpy(raw_file, delta_t, frame_max = np.inf) -> np.array:
+def raw_to_numpy(raw_file, delta_t, frame_max = np.inf, t0 = 0) -> np.array:
     """
     Converts .raw to numpy
     """
     mv_iterator = EventsIterator(raw_file,
-            start_ts = 0,
+            start_ts = t0,
             mode = 'delta_t',
             delta_t = delta_t
             )
@@ -102,7 +110,11 @@ def main() -> None:
     """
     args = parse_args()
 
-    images = raw_to_numpy(args.input, args.delta_t, args.frame_max)
+    images = raw_to_numpy(raw_file = args.input, 
+                          delta_t = args.delta_t, 
+                          frame_max = args.frame_max,
+                          t0 = args.t0
+                          )
 
     if args.tif:
         f_name_tif = args.output + ".tif"

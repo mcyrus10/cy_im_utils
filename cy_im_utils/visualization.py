@@ -4,7 +4,7 @@ the hits
 
 """
 from .prep import center_of_rotation
-from .tomography.recon_utils import astra_2d_simple, TV_POCS
+#from .tomography.recon_utils import astra_2d_simple, TV_POCS
 from .tomography.sarepy_cuda import remove_all_stripe_GPU
 from .thresholded_median import thresh_median_2D_GPU
 from cupyx.scipy.ndimage import median_filter as median_gpu
