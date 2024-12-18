@@ -12,29 +12,38 @@ import trackpy as tp
 def imsd_powerlaw_fit(imsd_dict,
         start_index: int = 0, 
         end_index: int = None, 
+        stride: int = 1,
         ) -> tuple:
     """
     This performs the log-log fit on all the imsd curves
     """
     if end_index is None:
         end_index = len(imsd_dict.index.values)
-    fit_slice = slice(start_index, end_index)
+    fit_slice = slice(start_index, end_index, stride)
     time = imsd_dict.index.values[fit_slice]
     log_t = np.log(time)
     ones = np.ones_like(log_t)
     A_mat = np.vstack([ones, log_t]).T
-    imsd_handle = imsd_dict.values[fit_slice, :]
+    # Taking slice along first dimension so it can handle single particle or
+    # imsd with multiple particles
+    imsd_handle = imsd_dict.values[fit_slice]
     b_mat = np.log(imsd_handle, where = imsd_handle > 0)
     A, n = np.linalg.lstsq(A_mat, b_mat, rcond = -1)[0]
-    fits = np.exp(A)[None,:] * time[:,None] ** n[None,:]
-    if np.isnan(fits[0]).sum() > 0:
-        print("warning -> nans in fit")
+
+    ndim = imsd_dict.values.ndim
+    if ndim == 2:
+        fits = np.exp(A)[None,:] * time[:,None] ** n[None,:]
+        if np.isnan(fits[0]).sum() > 0:
+            print("warning -> nans in fit")
+    elif ndim == 1:
+        fits = np.exp(A) * time ** n
     return A, n, fits
 
 
 def imsd_linear_fit(imsd_dict: pd.DataFrame,
                     start_index: int = 0,
                     end_index: int = None,
+                    stride: int = 1,
                     ) -> tuple:
     """
     This performs the linear fit on all the imsd curves
@@ -48,7 +57,7 @@ def imsd_linear_fit(imsd_dict: pd.DataFrame,
     """
     if end_index is None:
         end_index = len(imsd_dict.index.values)
-    fit_slice = slice(start_index, end_index)
+    fit_slice = slice(start_index, end_index, stride)
     time = imsd_dict.index.values[fit_slice]
     ones = np.ones_like(time)
     A_mat = np.vstack([ones, time]).T

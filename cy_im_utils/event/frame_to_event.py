@@ -58,7 +58,10 @@ class im_stack_to_raw:
                          thresh: float,
                          blur_bool: bool = False,
                          blur_size: int = 5,
-                         speckle_noise: int = 200
+                         speckle_noise: int = 200,
+                         negative_polarity_arr = cp.array([200,126,64], dtype = np.uint8),
+                         positive_polarity_arr = cp.array([255,255,255], dtype = np.uint8),
+                         void_arr = cp.array([52,37,30], dtype = np.uint8),
                          ) -> np.array:
         """
         This basically does what the event emulation library does on GPU 
@@ -88,13 +91,15 @@ class im_stack_to_raw:
         diff = im_1-im_0
         pos = (diff - thresh) > 0 
         neg = (diff + thresh) < 0
-        output = cp.full([nx,ny,3], 255, dtype = cp.uint8)
-        output[neg] = cp.array([0,0,255], dtype = cp.uint8)
-        output[pos] = cp.array([255,0,0], dtype = cp.uint8)
+        output = cp.full([nx,ny,3], void_arr, dtype = cp.uint8)
+        #output[:,:,:] = void_arr
+        print(neg.shape, output.shape)
+        output[neg] = negative_polarity_arr[None,None,:]
+        output[pos] = positive_polarity_arr[None,None,:]
         speckle_noise_indices_x = cp.random.uniform(0,nx,speckle_noise).astype(int)
         speckle_noise_indices_y = cp.random.uniform(0,ny,speckle_noise).astype(int)
         speckle_slice = (speckle_noise_indices_x, speckle_noise_indices_y,None)
-        output[speckle_slice] = cp.array([255,0,0], dtype = cp.uint8)
+        output[speckle_slice] = positive_polarity_arr
         return output.get()
 
     def write_csv(self,

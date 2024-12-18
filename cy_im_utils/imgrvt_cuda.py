@@ -2,8 +2,10 @@
 Python implementation of the Radial Variance Transform.
 
 The algorithm described in
-A. D. Kashkanova, A. B. Shkarin, R. Gholami Mahmoodabadi, M. Blessing, Y. Tuna, A. Gemeinhardt, and V. Sandoghdar,
-"Precision single-particle localization using radial variance transform," Opt. Express 29, 11070-11083 (2021)
+A. D. Kashkanova, A. B. Shkarin, R. Gholami Mahmoodabadi, M. Blessing, Y. Tuna,
+A. Gemeinhardt, and V. Sandoghdar,
+"Precision single-particle localization using radial variance transform," Opt.
+Express 29, 11070-11083 (2021)
 (https://doi.org/10.1364/OE.420670)
 """
 
@@ -42,9 +44,11 @@ def gen_r_kernel(r, rmax):
 
 def generate_all_kernels(rmin, rmax, coarse_factor=1, coarse_mode="add"):
     """
-    Generate a set of kernels with radii between `rmin` and `rmax` and sizes ``2*rmax+1``.
+    Generate a set of kernels with radii between `rmin` and `rmax` and sizes
+    ``2*rmax+1``.
 
-    ``coarse_factor`` and ``coarse_mode`` determine if the number of those kernels is reduced by either skipping or adding them
+    ``coarse_factor`` and ``coarse_mode`` determine if the number of those
+        kernels is reduced by either skipping or adding them
     (see :func:`rvt` for a more detail explanation).
     """
     kernels=[gen_r_kernel(r,rmax) for r in range(rmin,rmax+1)]
@@ -56,7 +60,7 @@ def generate_all_kernels(rmin, rmax, coarse_factor=1, coarse_mode="add"):
     return kernels
 
 
-def _check_core_args(rmin, rmax, kind, coarse_mode="add"):
+def _check_core_args(rmin, rmax, kind, coarse_mode="add") -> None:
     """Check validity of the core algorithm arguments"""
     if rmin<0 or rmax<0:
         raise ValueError("radius should be non-negative")
@@ -66,7 +70,8 @@ def _check_core_args(rmin, rmax, kind, coarse_mode="add"):
         raise ValueError("unrecognized kind: {}; can be either 'basic' or 'normalized'")
     if coarse_mode not in {"add","skip"}:
         raise ValueError("unrecognized coarse mode: {}; can be either 'add' or 'skip'")
-def _check_args(rmin, rmax, kind, coarse_mode, highpass_size, upsample):
+
+def _check_args(rmin, rmax, kind, coarse_mode, highpass_size, upsample) -> None:
     """Check validity of all the algorithm arguments"""
     _check_core_args(rmin,rmax,kind,coarse_mode)
     if upsample<1:
@@ -75,13 +80,13 @@ def _check_args(rmin, rmax, kind, coarse_mode, highpass_size, upsample):
         raise ValueError("high-pass filter size should be >= 0.3")
 
 
-
 ## Prepare auxiliary parameters
 def get_fshape(s1, s2, fast_mode=False):
     """Get the required shape of the transformed image given the shape of the original image and the kernel"""
     shape=s1 if fast_mode else s1+s2-1
     fshape=[next_fast_len(int(d)) for d in shape]
     return tuple(fshape)
+
 ## Preparing FFTs of arrays
 def prepare_fft(inp, fshape, pad_mode="constant"):
     """Prepare the image for a convolution by taking its Fourier transform,
@@ -92,6 +97,7 @@ def prepare_fft(inp, fshape, pad_mode="constant"):
         pad=[((td-d)//2,(td-d+1)//2) for td,d in zip(fshape,inp.shape)]
         inp=cp.pad(inp,pad,mode=pad_mode)
         return cp.fft.rfftn(inp)
+
 ## Shortcut of SciPy fftconvolve, which takes already fft'd arrays on the input
 def convolve_fft(sp1, sp2, s1, s2, fshape, fast_mode=False):
     """
@@ -106,7 +112,14 @@ def convolve_fft(sp1, sp2, s1, s2, fshape, fast_mode=False):
         return ret[off[0]:off[0]+s1[0],off[1]:off[1]+s1[1]].copy()
 
 _kernels_fft_cache={}
-def rvt_core(img, rmin, rmax, kind="basic", rweights=None, coarse_factor=1, coarse_mode="add", pad_mode="constant"):
+def rvt_core(img,
+             rmin,
+             rmax,
+             kind="basic",
+             rweights=None,
+             coarse_factor=1, 
+             coarse_mode="add",
+             pad_mode="constant"):
     """
     Perform core part of Radial Variance Transform (RVT) of an image.
 
@@ -116,14 +129,27 @@ def rvt_core(img, rmin, rmax, kind="basic", rweights=None, coarse_factor=1, coar
         rmax: maximal radius (inclusive)
         kind: either ``"basic"`` (only VoM), or ``"normalized"`` (VoM/MoV);
             normalized version increases subpixel bias, but it works better at lower SNR
-        rweights: relative weights of different radial kernels; must be a 1D array of the length ``(rmax-rmin+1)//coarse_factor``
-        coarse_factor: the reduction factor for the number ring kernels; can be used to speed up calculations at the expense of precision
-        coarse_mode: the reduction method; can be ``"add"`` (add ``coarse_factor`` rings in a row to get a thicker ring, which works better for smooth features),
-            or ``"skip"`` (only keep on in ``coarse_factor`` rings, which works better for very fine features)
-        pad_mode: edge padding mode for convolutions; can be either one of modes accepted by ``np.pad`` (such as ``"constant"``, ``"reflect"``, or ``"edge"``),
-            or ``"fast"``, which means faster no-padding (a combination of ``"wrap"`` and ``"constant"`` padding depending on the image size);
-            ``"fast"`` mode works faster for smaller images and larger ``rmax``, but the border pixels (within ``rmax`` from the edge) are less reliable;
-            note that the image mean is subtracted before processing, so ``pad_mode="constant"`` (default) is equivalent to padding with a constant value equal to the image mean
+        rweights: relative weights of different radial kernels; must be a 1D
+                  array of the length ``(rmax-rmin+1)//coarse_factor``
+        coarse_factor: the reduction factor for the number ring kernels; can be
+                       used to speed up calculations at the expense of
+                       precision
+        coarse_mode: the reduction method; can be ``"add"`` (add
+                    ``coarse_factor`` rings in a row to get a thicker ring,
+                    which works better for smooth features), or ``"skip"``
+                    (only keep on in ``coarse_factor`` rings, which works
+                    better for very fine features)
+        pad_mode: edge padding mode for convolutions; can be either one of
+                  modes accepted by ``np.pad`` (such as ``"constant"``,
+                  ``"reflect"``, or ``"edge"``),
+                  or ``"fast"``, which means faster no-padding (a combination
+                  of ``"wrap"`` and ``"constant"`` padding depending on the
+                  image size); ``"fast"`` mode works faster for smaller images
+                  and larger ``rmax``, but the border pixels (within ``rmax``
+                  from the edge) are less reliable; note that the image mean is
+                  subtracted before processing, so ``pad_mode="constant"``
+                  (default) is equivalent to padding with a constant value
+                  equal to the image mean
 
     Returns:
         transformed image with the same shape as upsample
@@ -155,14 +181,14 @@ def rvt_core(img, rmin, rmax, kind="basic", rweights=None, coarse_factor=1, coar
     else: # calculate MoV for normalization
         imgsq_fft=prepare_fft(img**2,fshape,pad_mode=pad_mode) # prepare image FFT
         if rweights is None:
-            sumk_fft=cp.mean(kernels_fft,axis=0) # find combined kernel as a standard mean
+            print("--->", type(kernels_fft))
+            print("--->", cp.stack(kernels_fft).shape)
+            sumk_fft=cp.mean(cp.stack(kernels_fft),axis=0) # find combined kernel as a standard mean
             mov=convolve_fft(imgsq_fft,sumk_fft,s1,s2,fshape,fast_mode=fast_mode)-cp.mean(rmeans**2,axis=0) # use the combined kernel to find MoV in one convolution
         else:
             sumk_fft=cp.sum(kernels_fft*rweights[:,None,None],axis=0) # find combined kernel as a weighted mean
             mov=convolve_fft(imgsq_fft,sumk_fft,s1,s2,fshape,fast_mode=fast_mode)-cp.sum(rmeans**2*rweights[:,None,None],axis=0) # use the combined kernel to find MoV in one convolution
         return vom/mov
-
-
 
 
 
@@ -173,7 +199,8 @@ def high_pass(img, size):
 
 
 
-def rvt(img, rmin, rmax, kind="basic", highpass_size=None, upsample=1, rweights=None, coarse_factor=1, coarse_mode="add", pad_mode="constant"):
+def rvt(img, rmin, rmax, kind="basic", highpass_size=None, upsample=1, 
+        rweights=None, coarse_factor=1, coarse_mode="add", pad_mode="constant"):
     """
     Perform Radial Variance Transform (RVT) of an image.
 
@@ -202,14 +229,16 @@ def rvt(img, rmin, rmax, kind="basic", highpass_size=None, upsample=1, rweights=
     upsample=int(upsample)
     _check_args(rmin,rmax,kind,coarse_mode,highpass_size,upsample)
     if highpass_size is not None:
-        img=high_pass(img,highpass_size)
+        img=high_pass(img, highpass_size)
     if upsample>1:
-        img=img.repeat(upsample,axis=-2).repeat(upsample,axis=-1) # nearest-neighbor upsampling on both axes
+        img=img.repeat(upsample, axis=-2).repeat(upsample,axis=-1) # nearest-neighbor upsampling on both axes
         if rweights is not None:
             rweights=cp.asarray(rweights).repeat(upsample) # upsample radial weights as well
         rmin*=upsample # increase minimal and maximal radii
         rmax*=upsample
-    return rvt_core(img,rmin,rmax,kind=kind,rweights=rweights,coarse_factor=coarse_factor,coarse_mode=coarse_mode,pad_mode=pad_mode)
+    return rvt_core(img,rmin,rmax,kind=kind,rweights=rweights,
+                    coarse_factor=coarse_factor,coarse_mode=coarse_mode,
+                    pad_mode=pad_mode)
 
 
 
