@@ -433,7 +433,7 @@ class EventFilterInterpolation:
         return thr
 
 
-@njit(int64(uint16, uint16, int64, int64[:], int64[:,:]))
+@njit(float64(uint16, uint16, int64, int64[:], float64[:,:]))
 def _max_interpolation_(y, x, Scale, FrameSize, TimestampMap):
     y_cell = int(np.floor(y / Scale))
     x_cell = int(np.floor(x / Scale))
@@ -470,7 +470,7 @@ def _max_interpolation_(y, x, Scale, FrameSize, TimestampMap):
                                    ts_filtered_cell_22]))
     return thr
 
-@njit(int64(uint16, uint16, int64, int64[:], int64[:,:], float64[:,:]))
+@njit(float64(uint16, uint16, int64, int64[:], float64[:,:], float64[:,:]))
 def _bilinear_interval_weights_interpolation_(y, x, Scale, FrameSize, TimestampMap, IntervalMap):
     y_cell = int(np.floor(y / Scale))
     x_cell = int(np.floor(x / Scale))
@@ -554,7 +554,7 @@ def _bilinear_interval_weights_interpolation_(y, x, Scale, FrameSize, TimestampM
             thr = thr1 * coef_top / sum_all + thr2 * coef_bot / sum_all
     return thr
 
-@njit(int64(uint16, uint16, int64, int64[:], int64[:,:]))
+@njit(float64(uint16, uint16, int64, int64[:], float64[:,:]))
 def _bilinear_interpolation_( y, x, Scale, FrameSize, TimestampMap):
     y_cell = int(np.floor(y / Scale))
     x_cell = int(np.floor(x / Scale))
@@ -602,7 +602,7 @@ def _bilinear_interpolation_( y, x, Scale, FrameSize, TimestampMap):
             thr = thr1 * (dy2 / w) + thr2 * (dy1 / w)
     return thr
 
-@njit(int64(uint16, uint16, int64, int64[:], int64[:,:], float64[:,:]))
+@njit(float64(uint16, uint16, int64, int64[:], float64[:,:], float64[:,:]))
 def _distance_interpolation_(y, x, Scale, FrameSize, TimestampMap, IntervalMap):
     y_cell = int(np.floor(y / Scale))
     x_cell = int(np.floor(x / Scale))
@@ -707,7 +707,7 @@ def _distance_interpolation_(y, x, Scale, FrameSize, TimestampMap, IntervalMap):
             thr = (ts_11*C_11 + ts_12 * C_12 + ts_21 * C_21 + ts_22 * C_22) / coef_sum
     return thr
 
-@njit(boolean(int64, uint16, uint16, int64, int64, int64, int64[:], int64[:,:], float64[:,:]))
+@njit(boolean(int64, uint16, uint16, int64, int64, int64, int64[:], float64[:,:], float64[:,:]))
 def _filterEvent_(interpolation_method, x, y, t, FilterLength, Scale, FrameSize, TimestampMap, IntervalMap):
     if interpolation_method == 0:
         thr_ts = _bilinear_interpolation_(y, x, Scale, FrameSize, TimestampMap)
@@ -723,7 +723,7 @@ def _filterEvent_(interpolation_method, x, y, t, FilterLength, Scale, FrameSize,
     correct = diff_ts < FilterLength
     return correct
 
-@njit(void(uint16, uint16, int64, int64, int64[:,:], float64[:,:], float64))
+@njit(void(uint16, uint16, int64, int64, float64[:,:], float64[:,:], float64))
 def _updateInterval_(x, y, t, Scale, TimestampMap, IntervalMap, UpdateFactor):
     cellY = int(np.floor(y / Scale))
     cellX = int(np.floor(x / Scale))
@@ -733,7 +733,7 @@ def _updateInterval_(x, y, t, Scale, TimestampMap, IntervalMap, UpdateFactor):
     new_interval = cell_interval * (1 - UpdateFactor) + time_diff * UpdateFactor;
     IntervalMap[cellY, cellX] = new_interval
 
-@njit(void(uint16, uint16, int64, int64, int64[:,:], float64))
+@njit(void(uint16, uint16, int64, int64, float64[:,:], float64))
 def _updateFilteredTimestamp_(x, y, t , Scale, TimestampMap, UpdateFactor):
     cellY = int(np.floor(y / Scale))
     cellX = int(np.floor(x / Scale))
@@ -747,13 +747,17 @@ def _updateActive_(x, y, Scale, ActiveMap):
     cellX = int(np.floor(x / Scale))
     ActiveMap[cellY, cellX] = True
 
-@njit(void(uint16, uint16, int64, int64, int64[:,:], float64[:,:], boolean[:,:], float64))
-def _updateFeatures_(x, y, t, Scale, TimestampMap, IntervalMap, ActiveMap, UpdateFactor):
+@njit(void(uint16, uint16, int64, int64, float64[:,:], float64[:,:], boolean[:,:], float64))
+def _updateFeatures_(
+        x,
+        y,
+        t,
+        Scale, TimestampMap, IntervalMap, ActiveMap, UpdateFactor):
     _updateInterval_(x, y, t, Scale, TimestampMap, IntervalMap, UpdateFactor)
     _updateFilteredTimestamp_(x, y, t, Scale, TimestampMap, UpdateFactor)
     _updateActive_(x, y, Scale, ActiveMap)
 
-@njit(void(uint16[:], uint16[:], int64[:], boolean[:], int64, int64, int64, int64[:], int64[:,:], float64[:,:], boolean[:,:], float64))
+@njit(void(uint16[:], uint16[:], int64[:], boolean[:], int64, int64, int64, int64[:], float64[:,:], float64[:,:], boolean[:,:], float64))
 def _processEvents_(
         ev_x: np.uint16,
         ev_y: np.uint16,
@@ -796,7 +800,7 @@ class event_filter_interpolation_compiled:
         sz_0 = int(np.floor(frame_size[0] / scale))
         sz_1 = int(np.floor(frame_size[1] / scale))
         
-        self.TimestampMap = np.zeros([sz_0, sz_1], dtype = np.int64)
+        self.TimestampMap = np.zeros([sz_0, sz_1], dtype = np.float64)
         self.IntervalMap = 1e4 * np.ones([sz_0, sz_1], dtype = np.float64)
         self.ActiveMap = np.zeros([sz_0, sz_1], dtype = bool)
         self.ValidEvents = 0
@@ -814,6 +818,7 @@ class event_filter_interpolation_compiled:
                         events['x'],
                         events['y'],
                         events['t'],
+                        #events,
                         eventsBin,
                         self.InterpolationMethod, 
                         self.FilterLength,
