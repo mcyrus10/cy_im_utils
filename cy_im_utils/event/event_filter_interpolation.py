@@ -35,12 +35,13 @@ class EventFilterInterpolation:
         event = np.array([[x, y, p, t]] ???????
         """
         eventsBin = np.zeros(events.shape[0], dtype = bool)
-        for i, event in tqdm(enumerate(events)):
+        for i, event in tqdm(enumerate(events), disable = True):
             eventsBin[i] = self.filterEvent(event)
             self.updateFeatures(event)
             self.CurrentTs = event[3]
         
         self.updateEmpty()
+        self.eventsBin = eventsBin
         self.EventsTrue = events[eventsBin]
         self.EventsFalse = events[~eventsBin]
         self.ValidEvents = self.ValidEvents + self.EventsTrue.shape[0]
@@ -784,14 +785,24 @@ def _processEvents_(
 
 class event_filter_interpolation_compiled:
     def __init__(self, frame_size, filter_length, scale, update_factor, 
-                 filtered_ts, interpolation_method):
+                 interpolation_method, filtered_ts = None):
         """
-        Interpolation Methods: 
-            - 0 : bilinear
-            - 1 : bilinear with interval weights
-            - 2 : max
-            - 3 : distance
+        Parameters:
+        -----------
+            frame_size: np.array of np.int64 - image size
+            filter_length: np.int64 - threshold that determines which events to
+                           filter out
+            scale: np.int64 - size of areas to sub-divide the frames
+            update_rate: np.int64 - size of areas to sub-divide the frames
+            interpolation_method: np.int64 - 
+                                    - 0 : bilinear
+                                    - 1 : bilinear with interval weights
+                                    - 2 : max
+                                    - 3 : distance
+            filtered_ts: ???? artifact from previous version that does nothing...
         """
+        msg =  "scale must divide evenly into frame size"
+        assert np.sum((frame_size / scale) % 1) == 0, msg
         self.FrameSize = frame_size
         self.FilterLength = filter_length
         self.Scale = scale

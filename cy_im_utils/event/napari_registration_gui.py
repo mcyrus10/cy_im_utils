@@ -3,9 +3,8 @@ from PIL import Image
 from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter
 from dask_image.imread import imread
 from magicgui import magicgui
-from metavision_core.event_io import EventsIterator
-from metavision_sdk_core import BaseFrameGenerationAlgorithm
 from napari.qt.threading import thread_worker
+from numba import njit, int64, void
 from os import mkdir
 from pathlib import Path
 from scipy.optimize import least_squares
@@ -22,11 +21,17 @@ import numpy as np
 import pandas as pd
 import trackpy as tp
 
-
 from sys import path
-path.append("/home/mcd4/cy_im_utils")
+util_paths = [
+        "/home/mcd4/cy_im_utils",
+        "C:\\Users\\mcd4\\Documents\\cy_im_utils",
+        ]
+for elem in util_paths:
+    path.append(elem)
 from cy_im_utils.imgrvt_cuda import rvt
 from cy_im_utils.event.trackpy_utils import imsd_powerlaw_fit, imsd_linear_fit
+from cy_im_utils.event.integrate_intensity import _integrate_events_, fetch_indices_wrapper
+from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 
 
@@ -83,22 +88,27 @@ class spatio_temporal_registration_gui:
         self.track_holder = {}
 
         dock_widgets = {
-                'Registration Ops': [self._load_data_(),
+                'load data': [
+                              self._load_frame_(),
+                              self._load_event_(),
+                              ],
+                'Registration Ops': [
                               self._flip_ud_(),
                               self._flip_lr_(),
-                              self._diff_layer_(),
                               self._load_affine_mat_(),
                               self._reset_affine_(),
                               self._fit_affine_(),
                               self._apply_transform_(),
                               self._shift_event_(),
-                              self._set_frame_after_shutter_(),
                               self._write_transforms_(),
                               ],
                 'Filtering':[
-                            self._isolate_event_channels_(),
-                            self._combine_event_channels_(),
-                            self._tform_event_to_rvt_(),
+                            self._diff_layer_(),
+                            self._apply_event_noise_filter_(),
+                            #self._isolate_event_channels_(),
+                            #self._combine_event_channels_(),
+                            self._abs_of_layer_(),
+                            self._apply_rvt_to_layer_(),
                             self._apply_gaussian_layer_(),
                             self._apply_median_layer_(),
 
@@ -110,7 +120,8 @@ class spatio_temporal_registration_gui:
                             self._calc_msd_()
                               ],
                 'Utils':[
-                    self._free_memory_(),
+                    self.__free_memory__(),
+                    self.__compute__(),
                     ]
                 }
         tabs = []
@@ -128,16 +139,126 @@ class spatio_temporal_registration_gui:
                         )
         self.total_shift = 0
 
-    def _free_memory_(self):
-        @magicgui(
-                call_button="Free Memory",
-                )
-        def inner():
-            cp_free_mem()
-            gc.collect()
-            print("CUDA memory freed and Garbage Collected")
+    #--------------------------------------------------------------------------
+    #                               LOADING DATA    
+    #--------------------------------------------------------------------------
+    def _load_event_(self):
+        @magicgui(call_button="load event data",
+                  main_window = True,
+                  persist = True,
+                  layout = 'vertical',
+                  event_file = {"label": "Select Event File (.hdf5)"},
+                  load_event_bool = {"label": "Load Event"},
+                  acc_time = {'label': "Accumulation Time",'max':1e16},
+                  num_images = {'label': "Number of Images (-1 for all triggers)",'max':1e16},
+                  event_thresh = {'label': "Dead Pixel Threshold",'max':1e16},
+                  )
+        def inner(
+                event_file: Path = Path.home(),
+                load_event_bool: bool = True,
+                acc_time: float = 0.0,
+                event_thresh: float = 0.0,
+                num_images: int = -1,
+                ):
+            self.event_file = event_file
+            self.event_acc_time = acc_time
+            self.event_dead_px_thresh = event_thresh
+            self.num_event_images = num_images
+            event_files = event_file.as_posix()
+            print(event_files)
+            msg = "use hdf5 format (metavision_file_to_hdf5 -i <input>.raw -o <output>.hdf5)"
+            assert event_file.suffix == ".hdf5", msg
+            print("Reading .hdf5 file")
+            cd_data = self.__read_hdf5__(event_file, "CD")
+
+            event_stack = self._hdf5_to_numpy_(cd_data,
+                                               acc_time,
+                                               thresh = event_thresh,
+                                               num_images = self.num_event_images
+                                               )
+
+            inst.viewer.add_image(event_stack, colormap = 'viridis', 
+                                  name = 'event')
         return inner
 
+    def _load_frame_(self):
+        @magicgui(call_button="load frame data",
+              main_window = True,
+              persist = True,
+              layout = 'vertical',
+              frame_file = {"label": "Select Frame File (.tif)"},
+              load_frame_bool = {"label": "Load Frame"},
+                  )
+        def inner(
+                frame_file: Path = Path.home(),
+                load_frame_bool: bool = True,
+                ):
+            self.frame_file = frame_file
+            frame_files = frame_file.as_posix()
+            print(frame_files)
+            frame_stack = imread(frame_files)
+            inst.viewer.add_image(frame_stack, colormap = 'hsv',
+                                name = 'frame', opacity = 0.4)
+
+        return inner
+
+    def __read_hdf5__(self, file_name, field_name) -> np.array:
+        """
+        wrapper for hdf5 reading call field name can be "CD" (which stands for
+        contrast detector) or "EXT_TRIGGER"
+        """
+        with h5py.File(file_name, "r") as f:
+            data = f[field_name]['events'][()]
+        return data
+
+    def _hdf5_to_numpy_(self, 
+                        cd_data, 
+                        acc_time: float, 
+                        thresh: float,
+                        num_images: int,
+                        width: int = 720,
+                        height: int = 1280,
+                        ) -> np.array:
+        """
+        This is for loading in an hdf5 file so that the exposure time of the
+        frame camera can be matched to the event signal directly.....
+        
+        Just use the regular raw -> numpy function if you want a finer frame
+        rate sampling since this will load the data with gaps!!!
+        (discontinuous event data)
+        """
+        trigger_data = self.__read_hdf5__(self.event_file, "EXT_TRIGGER")['t']
+        if trigger_data.shape[0] == 0:
+            trigger_data = None
+        else:
+            print(f"trigger shape = {trigger_data.shape} (2x the triggers)")
+        trigger_indices = fetch_indices_wrapper(trigger_data,
+                                                acc_time,
+                                                cd_data['t'],
+                                                super_sampling = 1,
+                                                frame_comp_triggers = num_images
+                                                )
+        print("fetched indices")
+        n_im = trigger_indices.shape[0]
+        image_stack = np.zeros([n_im, width, height], dtype = np.float32)
+        image_buffer = np.zeros([width, height], dtype = np.float32)
+
+
+        for j, (id_0, id_1) in tqdm(enumerate(trigger_indices), desc = "reading hdf5"):
+            image_buffer[:] = 0
+            slice_ = slice(id_0, id_1, 1)
+            _integrate_events_(image_buffer, 
+                               cd_data['x'][slice_],
+                               cd_data['y'][slice_], 
+                               cd_data['p'][slice_].astype(bool))
+            image_buffer[np.abs(image_buffer) > thresh] = 0
+            image_stack[j] = image_buffer.copy()
+
+        return image_stack
+
+    #--------------------------------------------------------------------------
+    #                            REGISTRATION
+    #--------------------------------------------------------------------------
     def _load_affine_mat_(self):
         @magicgui(
                 call_button="Load affine transform",
@@ -191,14 +312,12 @@ class spatio_temporal_registration_gui:
         def inner(batch_size: int = 50):
             event_handle = self.__fetch_layer__("event").data
             frame_handle = self.__fetch_layer__("frame").data
-            if frame_handle.ndim == 4:
-                nz, nx, ny, _ = frame_handle.shape
-                frame_ndim = 4
-            elif frame_handle.ndim == 3:
-                nz, nx, ny = frame_handle.shape
-                frame_ndim = 3
 
-            _, nx_event, ny_event, _ = event_handle.shape
+            assert frame_handle.ndim == 3, "Only 3D time, x, y for frame images"
+            assert event_handle.ndim == 3, "not doing colorized raw nonsense any more"
+            nz, nx, ny = frame_handle.shape
+            frame_ndim = 3
+            _, nx_event, ny_event = event_handle.shape
 
             data_type = event_handle.dtype
 
@@ -208,11 +327,8 @@ class spatio_temporal_registration_gui:
             tform_push = cp.eye(4).astype(cp.float32)
             tform_push[1:,1:] = cp.array(self.affine_matrix)
 
-            event_raw_transformed = np.zeros([nz,nx,ny,3], dtype = np.uint8)
-            if frame_ndim == 3:
-                frame_transformed = np.zeros([nz, nx_event, ny_event], dtype = np.float32)
-            elif frame_ndim == 4:
-                frame_transformed = np.zeros([nz, nx_event, ny_event, 3], dtype = np.uint8)
+            event_raw_transformed = np.zeros([nz,nx,ny], dtype = np.float32)
+            frame_transformed = np.zeros([nz, nx_event, ny_event], dtype = np.float32)
 
             n_batch = nz // batch_size
             remainder = nz % batch_size
@@ -224,29 +340,19 @@ class spatio_temporal_registration_gui:
                 upper_lim = min((q+1)*batch_size, nz)
                 local_batch_size = upper_lim - batch_size*q
                 slice_ = slice(q*batch_size, upper_lim)
-                for j in range(3):
-                    event_raw_transformed[slice_,:,:,j] = affine_transform(
-                        cp.array(event_handle[slice_,:,:,j], dtype = cp.float32),
-                        tform_push,
-                        output_shape = (local_batch_size,nx,ny),
-                        order = 0
+                event_raw_transformed[slice_] = affine_transform(
+                    cp.array(event_handle[slice_], dtype = cp.float32),
+                    tform_push,
+                    output_shape = (local_batch_size,nx,ny),
+                    order = 3
+                    ).get()
+                cp_free_mem()
+                frame_transformed[slice_] = affine_transform(
+                        cp.array(frame_handle[slice_], dtype = cp.float32),
+                        tform_pull,
+                        output_shape = (local_batch_size, nx_event, ny_event),
+                        order = 3
                         ).get()
-                    cp_free_mem()
-                    if frame_ndim == 4:
-                        frame_transformed[slice_,:,:,j] = affine_transform(
-                            cp.array(frame_handle[slice_,:,:,j], dtype = cp.float32),
-                            tform_pull,
-                            output_shape = (local_batch_size, nx_event, ny_event),
-                            order = 3
-                                    ).get()
-                        cp_free_mem()
-                if frame_ndim == 3:
-                    frame_transformed[slice_] = affine_transform(
-                            cp.array(frame_handle[slice_], dtype = cp.float32),
-                            tform_pull,
-                            output_shape = (local_batch_size, nx_event, ny_event),
-                            order = 3
-                            ).get()
                 cp_free_mem()
 
             self.viewer.add_image(event_raw_transformed, 
@@ -279,145 +385,13 @@ class spatio_temporal_registration_gui:
         return inner
 
     def _flip_lr_(self):
-        @magicgui(call_button="flip event lr")
-        def inner():
-            handle = self.__fetch_layer__("event")
-            handle.data = handle.data[:,:,::-1]
-            print("Flipped event LR")
-        return inner
-
-    def _load_data_(self):
-        @magicgui(call_button="load data sets",
-              main_window = True,
-              persist = True,
-              layout = 'vertical',
-              frame_dir = {"label": "Select Frame File (.tif)"},
-              load_frame_bool = {"label": "Load Frame"},
-              event_dir = {"label": "Select Event File (.raw or .hdf5)"},
-              load_event_bool = {"label": "Load Event"},
-              fps = {'label': "FPS (0 for hdf5 trigger sync)",'max':1e16}
-                  )
-        def inner(
-                frame_dir: Path = Path.home(),
-                load_frame_bool: bool = True,
-                event_dir: Path = Path.home(),
-                load_event_bool: bool = True,
-                fps: int = 0
-                ):
-            self.frame_dir = frame_dir
-            self.event_dir = event_dir
-            if load_event_bool:
-                event_files = event_dir.as_posix()
-                print(event_files)
-                # Read a .raw or .hdf5
-                event_suffix = event_dir.suffix
-                if event_suffix == '.raw':
-                    self.delta_t = int(np.round(1e6/fps))
-                    print(f"fps: {fps}\tdelta t: {self.delta_t} us")
-                    print("Reading .raw file")
-                    event_stack = self._load_raw_to_numpy_(str(event_dir), 
-                                                           self.delta_t)
-                elif event_suffix == '.hdf5':
-                    print("Reading .hdf5 file and matching triggers to exposures")
-                    event_stack = self._load_hdf5_to_numpy_(str(event_dir))
-
-                inst.viewer.add_image(event_stack, colormap = 'gray', 
-                                      name = 'event')
-
-            if load_frame_bool:
-                frame_files = frame_dir.as_posix()
-                print(frame_files)
-                frame_stack = imread(frame_files)
-                inst.viewer.add_image(frame_stack, colormap = 'hsv',
-                                    name = 'frame', opacity = 0.4)
-
-        return inner
-
-    def _load_hdf5_to_numpy_(self, event_file, mode = 'exposure') -> np.array:
-        """
-        This is for loading in an hdf5 file so that the exposure time of the
-        frame camera can be matched to the event signal directly.....
-        
-        Just use the regular raw -> numpy function if you want a finer frame
-        rate sampling since this will load the data with gaps!!!
-        (discontinuous event data)
-        """
-        with h5py.File(event_file, "r") as f:
-            data = f['CD']['events'][()]
-            trigger_data = f['EXT_TRIGGER']['events'][()]
-
-        cp_free_mem()
-        x, y, t = [cp.array(data[key], dtype = data[key].dtype) for key in ['x','y','t']]
-        trigger_time = cp.array(trigger_data['t'], dtype = trigger_data['t'].dtype)
-        trigger_0 = trigger_data['p'][0]
-        if trigger_0 == 0:
-            print("Shifting to first trigger on state")
-            trigger_time = trigger_time[1:]
-
-        n_trigger = trigger_time.shape[0]
-        if n_trigger % 2 != 0:
-            print("Odd number of triggers, subtracting one off")
-            n_trigger -= 1
-        image_stack = []
-        pos_polarity = cp.array(data['p'] > 0, dtype = bool)
-        pos_val = cp.array([255,255,255], dtype = cp.uint8 )
-        neg_val = cp.array([200,126,64], dtype = cp.uint8 )
-        void_val = cp.array([52,37,30], dtype = cp.uint8)
-        #if trigger_time[0]
-        #plt.figure()
-        #plt.plot(trigger_data['t'], trigger_data['p'])
-        #plt.show()
-        for j in tqdm(range(n_trigger), desc = 'reading hdf5 events'):
-            if j % 2 != 0:
-                continue
-            slice_ = (t >= trigger_time[j]) * (t <= trigger_time[j+1])
-            image_holder = cp.full([720,1280,3], void_val)
-            for fill, polarity in zip([pos_val, neg_val],[pos_polarity, ~pos_polarity]):
-                local_slice = slice_ * polarity
-                x_local = x[local_slice]
-                y_local = y[local_slice]
-                image_holder[y_local, x_local] = fill
-            image_stack.append(image_holder.get().copy())
-        image_stack = np.stack(image_stack)
-        return image_stack
-
-    def _load_raw_to_numpy_(self, event_file, delta_t):
-        mv_iterator = EventsIterator(
-                event_file,
-                delta_t = delta_t,
-                mode = "delta_t",
-                start_ts = 0,
+        @magicgui(call_button="flip layer left/right",
+                layer_name = {'label':'Layer name'}
                 )
-        height,width = mv_iterator.get_size()
-        image_buffer = np.zeros([height, width, 3], dtype = np.uint8)
-        print(delta_t, height, width, image_buffer.shape)
-        images = []
-        for q, ev in tqdm(enumerate(mv_iterator), desc = "raw --> numpy"):
-            BaseFrameGenerationAlgorithm.generate_frame(ev, image_buffer)
-            images.append(image_buffer.copy())
-        return np.stack(images)
-
-    def _diff_layer_(self):
-        @magicgui(call_button="Diff Layer")
-        def inner(
-                layer_name: str = "frame",
-                median_kernel: int = 3,
-                ):
-            frame_handle = self.__fetch_layer__(layer_name).data
-            cp_free_mem()
-            n_frames = frame_handle.shape[0]
-            kernel = (1, median_kernel, median_kernel)
-            output = np.zeros(frame_handle.shape, dtype = np.float32)
-            print(n_frames, type(n_frames))
-            for j in tqdm(range(n_frames-1), desc = "diff frame"):
-                slice_ = slice(j,j+2)
-                cp_arr = cp.array(frame_handle[slice_], dtype = cp.float32)
-                cp_arr = median_filter(cp_arr, kernel)
-                diff = cp_arr[1] - cp_arr[0]
-                output[j] = diff.get()
-            cp_free_mem()
-            inst.viewer.add_image(output[:-1], name = "diff frame",
-                    colormap = "hsv")
+        def inner(layer_name: str = 'event'):
+            handle = self.__fetch_layer__(layer_name)
+            handle.data = handle.data[:,:,::-1]
+            print(f"Flipped {layer_name} LR")
         return inner
 
     def _set_frame_after_shutter_(self):
@@ -471,83 +445,10 @@ class spatio_temporal_registration_gui:
 
         return inner
 
-    def __extract_folder_metadata__(self, folder_name) -> None:
-        """
-        this method extracts some of the experiment meta data from the file
-        name
-        """
-        print("-----------> DEPRECATED FUNCTIONALITY")
-        components = folder_name.parts
-        for elem in components:
-            if "cytovia" in elem.lower():
-                microscope = 'cytovia'
-                break
-            elif "evanescent" in elem.lower():
-                microscope = 'evanescent'
-                break
-        else:
-            #assert False, "No Microscope in File name"
-            microscope = "unknown_instrument"
-            data_set = "data_set_temp"
 
-        data_set = str(folder_name.name).split(".tif")[0]
-        fps = int(data_set.split("_")[3].split("fps")[0])
-        print("fps = ",fps)
-
-
-        self.microscope = microscope
-        self.dataset = data_set
-        self.fps = fps
-        self.delta_t = int(round(1e6/fps))
-
-    def __fetch_layer__(self, layer_name: str):
-        """
-        Helper function so that the layers can be re-ordered
-        """
-        for layer in self.viewer.layers:
-            if layer.name == layer_name:
-                return layer
-        else:
-            print(f"Layer {layer_name} not found")
-            return 
-
-    def __write_transform_info__(self, out_directory) -> None:
-        """
-        Writes the synchronization info to a csv file (tab delimited)
-        """
-        file_name_prefix = f"{self.microscope}_{self.dataset}"
-        points = self.__fetch_layer__("Points").data
-        frame_shape  = inst.__fetch_layer__("frame").data.shape
-        affine_mat = self.affine_matrix
-        horz_scale = affine_mat[0,0]
-        horz_shear = affine_mat[0,1]
-        horz_translation = affine_mat[0,2]
-        vert_shear = affine_mat[1,0]
-        vert_scale = affine_mat[1,1]
-        vert_translation = affine_mat[1,2]
-        # This is the alignment time could be + or -
-        time_alignment = -1 * self.total_shift * self.delta_t
-        time_0 = time_alignment + self.frame_0 * self.delta_t
-        duration = (frame_shape[0] - self.frame_0) * self.delta_t
-        time_end = time_0 + duration
-        params = {
-                  "path_to_raw":str(self.event_dir),
-                  "path_to_frame":str(self.frame_dir),
-                  "time_init":time_0/1e6,
-                  "time_end":time_end/1e6,
-                  "frame_0":self.frame_0,
-                  "horz_scale":horz_scale,
-                  "horz_shear":horz_shear,
-                  "horz_translation":horz_translation,
-                  "vert_shear":vert_scale,
-                  "vert_scale":vert_shear,
-                  "vert_translation":vert_translation
-                  }
-
-        with open(out_directory / f"{file_name_prefix}_sync.csv", 'w') as f:
-            for param, val in params.items():
-                f.write(f"{param}\t{val}\n")
-
+    #--------------------------------------------------------------------------
+    #                               TRACKING    
+    #--------------------------------------------------------------------------
     def _preview_track_centroids_(self):
         @magicgui(call_button="Locate Centroids",
                 layer_name = {'label':'Layer Name'},
@@ -682,32 +583,6 @@ class spatio_temporal_registration_gui:
 
             self.viewer.add_tracks(t1[['particle','frame','y','x']])
 
-        return inner
-
-    def _tform_event_to_rvt_(self):
-        @magicgui(
-                call_button="Apply RVT",
-                layer_name = {'label':'Layer Name'},
-                rmin = {'label':'R Min', 'max': 1e16},
-                rmax = {'label':'R Max', 'max': 1e16},
-                )
-        def inner(
-                layer_name: str,
-                rmin: int,
-                rmax: int,
-                ):
-            layer_handle = self.__fetch_layer__(layer_name).data
-            assert layer_handle.ndim == 3, "RVT only works for 3d image stacks"
-            n_im = layer_handle.shape[0]
-            temp = np.zeros(layer_handle.shape).astype(np.float32)
-            for j in tqdm(range(n_im), desc = "applying rvt"):
-                # GPU implementation?
-                cp_arr = cp.array(layer_handle[j], dtype = np.float32)
-                temp[j] = rvt(cp_arr, rmin = rmin, rmax = rmax).get()
-                # CPU implementation?
-                #cp_arr = np.array(layer_handle[j], dtype = np.float32)
-                #temp[j] = rvt(cp_arr, rmin = rmin, rmax = rmax)
-            self.viewer.add_image(temp, name = f'{layer_name} RVT' )
         return inner
 
     def __calc_bayesian__(self, track_id, track_handle, fps, mpp) -> np.array:
@@ -899,6 +774,102 @@ class spatio_temporal_registration_gui:
             
         return inner
 
+    #--------------------------------------------------------------------------
+    #                               FILTERS    
+    #--------------------------------------------------------------------------
+    def _apply_event_noise_filter_(self):
+        @magicgui(
+                call_button="Apply Interpolation Event Noise Filter",
+                scale = {'label':'Scale'},
+                filter_length = {'label':'filter_length', 'max': 1e16},
+                update_factor = {'label':'update_factor', 'step': 1e-6 },
+                interpolation_method = {'label':'interpolation method'}
+                )
+        def inner(scale: int = 10, 
+                  filter_length: int = 1e3,
+                  update_factor: float = 0.25,
+                  interpolation_method: int = 0,
+                  ) -> np.array:
+            """
+            Apply Event Noise filter
+                interpolation_methods:
+                    - 0: bilinear
+                    - 1: bilinear with interval weights
+                    - 2: max
+                    - 3: distance
+            """
+            # NOISE FILTER
+            frame_size = np.array([720, 1280], dtype = np.int64)
+            print(f"Hard coded image frame size: {frame_size}")
+            interpolation_method_str = {
+                    0:"bilinear",
+                    1:"bilinear with interval weights",
+                    2:"max",
+                    3:"distance"
+                    }[interpolation_method]
+            print(f"using interpolation method: {interpolation_method_str}")
+
+            noise_filter = event_filter_interpolation_compiled(
+                                    frame_size = frame_size,
+                                    filter_length = filter_length,
+                                    scale = scale,
+                                    update_factor = update_factor,
+                                    interpolation_method = interpolation_method,
+                                    filtered_ts = None,
+                                    )
+            events = self.__read_hdf5__(self.event_file, "CD")
+            noise_filter.processEvents(events)
+            self.eventBin = noise_filter.eventsBin
+            event_stack = self._hdf5_to_numpy_(events[noise_filter.eventsBin],
+                                               acc_time = self.event_acc_time,
+                                               thresh = self.event_dead_px_thresh,
+                                               num_images = self.num_event_images
+                                               )
+
+            inst.viewer.add_image(event_stack, colormap = 'plasma', 
+                                  name = 'event filtered')
+
+        return inner
+
+    def _apply_rvt_to_layer_(self):
+        @magicgui(
+                call_button="Apply RVT",
+                layer_name = {'label':'Layer Name'},
+                rmin = {'label':'R Min', 'max': 1e16},
+                rmax = {'label':'R Max', 'max': 1e16},
+                upsample = {'label':'Up sample'},
+                highpass_size = {'label':'Highpass Size (-1 for None)'},
+                kind = {'label':'Kind (normalized or basic)'},
+                )
+        def inner(
+                layer_name: str,
+                rmin: int,
+                rmax: int,
+                upsample: int = 1,
+                highpass_size: float = -1.0,
+                kind: str = "normalized"
+                ):
+            layer_handle = self.__fetch_layer__(layer_name).data
+            assert layer_handle.ndim == 3, "RVT only works for 3d image stacks"
+            n_im = layer_handle.shape[0]
+            temp = np.zeros(layer_handle.shape).astype(np.float32)
+            if highpass_size <= 0:
+                highpass_size = None
+            for j in tqdm(range(n_im), desc = "applying rvt"):
+                # GPU implementation?
+                cp_arr = cp.array(layer_handle[j], dtype = np.float32)
+                temp[j] = rvt(
+                              cp_arr, 
+                              rmin = rmin,
+                              rmax = rmax,
+                              highpass_size = highpass_size,
+                              kind = kind,
+                              upsample = upsample,
+                              ).get()
+                # CPU implementation?
+            self.viewer.add_image(temp, name = f'{layer_name} RVT' )
+        return inner
+
     def _apply_gaussian_layer_(self):
         @magicgui(
                 call_button="Apply 2D Gaussian Filter",
@@ -939,24 +910,42 @@ class spatio_temporal_registration_gui:
             self.viewer.add_image(temp, name = f'{layer_name} Median Filtered' )
         return inner
 
-    def _convert_event_to_grayscale_(self):
+    def _abs_of_layer_(self):
         @magicgui(
-                call_button="Apply 2D Median Filter",
+                call_button="Absolute Value of Layer",
                 layer_name = {'label':'Layer Name'},
-                kernel = {'label':'kernel size','max': 100, "step": 2 }
                 )
         def inner(
                 layer_name: str,
-                kernel: int = 3
                 ):
-            layer_handle = self.__fetch_layer__(layer_name).data
-            assert layer_handle.ndim == 3, "median_filter only works for 3d image stacks"
-            n_im = layer_handle.shape[0]
-            temp = np.zeros_like(layer_handle).astype(np.float32)
-            for j in tqdm(range(n_im), desc = "applying median_filter"):
-                cp_arr = cp.array(layer_handle[j], dtype = np.float32)
-                temp[j] = median_filter(cp_arr, (kernel,kernel)).get()
-            self.viewer.add_image(temp, name = f'{layer_name} Median Filtered' )
+            self.__fetch_layer__(layer_name).data = np.abs(self.__fetch_layer__(layer_name).data)
+            print(f"Applied absolute value to {layer_name}")
+        return inner
+
+    def _diff_layer_(self):
+        """
+        this is for "approximating" an event image by diffing two images
+        """
+        @magicgui(call_button="Simulate events from layer (diff layer)")
+        def inner(
+                layer_name: str = "frame",
+                median_kernel: int = 3,
+                ):
+            frame_handle = self.__fetch_layer__(layer_name).data
+            cp_free_mem()
+            n_frames = frame_handle.shape[0]
+            kernel = (1, median_kernel, median_kernel)
+            output = np.zeros(frame_handle.shape, dtype = np.float32)
+            print(n_frames, type(n_frames))
+            for j in tqdm(range(n_frames-1), desc = "diff frame"):
+                slice_ = slice(j,j+2)
+                cp_arr = cp.array(frame_handle[slice_], dtype = cp.float32)
+                cp_arr = median_filter(cp_arr, kernel)
+                diff = cp_arr[1] - cp_arr[0]
+                output[j] = diff.get()
+            cp_free_mem()
+            inst.viewer.add_image(output[:-1], name = "diff frame",
+                    colormap = "hsv")
         return inner
 
     def _isolate_event_channels_(self):
@@ -1004,6 +993,105 @@ class spatio_temporal_registration_gui:
                 out_pos[j] = 255*cp.prod(cp_arr != none_val, axis = -1).astype(cp.uint8).get()
             self.viewer.add_image(out_pos, name = "event combined", colormap = 'gray')
         return inner
+
+    #--------------------------------------------------------------------------
+    #                               UTILS (dunder)
+    #--------------------------------------------------------------------------
+    def __fetch_layer__(self, layer_name: str):
+        """
+        Helper function so that the layers can be re-ordered
+        """
+        for layer in self.viewer.layers:
+            if layer.name == layer_name:
+                return layer
+        else:
+            print(f"Layer {layer_name} not found")
+            return 
+
+    def __free_memory__(self):
+        @magicgui(
+                call_button="Free Memory",
+                )
+        def inner():
+            cp_free_mem()
+            gc.collect()
+            print("CUDA memory freed and Garbage Collected")
+        return inner
+
+    def __compute__(self):
+        @magicgui(
+                call_button="Evaluate lazy array (dask -> numpy)",
+                )
+        def inner(layer_name: str):
+            handle = self.__fetch_layer__("event").data
+            handle = handle.compute()
+        return inner
+
+    def __extract_folder_metadata__(self, folder_name) -> None:
+        """
+        this method extracts some of the experiment meta data from the file
+        name
+        """
+        print("-----------> DEPRECATED FUNCTIONALITY")
+        components = folder_name.parts
+        for elem in components:
+            if "cytovia" in elem.lower():
+                microscope = 'cytovia'
+                break
+            elif "evanescent" in elem.lower():
+                microscope = 'evanescent'
+                break
+        else:
+            #assert False, "No Microscope in File name"
+            microscope = "unknown_instrument"
+            data_set = "data_set_temp"
+
+        data_set = str(folder_name.name).split(".tif")[0]
+        fps = int(data_set.split("_")[3].split("fps")[0])
+        print("fps = ",fps)
+
+
+        self.microscope = microscope
+        self.dataset = data_set
+        self.fps = fps
+        self.delta_t = int(round(1e6/fps))
+
+    def __write_transform_info__(self, out_directory) -> None:
+        """
+        Writes the synchronization info to a csv file (tab delimited)
+        """
+        file_name_prefix = f"{self.microscope}_{self.dataset}"
+        points = self.__fetch_layer__("Points").data
+        frame_shape  = inst.__fetch_layer__("frame").data.shape
+        affine_mat = self.affine_matrix
+        horz_scale = affine_mat[0,0]
+        horz_shear = affine_mat[0,1]
+        horz_translation = affine_mat[0,2]
+        vert_shear = affine_mat[1,0]
+        vert_scale = affine_mat[1,1]
+        vert_translation = affine_mat[1,2]
+        # This is the alignment time could be + or -
+        time_alignment = -1 * self.total_shift * self.delta_t
+        time_0 = time_alignment + self.frame_0 * self.delta_t
+        duration = (frame_shape[0] - self.frame_0) * self.delta_t
+        time_end = time_0 + duration
+        params = {
+                  "path_to_raw":str(self.event_dir),
+                  "path_to_frame":str(self.frame_dir),
+                  "time_init":time_0/1e6,
+                  "time_end":time_end/1e6,
+                  "frame_0":self.frame_0,
+                  "horz_scale":horz_scale,
+                  "horz_shear":horz_shear,
+                  "horz_translation":horz_translation,
+                  "vert_shear":vert_scale,
+                  "vert_scale":vert_shear,
+                  "vert_translation":vert_translation
+                  }
+
+        with open(out_directory / f"{file_name_prefix}_sync.csv", 'w') as f:
+            for param, val in params.items():
+                f.write(f"{param}\t{val}\n")
 
 
 if __name__ == "__main__":

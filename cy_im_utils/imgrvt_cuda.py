@@ -181,8 +181,8 @@ def rvt_core(img,
     else: # calculate MoV for normalization
         imgsq_fft=prepare_fft(img**2,fshape,pad_mode=pad_mode) # prepare image FFT
         if rweights is None:
-            print("--->", type(kernels_fft))
-            print("--->", cp.stack(kernels_fft).shape)
+            #print("--->", type(kernels_fft))
+            #print("--->", cp.stack(kernels_fft).shape)
             sumk_fft=cp.mean(cp.stack(kernels_fft),axis=0) # find combined kernel as a standard mean
             mov=convolve_fft(imgsq_fft,sumk_fft,s1,s2,fshape,fast_mode=fast_mode)-cp.mean(rmeans**2,axis=0) # use the combined kernel to find MoV in one convolution
         else:

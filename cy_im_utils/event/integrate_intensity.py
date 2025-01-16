@@ -6,7 +6,6 @@ import h5py
 import numpy as np
 
 
-
 @njit(void(float32[:,:], uint16[:], uint16[:], boolean[:]))
 def _integrate_events_(image, x, y, p) -> None:
     """
@@ -81,64 +80,117 @@ class hdf5_event_integrator:
         return out
 
 
-@njit(void(int64, int64, int64[:], int64[:,:]))
-def fetch_timestep_indices(dt, t0, arr, output):
+@njit(void(int64[:], int64, int64[:], int64[:,:]))
+def _fetch_indices_(triggers, acc_time, timestamp_arr, output) -> None:
     """
-    This iterates over large ( > 8 GB ) timestamp arrays and finds the indices
-    where the timesteps bound the events...?
+    This returns the indices for a given temporal slicing scheme note dt and
+    acc_time do not have to be the same
+    This one is pre-compiled since it is only called once and needs performance
+    for that one call
+
+    Parameters:
+    -----------
+        triggers: np.array(int64) - processed super sampled triggers
+        acc_time: int64 - acuumulation (integration) time step
+        timetamp_arr: np.array(int64) [1d] - timestamp array with same shape as x,
+                      y, and p
+        output: np.array(int64) [n x 2] - array for holding the timestamp
+                      indicies
     """
-    n_elem = arr.size
-    i_max = output.shape[0]
-    i = 0
-    t0_bool = False
+    n_elem = timestamp_arr.size
+    n_timestamp = output.shape[0]
+    i,j = 0, 0
     for elem in range(n_elem):
-        # Find First time stamp
-        t_current = arr[elem]
-        cond_0 = t_current > (t0 + i*dt)
-        cond_1 = t_current > (t0 + (i+1)*dt)
-        cond_2 = i < i_max
-
-        # Found first time stamp...?
-        if cond_0 and not t0_bool and cond_2:
-            output[i,0] = elem
-            t0_bool = True
-
-        # Found Next time stamp...?
-        if cond_1 and t0_bool and cond_2:
-            output[i,1] = elem
-            t0_bool = False
-            i += 1
+        t_current = timestamp_arr[elem]
+        cond_0 = t_current >= triggers[j]
+        if cond_0:
+            for q in range(elem, n_elem):
+                inter_time = timestamp_arr[q]
+                cond_1 = inter_time > t_current + acc_time
+                if cond_1:
+                    j += 1
+                    break
+            if i >= n_timestamp:
+                break
+            else:
+                output[i] = elem, q
+                i+=1
 
 
-@njit(void(int64[:,:], int64[:], int64[:,:]))
-def fetch_timestep_triggers(triggers, time_arr, output) -> None:
+@njit(void(int64[:], int64, int64[:,:], int64))
+def _fetch_indices_no_triggers_(t, dt, indices, t0: np.int64 = 0) -> None:
     """
-    Triggers should be a [n x 2] array
+    This is for files that have no triggers in the hdf5 file, so they can be
+    handled like regular image stacks...
     """
-    n_elem = time_arr.size
-    print("n_elem = ",n_elem)
-    i_max = output.shape[0]
-    print("i_max = ",i_max)
-    i = 0
-    t0_bool = False
-    for elem in range(n_elem):
-        # Find First time stamp
-        t_current = time_arr[elem]
-        cond_0 = t_current > triggers[i,0]
-        cond_1 = t_current > triggers[i,1]
-        cond_2 = i < i_max
+    n_images = indices.shape[0]
+    n_event = t.shape[0]
+    trigger_idx = 0
+    for i in range(n_event):
+        current_time = t[i]
+        cond_0 = current_time > t0
+        if not cond_0:
+            continue
+        for j in range(i,n_event):
+            elapsed_time = t[j] - current_time
+            if elapsed_time < dt:
+                continue
+            else:
+                break
+        if trigger_idx >= n_images:
+            break
+        indices[trigger_idx, :] = i, j
+        t0 = t[j]
+        trigger_idx += 1
 
-        # Found first time stamp...?
-        if cond_0 and not t0_bool and cond_2:
-            output[i,0] = elem
-            t0_bool = True
 
-        # Found Next time stamp...?
-        if cond_1 and t0_bool and cond_2:
-            output[i,1] = elem
-            t0_bool = False
-            i += 1
+def fetch_indices_wrapper(triggers, 
+                          acc_time,
+                          timestamp_arr, 
+                          super_sampling,
+                          frame_comp_triggers: int = 1000
+                          ) -> np.array:
+    """
+    This function is for fetching the indices that correspond to the triggers
+    or alternatively if there are no triggers, it is intended to fetch the
+    indices that correspond with a given spacing for acc_time....
+        - might need flexibility to sample overlapping accumulation times...?
+    """
+    if triggers is not None:
+        tr_handle = triggers[::2]
+        n_iter = tr_handle.shape[0] * super_sampling
+        idx_holder = np.zeros([n_iter, 2], dtype = np.int64)
+        print("SAMPLING OVER ALL TRIGGERS ignoring frame comparison triggers arg")
+        print(f"trigger shape = {tr_handle.shape}")
+        diff = np.diff(tr_handle)
+        dts = diff / super_sampling
 
+        # What does this do?
+        extra_steps = []
+        for j in range(1, super_sampling):
+            extra_steps.append(np.round(tr_handle[:-1] + dts*j))
+
+        if len(extra_steps) > 0:
+            extra_steps = np.hstack(extra_steps)
+        else:
+            print("sampling triggers 1:1")
+        triggers_processed = np.hstack([tr_handle,extra_steps]).astype(np.int64)
+        triggers_processed = np.sort(triggers_processed)
+        print("---> Calling compiled fetch indices")
+        _fetch_indices_(triggers_processed, acc_time, timestamp_arr, idx_holder)
+        print("<---")
+    elif triggers is None:
+        print("NO TRIGGERS FETCHING EVENLY SPACED ACC TIME OVER TIMES")
+        n_iter = frame_comp_triggers * super_sampling
+        idx_holder = np.zeros([n_iter, 2], dtype = np.int64)
+        _fetch_indices_no_triggers_(timestamp_arr,
+                                    dt = acc_time,
+                                    indices = idx_holder, 
+                                    t0 = 0)
+    else:
+        assert False, "problem with triggers....."
+
+    return idx_holder
 
 
 def __get__(arr):
@@ -307,6 +359,8 @@ def hdf5_integrator(file_name,
 
     f_name = "/tmp/integrated.tif"
     imwrite(f_name, image_stack_global)
+
+
 
 
 if __name__ == "__main__":
