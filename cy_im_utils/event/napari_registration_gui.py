@@ -88,11 +88,11 @@ class spatio_temporal_registration_gui:
         self.track_holder = {}
 
         dock_widgets = {
-                'load data': [
+                'Data Loading': [
                               self._load_frame_(),
                               self._load_event_(),
                               ],
-                'Registration Ops': [
+                'Registration': [
                               self._flip_ud_(),
                               self._flip_lr_(),
                               self._load_affine_mat_(),
@@ -105,15 +105,16 @@ class spatio_temporal_registration_gui:
                 'Filtering':[
                             self._diff_layer_(),
                             self._apply_event_noise_filter_(),
-                            #self._isolate_event_channels_(),
+                            self._isolate_event_channels_(),
                             #self._combine_event_channels_(),
                             self._abs_of_layer_(),
+                            self._preview_rvt_filter_(),
                             self._apply_rvt_to_layer_(),
                             self._apply_gaussian_layer_(),
                             self._apply_median_layer_(),
 
                 ],
-                'Tracking Ops':[
+                'Tracking':[
                             self._preview_track_centroids_(),
                             self._track_batch_locate_(),
                             self._track_link_(),
@@ -152,6 +153,7 @@ class spatio_temporal_registration_gui:
                   acc_time = {'label': "Accumulation Time",'max':1e16},
                   num_images = {'label': "Number of Images (-1 for all triggers)",'max':1e16},
                   event_thresh = {'label': "Dead Pixel Threshold",'max':1e16},
+                  super_sampling = {'label': "Samples per trigger"}
                   )
         def inner(
                 event_file: Path = Path.home(),
@@ -159,11 +161,13 @@ class spatio_temporal_registration_gui:
                 acc_time: float = 0.0,
                 event_thresh: float = 0.0,
                 num_images: int = -1,
+                super_sampling: int = 1,
                 ):
             self.event_file = event_file
             self.event_acc_time = acc_time
             self.event_dead_px_thresh = event_thresh
             self.num_event_images = num_images
+            self.super_sampling = super_sampling
             event_files = event_file.as_posix()
             print(event_files)
             msg = "use hdf5 format (metavision_file_to_hdf5 -i <input>.raw -o <output>.hdf5)"
@@ -171,9 +175,11 @@ class spatio_temporal_registration_gui:
             print("Reading .hdf5 file")
             cd_data = self.__read_hdf5__(event_file, "CD")
 
-            event_stack = self._hdf5_to_numpy_(cd_data,
+            event_stack = self._hdf5_to_numpy_(
+                                               cd_data,
                                                acc_time,
                                                thresh = event_thresh,
+                                               super_sampling = self.super_sampling,
                                                num_images = self.num_event_images
                                                )
 
@@ -216,6 +222,7 @@ class spatio_temporal_registration_gui:
                         acc_time: float, 
                         thresh: float,
                         num_images: int,
+                        super_sampling: int,
                         width: int = 720,
                         height: int = 1280,
                         ) -> np.array:
@@ -228,23 +235,30 @@ class spatio_temporal_registration_gui:
         (discontinuous event data)
         """
         trigger_data = self.__read_hdf5__(self.event_file, "EXT_TRIGGER")['t']
-        if trigger_data.shape[0] == 0:
+        if trigger_data.shape[0] == 0 and num_images != -1:
+            print("No triggers found")
             trigger_data = None
         else:
             print(f"trigger shape = {trigger_data.shape} (2x the triggers)")
-        trigger_indices = fetch_indices_wrapper(trigger_data,
-                                                acc_time,
-                                                cd_data['t'],
-                                                super_sampling = 1,
-                                                frame_comp_triggers = num_images
-                                                )
+        trigger_indices = fetch_indices_wrapper(
+                                            trigger_data,
+                                            acc_time,
+                                            cd_data['t'],
+                                            super_sampling = super_sampling,
+                                            frame_comp_triggers = num_images
+                                            )
         print("fetched indices")
-        n_im = trigger_indices.shape[0]
+        if num_images == -1:
+            print("sampling all triggers")
+            n_im = trigger_indices.shape[0]
+        else:
+            print(f"only taking first {num_images} images (subset of total triggers)")
+            n_im = num_images
         image_stack = np.zeros([n_im, width, height], dtype = np.float32)
         image_buffer = np.zeros([width, height], dtype = np.float32)
 
-
-        for j, (id_0, id_1) in tqdm(enumerate(trigger_indices), desc = "reading hdf5"):
+        for j in tqdm(range(n_im), desc = "reading hdf5"):
+            id_0, id_1 = trigger_indices[j]
             image_buffer[:] = 0
             slice_ = slice(id_0, id_1, 1)
             _integrate_events_(image_buffer, 
@@ -335,7 +349,6 @@ class spatio_temporal_registration_gui:
             if remainder > 0:
                 n_batch += 1
             cp_free_mem()
-            print("potential speedup for 4D affine transform...")
             for q in tqdm(range(n_batch)):
                 upper_lim = min((q+1)*batch_size, nz)
                 local_batch_size = upper_lim - batch_size*q
@@ -767,7 +780,13 @@ class spatio_temporal_registration_gui:
             bay_diam = kb * T / (3 * np.pi * eta * bay[:,0] * 1e-12) * 1e9
             ax[1,2].hist(bay_diam, bins = bins)
             fig.tight_layout()
-            f_name = "/tmp/_delete_me_.png"
+            if Path("/tmp").is_dir():
+                dir_local = Path("/tmp")
+            else:
+                dir_local = Path(".")
+
+            f_name = dir_local / "_delete_me_.png"
+
             fig.savefig(f_name, dpi = 200)
             self.viewer.add_image(np.asarray(Image.open(f_name)), 
                                 name = f"msd {track_id}")
@@ -788,7 +807,7 @@ class spatio_temporal_registration_gui:
         def inner(scale: int = 10, 
                   filter_length: int = 1e3,
                   update_factor: float = 0.25,
-                  interpolation_method: int = 0,
+                  interpolation_method: int = 3,
                   ) -> np.array:
             """
             Apply Event Noise filter
@@ -820,54 +839,38 @@ class spatio_temporal_registration_gui:
             events = self.__read_hdf5__(self.event_file, "CD")
             noise_filter.processEvents(events)
             self.eventBin = noise_filter.eventsBin
-            event_stack = self._hdf5_to_numpy_(events[noise_filter.eventsBin],
-                                               acc_time = self.event_acc_time,
-                                               thresh = self.event_dead_px_thresh,
-                                               num_images = self.num_event_images
-                                               )
+            event_stack = self._hdf5_to_numpy_(
+                                           events[noise_filter.eventsBin],
+                                           acc_time = self.event_acc_time,
+                                           thresh = self.event_dead_px_thresh,
+                                           super_sampling = self.super_sampling,
+                                           num_images = self.num_event_images
+                                           )
 
-            inst.viewer.add_image(event_stack, colormap = 'plasma', 
+            inst.viewer.add_image(event_stack, colormap = 'viridis', 
                                   name = 'event filtered')
 
         return inner
 
     def _apply_rvt_to_layer_(self):
-        @magicgui(
-                call_button="Apply RVT",
-                layer_name = {'label':'Layer Name'},
-                rmin = {'label':'R Min', 'max': 1e16},
-                rmax = {'label':'R Max', 'max': 1e16},
-                upsample = {'label':'Up sample'},
-                highpass_size = {'label':'Highpass Size (-1 for None)'},
-                kind = {'label':'Kind (normalized or basic)'},
-                )
-        def inner(
-                layer_name: str,
-                rmin: int,
-                rmax: int,
-                upsample: int = 1,
-                highpass_size: float = -1.0,
-                kind: str = "normalized"
-                ):
-            layer_handle = self.__fetch_layer__(layer_name).data
-            assert layer_handle.ndim == 3, "RVT only works for 3d image stacks"
+        @magicgui(call_button="Apply RVT (to previewed layer)")
+        def inner():
+            layer_handle = self.__fetch_layer__(self.rvt_layer_name).data
             n_im = layer_handle.shape[0]
             temp = np.zeros(layer_handle.shape).astype(np.float32)
-            if highpass_size <= 0:
-                highpass_size = None
             for j in tqdm(range(n_im), desc = "applying rvt"):
                 # GPU implementation?
                 cp_arr = cp.array(layer_handle[j], dtype = np.float32)
                 temp[j] = rvt(
                               cp_arr, 
-                              rmin = rmin,
-                              rmax = rmax,
-                              highpass_size = highpass_size,
-                              kind = kind,
-                              upsample = upsample,
+                              rmin = self.rvt_rmin,
+                              rmax = self.rvt_rmax,
+                              highpass_size = self.rvt_highpass_size,
+                              kind = self.rvt_kind,
+                              upsample = self.rvt_upsample,
                               ).get()
                 # CPU implementation?
-            self.viewer.add_image(temp, name = f'{layer_name} RVT' )
+            self.viewer.add_image(temp, name = f'{self.rvt_layer_name} RVT' )
         return inner
 
     def _apply_gaussian_layer_(self):
@@ -922,6 +925,27 @@ class spatio_temporal_registration_gui:
             print(f"Applied absolute value to {layer_name}")
         return inner
 
+    def _combine_event_channels_(self):
+        @magicgui(
+                call_button="|Event| -> grayscale",
+                )
+        def inner(
+                layer_name: str = 'event',
+                ):
+            layer_handle = self.__fetch_layer__(layer_name).data
+            assert layer_handle.ndim == 4, "needs 4 channel event data..."
+            nz,nx,ny,_ = layer_handle.shape
+            out_pos = np.zeros([nz,nx,ny], dtype = np.uint8)
+            out_neg = np.zeros([nz,nx,ny], dtype = np.uint8)
+            none_val = cp.array([52,37,30], dtype = np.uint8)
+            print("Hard Coded VOID polarities:")
+            print(f"\tvoid polarity: {none_val})")
+            for j in tqdm(range(nz)):
+                cp_arr = cp.array(layer_handle[j], dtype = cp.uint8)
+                out_pos[j] = 255*cp.prod(cp_arr != none_val, axis = -1).astype(cp.uint8).get()
+            self.viewer.add_image(out_pos, name = "event combined", colormap = 'gray')
+        return inner
+
     def _diff_layer_(self):
         """
         this is for "approximating" an event image by diffing two images
@@ -973,26 +997,48 @@ class spatio_temporal_registration_gui:
             self.viewer.add_image(out_neg, name = "negative", colormap = 'bop orange')
         return inner
 
-    def _combine_event_channels_(self):
+    def _preview_rvt_filter_(self):
         @magicgui(
-                call_button="|Event| -> grayscale",
+                call_button="Preview RVT",
+                layer_name = {'label':'Layer Name'},
+                rmin = {'label':'R Min', 'max': 1e16},
+                rmax = {'label':'R Max', 'max': 1e16},
+                upsample = {'label':'Up sample'},
+                highpass_size = {'label':'Highpass Size (-1 for None)'},
+                kind = {'label':'Kind (normalized or basic)'},
+                image_idx = {'label':'Image idx'},
                 )
         def inner(
-                layer_name: str = 'event',
+                layer_name: str,
+                rmin: int,
+                rmax: int,
+                upsample: int = 1,
+                highpass_size: float = -1.0,
+                kind: str = "normalized",
+                image_idx: int = 0
                 ):
             layer_handle = self.__fetch_layer__(layer_name).data
-            assert layer_handle.ndim == 4, "needs 4 channel event data..."
-            nz,nx,ny,_ = layer_handle.shape
-            out_pos = np.zeros([nz,nx,ny], dtype = np.uint8)
-            out_neg = np.zeros([nz,nx,ny], dtype = np.uint8)
-            none_val = cp.array([52,37,30], dtype = np.uint8)
-            print("Hard Coded VOID polarities:")
-            print(f"\tvoid polarity: {none_val})")
-            for j in tqdm(range(nz)):
-                cp_arr = cp.array(layer_handle[j], dtype = cp.uint8)
-                out_pos[j] = 255*cp.prod(cp_arr != none_val, axis = -1).astype(cp.uint8).get()
-            self.viewer.add_image(out_pos, name = "event combined", colormap = 'gray')
+            if highpass_size <= 0:
+                highpass_size = None
+            self.rvt_rmin: int = rmin
+            self.rvt_rmax: int = rmax
+            self.rvt_upsample: int = upsample
+            self.rvt_highpass_size = highpass_size
+            self.rvt_layer_name: str = layer_name
+            self.rvt_kind: str = kind
+            cp_arr = cp.array(layer_handle[image_idx], dtype = np.float32)
+            temp = rvt(
+                      cp_arr, 
+                      rmin = self.rvt_rmin,
+                      rmax = self.rvt_rmax,
+                      highpass_size = self.rvt_highpass_size,
+                      kind = self.rvt_kind,
+                      upsample = self.rvt_upsample,
+                      ).get()
+                # CPU implementation?
+            self.viewer.add_image(temp, name = f'{layer_name} RVT preview' )
         return inner
+
 
     #--------------------------------------------------------------------------
     #                               UTILS (dunder)
