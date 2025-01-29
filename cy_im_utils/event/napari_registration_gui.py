@@ -1,6 +1,6 @@
 #!/home/mcd4/miniconda3/envs/openeb/bin/python
 from PIL import Image 
-from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter
+from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter, convolve
 from dask_image.imread import imread
 from magicgui import magicgui
 from napari.qt.threading import thread_worker
@@ -135,7 +135,6 @@ class spatio_temporal_registration_gui:
                               self._write_transforms_(),
                               ],
                 'Filtering':[
-                            self._diff_layer_(),
                             self._isolate_event_sign_(),
                             #self._combine_event_channels_(),
                             self._abs_of_layer_(),
@@ -155,6 +154,7 @@ class spatio_temporal_registration_gui:
                     self.__calculate_axial_median_gpu__(),
                     self.__free_memory__(),
                     self.__compute__(),
+                    self._diff_layer_(),
                     ]
                 }
         tabs = []
@@ -317,8 +317,9 @@ class spatio_temporal_registration_gui:
                   )
         def inner(layer_name: str):
             handle = self.__fetch_layer__(layer_name).data
-            sparse = np.zeros_like(handle)
-            n_im = handle.shape[0]
+            n_im = self.num_event_images
+            out_shape = [n_im, handle.shape[1], handle.shape[2]]
+            sparse = np.zeros(out_shape, dtype = handle.dtype)
             global_idx = 0
             assert self.super_sampling != 1, "super sampling set to 1, not executing"
             sparse[0] = handle[0]
@@ -528,14 +529,13 @@ class spatio_temporal_registration_gui:
                 layer_name = {'label':'Layer Name'},
                 minmass = {'label':'minmass', 'max': 1e16},
                 diameter = {'label':'Diameter', 'max': 1e16},
-                test_frame = {'label':'Test Frame', 'max': 1e16}
                 )
         def inner(
                 layer_name: str,
                 minmass: float,
                 diameter: int,
-                test_frame: int
                 ):
+            test_frame = self.__fetch_viewer_image_index__()
             track_handle = self.__fetch_layer__(layer_name).data[test_frame].copy()
             if track_handle.ndim == 3:
                 print("--> not sure what to do for 4d images?")
@@ -641,7 +641,7 @@ class spatio_temporal_registration_gui:
                 min_length: int,
                 search_range: int,
                 memory: int,
-                drift_bool: bool = True,
+                drift_bool: bool = False,
                 ):
             assert self.track_bool, ("Set the tracking parameters with "
                                      "'preview' before tracking")
@@ -657,9 +657,9 @@ class spatio_temporal_registration_gui:
             self.track_holder[layer_name] = t1.copy()
             # Add Track Centroids to viewer as points layer
             slice_handle = ['frame','y','x']
-            self.viewer.add_points(t1[slice_handle], 
-                                   name = "tracked centroids",
-                                   face_color = 'k')
+            #self.viewer.add_points(t1[slice_handle], 
+            #                       name = "tracked centroids",
+            #                       face_color = 'k')
 
             self.viewer.add_tracks(t1[['particle','frame','y','x']])
 
@@ -698,8 +698,8 @@ class spatio_temporal_registration_gui:
                 max_lagtime = {'label': 'max lagtime', 'max': 1e16},
                 temperature = {'label': 'Temperature (K)', 'max': 1e16},
                 bins = {'label': 'histogram bins', 'min':1e-16, 'max': 1e16},
-                track_key = {'label': 'Track Key (dict)'}
-
+                track_key = {'label': 'Track Key (dict)'},
+                #exclude_tracks = {'label':'Exclude Idx (comma separated)'}
                 )
         def inner(
                 fps: float,
@@ -711,6 +711,7 @@ class spatio_temporal_registration_gui:
                 max_lagtime: int = 100,
                 temperature: float = 295.0,
                 bins: int = 50,
+                #exclude_idx: str = -1
                 ):
             T = temperature
             eta = water_viscosity(T, unit = 'K')
@@ -722,6 +723,7 @@ class spatio_temporal_registration_gui:
                 imsd = tp.motion.imsd(track_handle, **imsd_kwargs)
                 bay = []
                 for elem in track_handle['particle'].unique():
+                    
                     bay.append(self.__calc_bayesian__(elem, track_handle, fps, mpp))
                 bay = np.vstack(bay)
                 #print("--> bay shape all elements:",bay.shape)
@@ -869,9 +871,7 @@ class spatio_temporal_registration_gui:
     #                               FILTERS    
     #--------------------------------------------------------------------------
     def _apply_event_noise_filter_(self):
-        @magicgui(
-                call_button="Apply Interpolation Event Noise Filter",
-                )
+        @magicgui(call_button="Apply Interpolation Event Noise Filter")
         def inner():
             """
             Apply Event Noise filter
@@ -898,10 +898,12 @@ class spatio_temporal_registration_gui:
                                            acc_time = self.event_acc_time,
                                            thresh = self.event_dead_px_thresh,
                                            super_sampling = self.super_sampling,
-                                           num_images = self.num_event_images
+                                           num_images = self.num_event_images,
+                                           write_trigger_indices = False
                                            )
 
-            inst.viewer.add_image(event_stack, colormap = 'viridis', 
+            inst.viewer.add_image(event_stack, 
+                                  colormap = 'viridis', 
                                   name = 'event filtered')
 
         return inner
@@ -913,12 +915,14 @@ class spatio_temporal_registration_gui:
                 filter_length = {'label':'filter_length', 'max': 1e16},
                 update_factor = {'label':'update_factor', 'step': 1e-6 },
                 interpolation_method = {'label':'interpolation method'},
+                n_images = {'label':'Images to filter'},
                 persist = True
                 )
         def inner(scale: int = 10, 
                   filter_length: int = 1e3,
                   update_factor: float = 0.25,
                   interpolation_method: int = 3,
+                  n_images: int = 50
                   ) -> np.array:
             """
             Apply Event Noise filter
@@ -931,6 +935,10 @@ class spatio_temporal_registration_gui:
             # NOISE FILTER
             print(f"Hard coded image frame size: {self.frame_size}")
             self.interpolation_method = interpolation_method
+            self.update_factor = update_factor
+            self.scale = scale
+            self.filter_length = filter_length
+
             interpolation_method_str = {
                     0:"bilinear",
                     1:"bilinear with interval weights",
@@ -938,9 +946,6 @@ class spatio_temporal_registration_gui:
                     3:"distance"
                     }[self.interpolation_method]
             print(f"using interpolation method: {interpolation_method_str}")
-            self.update_factor = update_factor
-            self.scale = scale
-            self.filter_length = filter_length
 
             noise_filter = event_filter_interpolation_compiled(
                                     frame_size = self.frame_size,
@@ -950,7 +955,6 @@ class spatio_temporal_registration_gui:
                                     interpolation_method = self.interpolation_method,
                                     filtered_ts = None,
                                     )
-            n_images = 50
             cd_slice = slice(self.trigger_indices[0,0], 
                              self.trigger_indices[n_images,0],
                              1)
@@ -1050,38 +1054,44 @@ class spatio_temporal_registration_gui:
         return inner
 
     def _apply_conditional_median_layer_(self):
+        """
+        This is meant to remove pixels that are the only activated pixel inside
+        the kernel size. The gaussian/rvt fixates on
+        the convolutions are executed on 2d images so the kernel size never
+        incorporates the image index dimension
+        """
         @magicgui(
-                call_button="Apply Conditional 2D Median Filter",
+                call_button="Remove nonzero outliers",
                 layer_name = {'label':'Layer Name'},
                 kernel = {'label':'kernel size','max': 100, "step": 2 },
-                bool_val = {'label':"value (median == value -> set to zero)"}
                 )
         def inner(
                 layer_name: str,
-                kernel: int = 3,
-                bool_val: float = 0.0 
+                kernel: int = 11,
                 ):
+            print(f"Removing {kernel}x{kernel} nonzero outliers")
+            cp_free_mem()
             layer_handle = self.__fetch_layer__(layer_name).data
+            kernel_cp = cp.ones(kernel**2).reshape(kernel,kernel).astype(np.float32)
             if layer_handle.ndim == 3:
-                print("applying median to 3D image")
                 n_im = layer_handle.shape[0]
                 temp = np.zeros_like(layer_handle).astype(np.float32)
-                for j in tqdm(range(n_im), desc = "applying median_filter"):
+                for j in tqdm(range(n_im), desc = "applying outlier filter"):
                     cp_arr = cp.array(layer_handle[j], dtype = np.float32)
-                    comp_arr = median_filter(cp_arr, (kernel,kernel))
-                    bool_arr = comp_arr == bool_val
+                    comp_arr = convolve(cp_arr, kernel_cp)
+                    bool_arr = comp_arr == cp_arr
                     temp[j] = cp_arr.copy().get()
                     temp[j][bool_arr.get()] = 0
 
             elif layer_handle.ndim == 2:
-                print("applying median to 2D image")
                 cp_arr = cp.array(layer_handle, dtype = np.float32)
-                comp_arr = median_filter(cp_arr, (kernel,kernel)).get()
+                comp_arr = convolve(cp_arr, kernel_cp).get()
                 bool_arr = comp_arr == bool_val
                 temp = cp_arr.copy().get()
                 temp[bool_arr.get()]
 
-            self.viewer.add_image(temp, name = f'{layer_name} Median Filtered' )
+            self.viewer.add_image(temp, name = f'{layer_name} outlier filtered' )
+            cp_free_mem()
         return inner
 
 
@@ -1089,6 +1099,7 @@ class spatio_temporal_registration_gui:
         @magicgui(
                 call_button="Absolute Value of Layer",
                 layer_name = {'label':'Layer Name'},
+                persist = True
                 )
         def inner(
                 layer_name: str,
@@ -1173,7 +1184,9 @@ class spatio_temporal_registration_gui:
                 upsample = {'label':'Up sample'},
                 highpass_size = {'label':'Highpass Size (-1 for None)'},
                 kind = {'label':'Kind (normalized or basic)'},
-                image_idx = {'label':'Image idx', 'max':1e16},
+                coarse_factor = {'label':"Coarse factor"},
+                coarse_mode = {'label':"Coarse mode"},
+                median_bool = {'label':'Apply median after RVT (3x3)'}
                 )
         def inner(
                 layer_name: str,
@@ -1182,9 +1195,12 @@ class spatio_temporal_registration_gui:
                 upsample: int = 1,
                 highpass_size: float = -1.0,
                 kind: str = "normalized",
-                image_idx: int = 0
+                coarse_factor: int = 1,
+                coarse_mode: str = "add",
+                median_bool: bool = True,
                 ):
             layer_handle = self.__fetch_layer__(layer_name).data
+            image_idx = self.__fetch_viewer_image_index__()
             if highpass_size <= 0:
                 highpass_size = None
             self.rvt_rmin: int = rmin
@@ -1193,6 +1209,8 @@ class spatio_temporal_registration_gui:
             self.rvt_highpass_size = highpass_size
             self.rvt_layer_name: str = layer_name
             self.rvt_kind: str = kind
+            self.rvt_coarse_factor: int = coarse_factor
+            self.rvt_coarse_mode: str = coarse_mode
             cp_arr = cp.array(layer_handle[image_idx], dtype = np.float32)
             upsample_slice = (
                                slice(0, None, upsample),
@@ -1204,9 +1222,15 @@ class spatio_temporal_registration_gui:
                       rmax = self.rvt_rmax,
                       highpass_size = self.rvt_highpass_size,
                       kind = self.rvt_kind,
+                      coarse_factor = self.rvt_coarse_factor,
+                      coarse_mode = self.rvt_coarse_mode,
                       upsample = self.rvt_upsample,
-                      ).get()[upsample_slice]
-                # CPU implementation?
+                      )[upsample_slice]
+            if median_bool:
+                print("applying median to RVT image")
+                temp = median_filter(temp, (3,3)).get()
+            else:
+                temp = temp.get()
             self.viewer.add_image(temp, name = f'{layer_name} RVT preview' )
         return inner
 
@@ -1345,6 +1369,16 @@ class spatio_temporal_registration_gui:
         with open(out_directory / f"{file_name_prefix}_sync.csv", 'w') as f:
             for param, val in params.items():
                 f.write(f"{param}\t{val}\n")
+
+    def __fetch_viewer_image_index__(self) -> int:
+        """
+        little hack for fetching the current layer that napari is looking at 
+        """
+        idx = [elem[1][0] for elem in list(self.viewer.dims) if elem[0] == 'point']
+        if len(idx) == 0:
+            return 0
+        else:
+            return int(idx[0])
 
 
 if __name__ == "__main__":
