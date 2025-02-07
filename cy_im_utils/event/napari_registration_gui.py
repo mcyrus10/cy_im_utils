@@ -1,5 +1,6 @@
 #!/home/mcd4/miniconda3/envs/openeb/bin/python
 from PIL import Image 
+from enum import Enum 
 from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter, convolve
 from dask_image.imread import imread
 from magicgui import magicgui
@@ -33,6 +34,7 @@ from cy_im_utils.event.trackpy_utils import imsd_powerlaw_fit, imsd_linear_fit
 from cy_im_utils.event.integrate_intensity import _integrate_events_, fetch_indices_wrapper
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
+from cy_im_utils.image_quality import mutual_information
 
 
 def cp_free_mem() -> None:
@@ -43,7 +45,7 @@ def cp_free_mem() -> None:
     mempool.free_all_blocks()
 
 
-def residual(mat: list, input_pair: np.array, target_pair: np.array) -> np.array:
+def residual_affine(mat: list, input_pair: np.array, target_pair: np.array) -> np.array:
     """
     This function is used by scipy.optimize.least_squares to fit the affine
     transform matrix
@@ -76,6 +78,38 @@ def residual(mat: list, input_pair: np.array, target_pair: np.array) -> np.array
     return np.abs(diff).flatten()
 
 
+def residual_rigid(mat: list, input_pair: np.array, target_pair: np.array) -> np.array:
+    """
+    This function is used by scipy.optimize.least_squares to fit the affine
+    transform matrix
+
+    Note that the conventional x,y cartesian coordinates are switched when
+    looking at plt.imshow so the y coordinate is horizontal and x coordinate is
+    vertical...
+
+    Parameters:
+    -----------
+        - mat: array-like; fitted parameters for scale y, horizontal shear, y
+          translation, vertical shear, scale x, translation x
+        - input_pair: array of event coordinates (y,x,1)
+        - target_pair: array of frame coordinates (y,x,1) that map 1-1 to the
+          event coordinates
+    """
+    #print(mat)
+    #scale = mat[0]
+    scale = mat[0]
+    translation_y = mat[1]
+    translation_x = mat[2]
+    theta = mat[3]
+    tform_array = np.array([
+        [scale * np.cos(theta), np.sin(theta), translation_y],
+        [-np.sin(theta), scale * np.cos(theta), translation_x],
+        [0, 0, 1]])
+    out = np.dot(tform_array, input_pair)
+    diff = out - target_pair
+    return np.abs(diff).flatten()
+
+
 def water_viscosity(T, unit = 'C'):
     """
     returns viscosity of water as a function of temperature
@@ -102,6 +136,25 @@ def water_viscosity(T, unit = 'C'):
     return A*np.exp(B/T + C*T +D*T**2)
 
 
+class np_dtype(Enum):
+    float32 = np.float32
+    float64 = np.float64
+    uint32 = np.uint32
+    int32 = np.int32
+    uint16 = np.uint16
+    int16 = np.int16
+    uint8 = np.uint8
+    int8 = np.int8
+
+
+class transform_type(Enum):
+    """
+    Fetches the residual function and default x0
+    """
+    rigid = residual_rigid, [1,0,0,0], 'rigid'
+    affine = residual_affine, [1,0,0,1,0,0], 'affine'
+
+
 class spatio_temporal_registration_gui:
     def __init__(self):
         self.viewer = napari.Viewer()
@@ -110,6 +163,7 @@ class spatio_temporal_registration_gui:
         self.affine_matrix = None
         self.located_frames = None
         self.frame_0 = 0
+        self.frame_track = {}
         self.track_bool = False
         self.track_holder = {}
         self.super_sampling = 1
@@ -132,7 +186,9 @@ class spatio_temporal_registration_gui:
                               self._fit_affine_(),
                               self._apply_transform_(),
                               self._shift_event_(),
-                              self._write_transforms_(),
+                              #self._write_transforms_(),
+                              self._mutual_information_(),
+                              self._zip_centroids_to_points_(),
                               ],
                 'Filtering':[
                             self._isolate_event_sign_(),
@@ -148,10 +204,11 @@ class spatio_temporal_registration_gui:
                             self._preview_track_centroids_(),
                             self._track_batch_locate_(),
                             self._track_link_(),
-                            self._calc_msd_()
+                            self._calc_msd_(),
+                            self._estimate_matched_particles_()
                               ],
                 'Utils':[
-                    self.__calculate_axial_median_gpu__(),
+                    self.__subtract_axial_median_gpu__(),
                     self.__free_memory__(),
                     self.__compute__(),
                     self._diff_layer_(),
@@ -316,20 +373,25 @@ class spatio_temporal_registration_gui:
                   layer_name = {'label': "Layer name"},
                   )
         def inner(layer_name: str):
-            handle = self.__fetch_layer__(layer_name).data
             n_im = self.num_event_images
-            out_shape = [n_im, handle.shape[1], handle.shape[2]]
-            sparse = np.zeros(out_shape, dtype = handle.dtype)
-            global_idx = 0
-            assert self.super_sampling != 1, "super sampling set to 1, not executing"
-            sparse[0] = handle[0]
-            for j in tqdm(range(1,n_im), desc = f"sparsifying {layer_name}"):
-                sparse[j] = handle[global_idx]
-                if j % self.super_sampling == 0:
-                    global_idx += 1
-            self.viewer.add_image(sparse, 
-                                  name = f"{layer_name} sparse", 
-                                  colormap = 'gist_earth')
+            if self.super_sampling == 1:
+                print((f"Super sampling == 1 --> Matching {layer_name} to event"
+                   f" number of images ({n_im})\n--> OPERATING IN PLACE <--"))
+                handle = self.__fetch_layer__(layer_name)
+                handle.data = handle.data[:n_im]
+            else:
+                handle = self.__fetch_layer__(layer_name).data
+                out_shape = [n_im, handle.shape[1], handle.shape[2]]
+                sparse = np.zeros(out_shape, dtype = handle.dtype)
+                global_idx = 0
+                sparse[0] = handle[0]
+                for j in tqdm(range(1,n_im), desc = f"sparsifying {layer_name}"):
+                    sparse[j] = handle[global_idx]
+                    if j % self.super_sampling == 0:
+                        global_idx += 1
+                self.viewer.add_image(sparse, 
+                                      name = f"{layer_name} sparse", 
+                                      colormap = 'gist_earth')
         return inner
 
     def _load_affine_mat_(self):
@@ -346,8 +408,13 @@ class spatio_temporal_registration_gui:
         return inner
 
     def _fit_affine_(self):
-        @magicgui(call_button="Fit/Refit Affine Params")
-        def inner():
+        @magicgui(
+                  call_button="Fit/Refit Affine Params",
+                  mode = {'label':'mode'}
+                )
+        def inner(
+                mode: transform_type
+                ):
             handle = self.viewer.layers[-1]
             _points_type_ = napari.layers.points.points.Points
             assert isinstance(handle, _points_type_), "not a points layer"
@@ -358,13 +425,26 @@ class spatio_temporal_registration_gui:
             n_points = event_pairs.shape[0]
             event_pairs = np.hstack([event_pairs, np.ones(n_points)[:,None]]).T
             frame_pairs = np.hstack([frame_pairs, np.ones(n_points)[:,None]]).T
-            x0 = [1,0,0,1,0,0]
-            out = least_squares(residual, x0, args = (event_pairs, frame_pairs))
-            composed_mat = np.array([
-                [out.x[0], out.x[1], out.x[2]],
-                [out.x[3], out.x[4], out.x[5]],
-                [0,0,1]
-                ])
+            tform_func, x0, mode_name = mode.value
+            out = least_squares(tform_func, x0, args = (event_pairs, frame_pairs))
+            self.affine_fit = out
+
+            if mode_name == 'affine':
+                composed_mat = np.array([
+                    [out.x[0], out.x[1], out.x[2]],
+                    [out.x[3], out.x[4], out.x[5]],
+                    [0,0,1]
+                    ])
+
+            elif mode_name == 'rigid':
+                scale = out.x[0]
+                sinx = np.sin(out.x[3])
+                cosx = np.cos(out.x[3])
+                composed_mat = np.array([
+                    [scale*cosx, sinx, out.x[1]],
+                    [-sinx, scale*cosx, out.x[2]],
+                    [0,0,1]
+                    ])
 
             if self.affine_matrix is None and self.pull_affine_matrix is None:
                 self.pull_affine_matrix = composed_mat
@@ -416,7 +496,7 @@ class spatio_temporal_registration_gui:
                     cp.array(event_handle[slice_], dtype = cp.float32),
                     tform_push,
                     output_shape = (local_batch_size,nx,ny),
-                    order = 3
+                    order = 0
                     ).get()
                 cp_free_mem()
                 frame_transformed[slice_] = affine_transform(
@@ -427,16 +507,39 @@ class spatio_temporal_registration_gui:
                         ).get()
                 cp_free_mem()
 
-            self.viewer.add_image(event_raw_transformed, 
-                                  opacity = 0.4,
-                                  name = "event -> frame")
             self.viewer.add_image(frame_transformed, 
                                   visible = False,
                                   name = "frame -> event",
                                   colormap = "hsv"
                                   )
+            self.viewer.add_image(event_raw_transformed, 
+                                  opacity = 0.4,
+                                  name = "event -> frame")
             self.__fetch_layer__("event").visible = False
             self.__fetch_layer__("frame").opacity = 1.0
+
+            # Add Outline of Event camera location wrt frame
+            coords = np.array([
+                [0,0],
+                [0,1280],
+                [720,1280],
+                [720,0],
+                ]).astype(np.float64)
+            coords[:,0] -= self.affine_matrix[0,2]
+            coords[:,1] -= self.affine_matrix[1,2]
+            coords_tformed = coords @ self.pull_affine_matrix[:2,:2].T
+            vertices = []
+            for j, elem in enumerate(coords_tformed[:-1]):
+                vertices.append(np.vstack([elem, coords_tformed[j+1]]))
+            vertices.append(np.vstack([coords_tformed[-1], coords_tformed[0]]))
+            self.viewer.add_shapes(
+                                   vertices,
+                                   shape_type = 'line', 
+                                   name = 'event overlay',
+                                   edge_color = 'black',
+                                   edge_width = 3
+                                   )
+            napari.experimental.link_layers(self.viewer.layers[-2:])
         return inner
 
     def _reset_affine_(self):
@@ -483,13 +586,19 @@ class spatio_temporal_registration_gui:
         return inner
 
     def _shift_event_(self):
-        @magicgui(call_button="Shift Event Temporal",
-                shift={'label':'shift','min':-10_000,'max':10_000})
-        def inner(shift: int = 0):
-            transformed = self.__fetch_layer__("event")
+        @magicgui(call_button="Shift Layer Temporal",
+                shift={'label':'shift','min':-10_000,'max':10_000},
+                layer_name = {'label':'Layer name'},
+                persist = True
+                )
+        def inner(shift: int = 0,
+                layer_name: str = ""
+                ):
+            transformed = self.__fetch_layer__(layer_name)
             transformed.data = np.roll(transformed.data,
                                        shift = shift, 
                                        axis = 0)
+            print(f"shfited {layer_name} temporally by {shift}")
             self.total_shift += shift
         return inner
 
@@ -520,6 +629,101 @@ class spatio_temporal_registration_gui:
 
         return inner
 
+    def _mutual_information_(self):
+        @magicgui(
+                call_button="Mutual Information",
+                persist = True,
+                layer_1 = {'label':'Event-based Layer'},
+                layer_2 = {'label':'Frame-based Layer'},
+                n_bins = {'label':"number of bins for 2d hist"},
+                local_bool = {'label':'local'}
+                )
+        def inner(
+                layer_1: str,
+                layer_2: str,
+                n_bins: int, 
+                local_bool: bool = True, 
+                omit_event_zeros: bool = True
+                ):
+            if local_bool:
+                print("locally applying mutual information (batch size = 1)")
+                idx = [self.__fetch_viewer_image_index__()]
+            else:
+                print("GLOBALLY applying mutual information")
+                n_im = self.__fetch_layer__(layer_1).data.shape[0]
+                idx = list(range(n_im))
+
+            cp_free_mem()
+            log_hist_global = []
+            zeros_slice = cp.ones(self.__fetch_layer__(layer_1).data[0].shape,
+                                  dtype = bool)
+            for j in tqdm(idx, desc = "iterating mutual info metric over idx"):
+                layer_1_handle = self.__fetch_layer__(layer_1).data[j]
+                layer_2_handle = self.__fetch_layer__(layer_2).data[j]
+                layer_1_cp = cp.array(layer_1_handle, 
+                                      dtype = layer_1_handle.dtype)
+                layer_2_cp = cp.array(layer_2_handle,
+                                      dtype = layer_2_handle.dtype)
+                if omit_event_zeros:
+                    zeros_slice = layer_1_cp != 0
+                assert layer_1_cp.shape == layer_2_cp.shape, "shape mismatch"
+                #print(layer_1_cp.flatten().shape)
+                #print(layer_2_cp.flatten().shape)
+                hist_2d, x_edge, y_edge = cp.histogram2d(
+                                               layer_1_cp[zeros_slice].flatten(),
+                                               layer_2_cp[zeros_slice].flatten(),
+                                               bins = n_bins)
+                log_hist = cp.zeros_like(hist_2d)
+                cp.log(hist_2d, out = log_hist)
+                log_hist[hist_2d <= 0] = 0
+                log_hist_global.append(log_hist)
+            log_hist_global = cp.stack(log_hist_global)
+            print(log_hist_global.shape)
+            log_hist_global = cp.sum(log_hist_global, axis = 0)
+            print(log_hist_global.shape)
+            fig,ax = plt.subplots(1,1, figsize = (8,8))
+            X_,Y_ = np.meshgrid(x_edge.get(), y_edge.get())
+            ax.pcolormesh(X_-0.5, Y_, log_hist_global.get().T)
+            ax.set_title(f"Mutual Information:\n{mutual_information(log_hist)}")
+            fig.tight_layout()
+            plt.show()
+        return inner
+
+    def _zip_centroids_to_points_(self):
+        @magicgui(
+                call_button="Zip centroids to points",
+                persist = True,
+                centroids_event = {'label':'Event centroids'},
+                centroids_frame = {'label':'Frame centroids'},
+                )
+        def inner(
+                centroids_event: str,
+                centroids_frame: str,
+                ):
+            pts_event = self.__fetch_layer__(centroids_event).data.copy()
+            pts_frame = self.__fetch_layer__(centroids_frame).data.copy()
+            ev_shape = pts_event.shape
+            fr_shape = pts_frame.shape
+            msg = f"shape mismatch; fr: {fr_shape}, ev: {ev_shape}"
+            assert pts_event.shape == pts_frame.shape, msg
+            event_sorted = np.zeros_like(pts_event)
+            for j, elem in tqdm(enumerate(pts_frame), desc = 'sorting'):
+                dx = elem[0] - pts_event[:,0]
+                dy = elem[1] - pts_event[:,1]
+                dr = np.sqrt(dx**2 + dy**2)
+                event_idx = np.where(dr == dr.min())[0][0]
+                event_sorted[j] = pts_event[event_idx]
+        
+            pts_new = []
+            for j in range(pts_event.shape[0]):
+                pts_new.append(event_sorted[j])
+                pts_new.append(pts_frame[j])
+            pts_new = np.vstack(pts_new)
+            idx = self.__fetch_viewer_image_index__()
+            ones = np.ones([pts_new.shape[0], 1]) * idx
+            pts_layer = np.hstack([ones, pts_new])
+            self.viewer.add_points(pts_layer, name = "centroid points for reg")
+        return inner
 
     #--------------------------------------------------------------------------
     #                               TRACKING    
@@ -553,7 +757,10 @@ class spatio_temporal_registration_gui:
                           np.array(track_handle),
                           diameter,
                           minmass = minmass,
-                          invert = False)
+                          invert = False,
+                          engine = 'numba'
+                          )
+            self.frame_track[layer_name] = f.copy()
             points_array = f[['y','x']].values
             self.viewer.add_points(
                     points_array,
@@ -867,6 +1074,47 @@ class spatio_temporal_registration_gui:
             
         return inner
 
+    def _estimate_matched_particles_(self):
+        @magicgui(
+                call_button="Estimate matched particle pairs",
+                track_1 = {'label':'Track 1 Name'},
+                track_2 = {'label':'Track 2 Size'},
+                thresh = {'label':'Thresh'}
+                )
+        def inner(
+                track_1: str,
+                track_2: str,
+                thresh: float,
+                ):
+            handle_1 = inst.track_holder[track_1]
+            handle_2 = inst.track_holder[track_2]
+            matches = []
+            thresh = 20
+            for elem in tqdm(handle_1['particle'].unique()):
+                bool_slice_1 = handle_1['particle'] == elem
+                frame_1 = handle_1['frame'].values[bool_slice_1]
+                ev_x = handle_1['x'].values[bool_slice_1]
+                ev_y = handle_1['y'].values[bool_slice_1]
+                for fr_elem in handle_2['particle'].unique():
+                    bool_slice_2 = handle_2['particle'] == fr_elem
+                    frame_2 = handle_2['frame'].values[bool_slice_2]
+                    fr_x = handle_2['x'].values[bool_slice_2]
+                    fr_y = handle_2['y'].values[bool_slice_2]
+                    intersection, ev_idx, fr_idx = np.intersect1d(frame_1, 
+                                                                  frame_2,
+                                                                  return_indices = True)
+                    if len(intersection) == 0:
+                        continue
+                    dx = fr_x[fr_idx] - ev_x[ev_idx]
+                    dy = fr_y[fr_idx] - ev_y[ev_idx]
+                    dr = (dx**2+dy**2)**(1/2)
+                    if dr.max() < thresh:
+                        matches.append([elem, fr_elem])
+            self.matches = np.vstack(matches)
+
+        return inner
+
+
     #--------------------------------------------------------------------------
     #                               FILTERS    
     #--------------------------------------------------------------------------
@@ -1090,10 +1338,13 @@ class spatio_temporal_registration_gui:
                 temp = cp_arr.copy().get()
                 temp[bool_arr.get()]
 
-            self.viewer.add_image(temp, name = f'{layer_name} outlier filtered' )
+            self.viewer.add_image(temp, 
+                    name = f'{layer_name} outlier filtered' ,
+                    colormap = self.__fetch_layer__(layer_name).colormap.name
+                    )
+
             cp_free_mem()
         return inner
-
 
     def _abs_of_layer_(self):
         @magicgui(
@@ -1156,7 +1407,8 @@ class spatio_temporal_registration_gui:
         return inner
 
     def _isolate_event_sign_(self):
-        @magicgui(call_button="Isolate frame Event Sign (+/- polarities)",)
+        @magicgui(
+                    call_button="Isolate frame Event Sign (+/- polarities)",)
         def inner(layer_name: str = 'event'):
             layer_handle = self.__fetch_layer__(layer_name).data
             iso_dict = {
@@ -1235,41 +1487,47 @@ class spatio_temporal_registration_gui:
         return inner
 
 
+
     #--------------------------------------------------------------------------
     #                               UTILS (dunder)
     #--------------------------------------------------------------------------
-    def __calculate_axial_median_gpu__(self):
+
+    def __subtract_axial_median_gpu__(self):
         @magicgui(
-                call_button="Calculate Axial Median",
+                call_button="Subtract Axial Median",
                 layer_name = {'label':'Layer Name'},
                 tile_size = {'label':'Tile Size'},
+                dtype = {'label':'Data type'}
                 )
         def inner(
                 layer_name: str,
-                tile_size: int):
+                tile_size: int,
+                dtype: np_dtype
+                ):
+            dtype = dtype.value
+            print(f"median dtype = {dtype}")
             handle = self.__fetch_layer__(layer_name).data
-            _, nx, ny = handle.shape
+            n_images, nx, ny = handle.shape
             n_tile_x = nx / tile_size
             n_tile_y = ny / tile_size
             assert n_tile_x % 1 == 0,"tile size should evenly divide image (x failed)"
             assert n_tile_y % 1 == 0,"tile size should evenly divide image (y failed)"
             cp_free_mem()
-            layer_cp = cp.array(handle, dtype = handle.dtype)
-            med = cp.zeros([nx,ny], dtype = handle.dtype)
+            med = cp.zeros([nx,ny], dtype = dtype)
             for tile_x in tqdm(range(int(n_tile_x))):
                 for tile_y in range(int(n_tile_y)):
                     slice_ = (...,
                             slice(tile_x*tile_size, (tile_x+1)*tile_size,1),
                             slice(tile_y*tile_size, (tile_y+1)*tile_size,1),
                             )
-                    med_local = cp.median(layer_cp[slice_], axis = 0)
+                    layer_cp = cp.array(handle[slice_], dtype = dtype)
+                    med_local = cp.median(layer_cp, axis = 0).astype(dtype)
                     med[slice_[1], slice_[2]] = med_local.copy()
-            
-            self.viewer.add_image(
-                                  med.get(), 
-                                  name = f"{layer_name} axial median",
-                                  colormap = "gist_ncar"
-                                  )
+
+            handle = self.__fetch_layer__(layer_name)
+            handle.data = handle.data.astype(dtype)
+            handle.data -= med.get()
+            print(f"{layer_name} -= median (axis = 0)")
             cp_free_mem()
 
         return inner
@@ -1296,7 +1554,10 @@ class spatio_temporal_registration_gui:
         return inner
 
     def __compute__(self):
-        @magicgui(call_button="Compute lazy array (dask -> numpy)")
+        @magicgui(
+                  call_button="Compute lazy array (dask -> numpy)",
+                  persist = True
+                  )
         def inner(layer_name: str):
             print(f"Computing {layer_name}")
             handle = self.__fetch_layer__(layer_name)
@@ -1379,8 +1640,10 @@ class spatio_temporal_registration_gui:
             return 0
         else:
             return int(idx[0])
-
+    
 
 if __name__ == "__main__":
     inst = spatio_temporal_registration_gui()
     napari.run()
+
+

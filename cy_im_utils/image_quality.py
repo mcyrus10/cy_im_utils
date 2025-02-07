@@ -238,3 +238,16 @@ def laplacian_blur_GPU(im_stack: cp.array) -> cp.array:
     # print("cupy kern shape = ",kernel.shape)
     # print("--->\n",conv)
     return cp.std(conv, axis=(1, 2))**2
+
+
+def mutual_information(hgram) -> np.array:
+    """
+    Mutual information for joint histogram
+    from https://matthew-brett.github.io/teaching/mutual_information.html
+    """
+    pxy = hgram / float(np.sum(hgram))
+    px = np.sum(pxy, axis = 1)
+    py = np.sum(pxy, axis = 0)
+    px_py = px[:, None] * py[None, :]
+    nzs = pxy > 0
+    return np.sum(pxy[nzs] * np.log(pxy[nzs] / px_py[nzs]))
