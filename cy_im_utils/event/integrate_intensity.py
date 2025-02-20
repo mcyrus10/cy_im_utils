@@ -1,26 +1,42 @@
-from numba import njit, int16, uint16, int64, float64, float32, void, boolean
+from numba import njit, int16, uint16, int64, float64, float32, void, boolean, int8
 from tifffile import imwrite
 from tqdm import tqdm
+from functools import partial
 import cupy as cp
 import h5py
 import numpy as np
 
 
-@njit(void(float32[:,:], uint16[:], uint16[:], boolean[:]))
-def _integrate_events_(image, x, y, p) -> None:
-    """
-    Ultra basic: iterate over all the events and increment/decrement based on
-    polarity
-    """
-    numel = x.size
-    for j in range(numel):
-        x_ = x[j]
-        y_ = y[j]
-        p_ = p[j]
-        if not p_:
-            image[y_,x_] -= 1
-        elif p_:
-            image[y_,x_] += 1
+def _integrate_events_wrapper_(dtype):
+    if dtype == np.float32:
+        print("using dtype = float32")
+        signature = void(float32[:,:], uint16[:], uint16[:], boolean[:])
+    elif dtype == np.int16:
+        print("using dtype = int16")
+        signature = void(int16[:,:], uint16[:], uint16[:], boolean[:])
+    elif dtype == np.int8:
+        print("using dtype = int8")
+        signature = void(int8[:,:], uint16[:], uint16[:], boolean[:])
+    else:
+        print("unknown datatype")
+
+    @njit(signature)
+    def _inner_(image, x, y, p) -> None:
+        """
+        Ultra basic: iterate over all the events and increment/decrement based on
+        polarity
+        """
+        numel = x.size
+        for j in range(numel):
+            x_ = x[j]
+            y_ = y[j]
+            p_ = p[j]
+            if not p_:
+                image[y_,x_] -= 1
+            elif p_:
+                image[y_,x_] += 1
+
+    return _inner_
 
 
 class hdf5_event_integrator:
@@ -144,7 +160,8 @@ def _fetch_indices_no_triggers_(t, dt, indices, t0: np.int64 = 0) -> None:
         trigger_idx += 1
 
 
-def fetch_indices_wrapper(triggers, 
+def fetch_indices_wrapper(
+                          triggers, 
                           acc_time,
                           timestamp_arr, 
                           super_sampling,
@@ -158,37 +175,46 @@ def fetch_indices_wrapper(triggers,
     """
     if triggers is not None:
         tr_handle = triggers[::2]
-        n_iter = tr_handle.shape[0] * super_sampling
-        idx_holder = np.zeros([n_iter, 2], dtype = np.int64)
-        print("SAMPLING OVER ALL TRIGGERS ignoring frame comparison triggers arg")
-        print(f"trigger shape = {tr_handle.shape}")
-        diff = np.diff(tr_handle)
-        dts = diff / super_sampling
-
-        # What does this do?
-        extra_steps = []
-        for j in range(1, super_sampling):
-            extra_steps.append(np.round(tr_handle[:-1] + dts*j))
-
-        if len(extra_steps) > 0:
-            extra_steps = np.hstack(extra_steps)
-        else:
-            print("sampling triggers 1:1")
-        triggers_processed = np.hstack([tr_handle,extra_steps]).astype(np.int64)
-        triggers_processed = np.sort(triggers_processed)
-        print("---> Calling compiled fetch indices")
-        _fetch_indices_(triggers_processed, acc_time, timestamp_arr, idx_holder)
-        print("<---")
-    elif triggers is None:
-        print("NO TRIGGERS FETCHING EVENLY SPACED ACC TIME OVER TIMES")
-        n_iter = frame_comp_triggers * super_sampling
-        idx_holder = np.zeros([n_iter, 2], dtype = np.int64)
-        _fetch_indices_no_triggers_(timestamp_arr,
-                                    dt = acc_time,
-                                    indices = idx_holder, 
-                                    t0 = 0)
     else:
-        assert False, "problem with triggers....."
+        tr_handle = np.arange(0, frame_comp_triggers * acc_time, acc_time).astype(np.int64)
+
+    n_iter = tr_handle.shape[0] * super_sampling
+    idx_holder = np.zeros([n_iter, 2], dtype = np.int64)
+    print("SAMPLING OVER ALL TRIGGERS ignoring frame comparison triggers arg")
+    print(f"trigger shape = {tr_handle.shape}")
+    diff = np.diff(tr_handle)
+    dts = diff / super_sampling
+
+    # What does this do?
+    extra_steps = []
+    for j in range(1, super_sampling):
+        extra_steps.append(np.round(tr_handle[:-1] + dts*j))
+
+    if len(extra_steps) > 0:
+        extra_steps = np.hstack(extra_steps)
+    else:
+        print("sampling triggers 1:1")
+    triggers_processed = np.hstack([tr_handle,extra_steps]).astype(np.int64)
+    triggers_processed = np.sort(triggers_processed)
+    print("---> Calling compiled fetch indices")
+    _fetch_indices_(triggers_processed, acc_time, timestamp_arr, idx_holder)
+    print("<---")
+    #elif triggers is None:
+    #    print("NO TRIGGERS FETCHING EVENLY SPACED ACC TIME OVER TIMES")
+    #    n_iter = frame_comp_triggers * super_sampling
+    #    print(n_iter)
+    #    idx_holder = np.zeros([n_iter, 2], dtype = np.int64)
+    #    # Creating a fake trigger array to evenly sample dataset
+    #    frame_trigger = np.arange(0, n_iter*acc_time, acc_time).astype(np.int64)
+    #    idx_holder = np.zeros([n_iter, 2], dtype = np.int64)
+    #    _fetch_indices_(frame_trigger, acc_time, timestamp_arr, idx_holder)
+    #    #_fetch_indices_no_triggers_(
+    #    #                            timestamp_arr,
+    #    #                            dt = acc_time,
+    #    #                            indices = idx_holder, 
+    #    #                            t0 = 0)
+    #else:
+    #    assert False, "problem with triggers....."
 
     return idx_holder
 

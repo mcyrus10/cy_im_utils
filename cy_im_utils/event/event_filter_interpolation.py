@@ -763,14 +763,14 @@ def _processEvents_(
         ev_x: np.uint16,
         ev_y: np.uint16,
         ev_t: np.int64,
-        eventsBin: np.bool,
+        eventsBin: bool,
         interpolation_method: int,
         FilterLength: int, 
         Scale: int,
         FrameSize: np.int64,
         TimestampMap: np.int64,
         IntervalMap: np.float64, 
-        ActiveMap: np.bool,
+        ActiveMap: bool,
         UpdateFactor: float):
     """
     event = np.array([[x, y, p, t]] ???????

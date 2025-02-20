@@ -1,11 +1,10 @@
 #!/home/mcd4/miniconda3/envs/openeb/bin/python
 from PIL import Image 
 from enum import Enum 
-from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter, convolve
+from functools import partial 
+from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter, convolve, gaussian_filter1d, convolve1d
 from dask_image.imread import imread
 from magicgui import magicgui
-from napari.qt.threading import thread_worker
-from numba import njit, int64, void
 from os import mkdir
 from pathlib import Path
 from scipy.optimize import least_squares
@@ -21,8 +20,9 @@ import napari
 import numpy as np
 import pandas as pd
 import trackpy as tp
+import pickle
 
-from sys import path
+from sys import path, platform
 util_paths = [
         "/home/mcd4/cy_im_utils",
         "C:\\Users\\mcd4\\Documents\\cy_im_utils",
@@ -31,7 +31,7 @@ for elem in util_paths:
     path.append(elem)
 from cy_im_utils.imgrvt_cuda import rvt
 from cy_im_utils.event.trackpy_utils import imsd_powerlaw_fit, imsd_linear_fit
-from cy_im_utils.event.integrate_intensity import _integrate_events_, fetch_indices_wrapper
+from cy_im_utils.event.integrate_intensity import _integrate_events_wrapper_, fetch_indices_wrapper
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
@@ -43,6 +43,103 @@ def cp_free_mem() -> None:
     """
     mempool = cp.get_default_memory_pool()
     mempool.free_all_blocks()
+
+
+def __calc_msd__(
+            track_dict,
+            fps: float,
+            mpp: float,
+            track_id: int = -1,
+            msd_point_min: int = 0,
+            msd_point_max: int = 5,
+            max_lagtime: int = 100,
+            temperature: float = 295.0,
+            bins: int = 50,
+            ):
+        T = temperature
+        eta = water_viscosity(T, unit = 'K')
+        print(f"viscosity: {eta} Pa * s")
+        imsd_kwargs = {'mpp':mpp, 'fps':fps, 'max_lagtime': max_lagtime}
+        track_handle = track_dict
+        track_lengths = []
+        if track_id == -1:
+            print("calculating all tracks")
+            imsd = tp.motion.imsd(track_handle, **imsd_kwargs)
+            bay = []
+            for elem in track_handle['particle'].unique():
+                particle_slice = track_handle['particle'] == elem
+                bay.append(__calc_bayesian__(elem, track_handle, fps, mpp))
+                track_lengths.append(np.sum(particle_slice))
+            bay = np.vstack(bay)
+            #print("--> bay shape all elements:",bay.shape)
+        else:
+            print(f"calculating {track_id}")
+            particle_slice = track_handle['particle'] == track_id
+            if particle_slice.values.sum() == 0:
+                assert False, f"Empty Particle ID {track_id}"
+            track_lengths.append(np.sum(particle_slice))
+            imsd = tp.motion.imsd(track_handle[particle_slice], **imsd_kwargs)
+            bay = __calc_bayesian__(track_id, track_handle, fps, mpp)[None,:]
+            #print("--> bay shape 1 element:",bay.shape)
+
+        # Log-Log Fit
+        A,n_log,log_fits = imsd_powerlaw_fit(imsd, 
+                                             start_index = msd_point_min,
+                                             end_index = msd_point_max)
+
+        # Linear Fit
+        m,b,lin_fits = imsd_linear_fit(imsd, 
+                                       start_index = msd_point_min,
+                                       end_index = msd_point_max)
+
+        kb = 1.38e-23
+        diffusivity_log = np.exp(A)/4
+        diam_log = kb * T / (3 * np.pi * eta * diffusivity_log * 1e-12) * 1e9
+        diffusivity_lin = m/4
+        diam_lin = kb * T / (3 * np.pi * eta * diffusivity_lin * 1e-12) * 1e9
+        neg_diams = diam_lin < 0
+        bay_diam = kb * T / (3 * np.pi * eta * bay[:,0] * 1e-12) * 1e9
+
+        return  {
+                'imsd':imsd,
+                'bay':bay,
+                'bay_diam':bay_diam,
+                'A':A,
+                'n_log':n_log,
+                'log_fits':log_fits,
+                'm':m,
+                'b':b,
+                'lin_fits':lin_fits,
+                'diffusivity_log':diffusivity_log,
+                'diam_log':diam_log,
+                'diffusivity_lin':diffusivity_log,
+                'diam_lin':diam_lin,
+                'neg_diams': neg_diams,
+                'track_lengths': np.array(track_lengths),
+                }
+
+
+def __calc_bayesian__(track_id, track_handle, fps, mpp) -> np.array:
+    """
+    wrapper for the call to hd.estimate_diffusion...
+
+    """
+    particle_slice = track_handle['particle'] == track_id
+    # Convert displacement from pixels to nm?
+    dframe = np.diff(track_handle['frame'][particle_slice].values)
+    frame_drop_bool = dframe != 1
+    dx = np.diff(track_handle['x'][particle_slice].values)
+    dy = np.diff(track_handle['y'][particle_slice].values)
+    dr = np.sqrt(dx**2 + dy**2) * mpp
+    dr[ dframe != 1] = np.nan
+    posterior, alpha, beta = hd.estimate_diffusion(
+            n_dim = 2,
+            dt = 1 / fps,
+            dr = dr[np.isfinite(dr)]
+            )
+    bay_diffusivity = np.array([posterior.mean(), posterior.std()])
+
+    return bay_diffusivity
 
 
 def residual_affine(mat: list, input_pair: np.array, target_pair: np.array) -> np.array:
@@ -80,8 +177,8 @@ def residual_affine(mat: list, input_pair: np.array, target_pair: np.array) -> n
 
 def residual_rigid(mat: list, input_pair: np.array, target_pair: np.array) -> np.array:
     """
-    This function is used by scipy.optimize.least_squares to fit the affine
-    transform matrix
+    This function is used by scipy.optimize.least_squares to fit a rigid
+    transform matrix (scale, translation and rotation (NO SHEARING))
 
     Note that the conventional x,y cartesian coordinates are switched when
     looking at plt.imshow so the y coordinate is horizontal and x coordinate is
@@ -110,7 +207,7 @@ def residual_rigid(mat: list, input_pair: np.array, target_pair: np.array) -> np
     return np.abs(diff).flatten()
 
 
-def water_viscosity(T, unit = 'C'):
+def water_viscosity(T, unit = 'C') -> float:
     """
     returns viscosity of water as a function of temperature
     Input temperature unit can be 'C' or 'K'
@@ -136,6 +233,113 @@ def water_viscosity(T, unit = 'C'):
     return A*np.exp(B/T + C*T +D*T**2)
 
 
+def fetch_cauchy_kernel(x, gamma, sigma = None, x0 = 0) -> np.array:
+    """
+    normalized lorentzian kernel (sum = 1)
+    """
+    kern = 1/(np.pi*gamma*(1 + ((x-x0)/gamma)**2))
+    return kern / np.sum(kern)
+
+
+def fetch_gaussian_kernel(x, sigma, gamma = None, x0 = 0) -> np.array:
+    """
+    Normalized gaussian kernel (sum = 1)
+    """
+    denom = np.sqrt(2*np.pi*sigma**2)
+    num = np.exp(-(x-x0)**2/(2*sigma**2))
+    kern = num / denom
+    return kern / np.sum(kern)
+
+
+def fetch_voigt_kernel(x, sigma, gamma, x0 = 0) -> np.array:
+    """
+    normalized voigt kernel (sum = 1)
+    """
+    cauchy = fetch_cauchy_kernel(x, gamma)
+    gaussian = fetch_gaussian_kernel(x, sigma)
+    kern = np.convolve(cauchy, gaussian, mode = 'same')
+    return kern / np.sum(kern)
+
+
+def fetch_dirac_kernel(x, sigma, gamma, x0 = 0) -> np.array:
+    """
+    normalized voigt kernel (sum = 1)
+    """
+    kern = np.zeros_like(x)
+    numel = len(kern)
+    assert numel % 2 == 1, "Diract must have odd kernel shape"
+    kern[numel // 2] = 1
+    return kern
+
+
+def __read_hdf5__(file_name, field_name) -> np.array:
+    """
+    wrapper for hdf5 reading call field name can be "CD" (which stands for
+    contrast detector) or "EXT_TRIGGER"
+    """
+    with h5py.File(file_name, "r") as f:
+        data = f[field_name]['events'][()]
+    return data
+
+
+def __hdf5_to_numpy__(
+                    event_file,
+                    cd_data, 
+                    acc_time: float, 
+                    thresh: float,
+                    num_images: int,
+                    super_sampling: int,
+                    width: int = 720,
+                    height: int = 1280,
+                    dtype= np.int16,
+                    ) -> np.array:
+    """
+    This is for loading in an hdf5 file so that the exposure time of the
+    frame camera can be matched to the event signal directly.....
+    
+    Just use the regular raw -> numpy function if you want a finer frame
+    rate sampling since this will load the data with gaps!!!
+    (discontinuous event data)
+    """
+    trigger_data = __read_hdf5__(event_file, "EXT_TRIGGER")['t']
+    if trigger_data.shape[0] == 0 and num_images != -1:
+        print("No triggers found")
+        trigger_data = None
+    else:
+        print(f"trigger shape = {trigger_data.shape} (2x the triggers)")
+    trigger_indices = fetch_indices_wrapper(
+                                        trigger_data,
+                                        acc_time,
+                                        cd_data['t'],
+                                        super_sampling = super_sampling,
+                                        frame_comp_triggers = num_images
+                                        )
+
+    print("fetched indices")
+    if num_images == -1:
+        print("sampling all triggers")
+        n_im = trigger_indices.shape[0]
+    else:
+        print(f"only taking first {num_images} images (subset of total triggers)")
+        n_im = num_images
+    image_stack = np.zeros([n_im, width, height], dtype = dtype)
+    image_buffer = np.zeros([width, height], dtype = dtype)
+    integrator_fun = _integrate_events_wrapper_(dtype)
+
+    for j in tqdm(range(n_im), desc = "reading hdf5"):
+        id_0, id_1 = trigger_indices[j]
+        image_buffer[:] = 0
+        slice_ = slice(id_0, id_1, 1)
+        integrator_fun(image_buffer, 
+                       cd_data['x'][slice_],
+                       cd_data['y'][slice_], 
+                       cd_data['p'][slice_].astype(bool))
+        image_buffer[np.abs(image_buffer) > thresh] = 0
+        image_stack[j] = image_buffer.copy()
+
+    return image_stack, trigger_indices
+
+
 class np_dtype(Enum):
     float32 = np.float32
     float64 = np.float64
@@ -145,6 +349,13 @@ class np_dtype(Enum):
     int16 = np.int16
     uint8 = np.uint8
     int8 = np.int8
+
+
+class filter_1d_type(Enum):
+    gaussian_1D = "Gaussian",partial(fetch_gaussian_kernel)
+    cauchy_1D = "Cauchy",partial(fetch_cauchy_kernel)
+    voigt_1D = "Voigt",partial(fetch_voigt_kernel)
+    dirac_1D = "Dirac",partial(fetch_dirac_kernel)
 
 
 class transform_type(Enum):
@@ -161,11 +372,12 @@ class spatio_temporal_registration_gui:
         self.viewer.title = "Event-Frame Registration GUI"
         self.pull_affine_matrix = None
         self.affine_matrix = None
-        self.located_frames = None
+        self.located_frames = {}
         self.frame_0 = 0
         self.frame_track = {}
         self.track_bool = False
         self.track_holder = {}
+        self.reduced_data = {}
         self.super_sampling = 1
         self.frame_size = np.array([720, 1280], dtype = np.int64)
 
@@ -178,8 +390,9 @@ class spatio_temporal_registration_gui:
 
                               ],
                 'Registration': [
-                              self._flip_ud_(),
-                              self._flip_lr_(),
+                              #self._flip_ud_(),
+                              #self._flip_lr_(),
+                              self._flip_(),
                               self._align_sub_super_sampled_frame_(),
                               self._load_affine_mat_(),
                               self._reset_affine_(),
@@ -190,7 +403,7 @@ class spatio_temporal_registration_gui:
                               self._mutual_information_(),
                               self._zip_centroids_to_points_(),
                               ],
-                'Filtering':[
+                'Filtering 1':[
                             self._isolate_event_sign_(),
                             #self._combine_event_channels_(),
                             self._abs_of_layer_(),
@@ -199,7 +412,11 @@ class spatio_temporal_registration_gui:
                             self._apply_gaussian_layer_(),
                             self._apply_median_layer_(),
                             self._apply_conditional_median_layer_(),
-                ],
+
+                                 ],
+                'Filtering 2':[
+                            self._filter_1d_(),
+                    ],
                 'Tracking':[
                             self._preview_track_centroids_(),
                             self._track_batch_locate_(),
@@ -207,11 +424,19 @@ class spatio_temporal_registration_gui:
                             self._calc_msd_(),
                             self._estimate_matched_particles_()
                               ],
+
+                'Figures':[
+                            self._figure_(),
+                            self._violin_plot_()
+                              ],
                 'Utils':[
+                    self.__remove_pixels__(),
                     self.__subtract_axial_median_gpu__(),
                     self.__free_memory__(),
                     self.__compute__(),
                     self._diff_layer_(),
+                    self.__unspecified_colormap__(),
+                    self.__measure_line_length__(),
                     ]
                 }
         tabs = []
@@ -242,7 +467,8 @@ class spatio_temporal_registration_gui:
                   acc_time = {'label': "Accumulation Time",'max':1e16},
                   num_images = {'label': "Number of Images (-1 for all triggers)",'max':1e16},
                   event_thresh = {'label': "Dead Pixel Threshold",'max':1e16},
-                  super_sampling = {'label': "Samples per trigger"}
+                  super_sampling = {'label': "Samples per trigger"},
+                  dtype = {'label': "Data type"}
                   )
         def inner(
                 event_file: Path = Path.home(),
@@ -251,25 +477,29 @@ class spatio_temporal_registration_gui:
                 event_thresh: float = 0.0,
                 num_images: int = -1,
                 super_sampling: int = 1,
+                dtype: np_dtype = np_dtype.int16
                 ):
             self.event_file = event_file
             self.event_acc_time = acc_time
             self.event_dead_px_thresh = event_thresh
             self.num_event_images = num_images
             self.super_sampling = super_sampling
+            self.event_dtype = dtype.value
             event_files = event_file.as_posix()
             print(event_files)
             msg = "use hdf5 format (metavision_file_to_hdf5 -i <input>.raw -o <output>.hdf5)"
             assert event_file.suffix == ".hdf5", msg
             print("Reading .hdf5 file")
-            self.cd_data = self.__read_hdf5__(event_file, "CD")
+            self.cd_data = __read_hdf5__(event_file, "CD")
 
-            event_stack = self._hdf5_to_numpy_(
-                                               self.cd_data,
-                                               acc_time,
-                                               thresh = event_thresh,
-                                               super_sampling = self.super_sampling,
-                                               num_images = self.num_event_images
+            event_stack, self.trigger_indices = __hdf5_to_numpy__(
+                                       self.event_file,
+                                       self.cd_data,
+                                       acc_time,
+                                       thresh = event_thresh,
+                                       super_sampling = self.super_sampling,
+                                       num_images = self.num_event_images,
+                                       dtype = dtype.value
                                                )
 
             inst.viewer.add_image(event_stack, colormap = 'viridis', 
@@ -297,72 +527,6 @@ class spatio_temporal_registration_gui:
 
         return inner
 
-    def __read_hdf5__(self, file_name, field_name) -> np.array:
-        """
-        wrapper for hdf5 reading call field name can be "CD" (which stands for
-        contrast detector) or "EXT_TRIGGER"
-        """
-        with h5py.File(file_name, "r") as f:
-            data = f[field_name]['events'][()]
-        return data
-
-    def _hdf5_to_numpy_(self, 
-                        cd_data, 
-                        acc_time: float, 
-                        thresh: float,
-                        num_images: int,
-                        super_sampling: int,
-                        width: int = 720,
-                        height: int = 1280,
-                        write_trigger_indices: bool = True
-                        ) -> np.array:
-        """
-        This is for loading in an hdf5 file so that the exposure time of the
-        frame camera can be matched to the event signal directly.....
-        
-        Just use the regular raw -> numpy function if you want a finer frame
-        rate sampling since this will load the data with gaps!!!
-        (discontinuous event data)
-        """
-        trigger_data = self.__read_hdf5__(self.event_file, "EXT_TRIGGER")['t']
-        if trigger_data.shape[0] == 0 and num_images != -1:
-            print("No triggers found")
-            trigger_data = None
-        else:
-            print(f"trigger shape = {trigger_data.shape} (2x the triggers)")
-        trigger_indices = fetch_indices_wrapper(
-                                            trigger_data,
-                                            acc_time,
-                                            cd_data['t'],
-                                            super_sampling = super_sampling,
-                                            frame_comp_triggers = num_images
-                                            )
-        if write_trigger_indices:
-            self.trigger_indices = trigger_indices
-        else:
-            print("Not rewriting trigger indices")
-        print("fetched indices")
-        if num_images == -1:
-            print("sampling all triggers")
-            n_im = trigger_indices.shape[0]
-        else:
-            print(f"only taking first {num_images} images (subset of total triggers)")
-            n_im = num_images
-        image_stack = np.zeros([n_im, width, height], dtype = np.float32)
-        image_buffer = np.zeros([width, height], dtype = np.float32)
-
-        for j in tqdm(range(n_im), desc = "reading hdf5"):
-            id_0, id_1 = trigger_indices[j]
-            image_buffer[:] = 0
-            slice_ = slice(id_0, id_1, 1)
-            _integrate_events_(image_buffer, 
-                               cd_data['x'][slice_],
-                               cd_data['y'][slice_], 
-                               cd_data['p'][slice_].astype(bool))
-            image_buffer[np.abs(image_buffer) > thresh] = 0
-            image_stack[j] = image_buffer.copy()
-
-        return image_stack
 
     #--------------------------------------------------------------------------
     #                            REGISTRATION
@@ -572,6 +736,27 @@ class spatio_temporal_registration_gui:
             print(f"Flipped {layer_name} LR")
         return inner
 
+    def _flip_(self):
+        @magicgui(call_button="Flip layer",
+                layer_name = {'label':'Layer name'},
+                lr_bool = {'label':"left/right"},
+                ud_bool = {'label':"up/down"},
+                persist = True
+                )
+        def inner(layer_name: str, 
+                  lr_bool: bool,
+                  ud_bool: bool,
+                  ):
+            handle = self.__fetch_layer__(layer_name)
+            if lr_bool:
+                handle.data = handle.data[:,:,::-1]
+                print(f"Flipped {layer_name} LR")
+            if ud_bool:
+                handle.data = handle.data[:,::-1]
+                print(f"Flipped {layer_name} UD")
+
+        return inner
+
     def _set_frame_after_shutter_(self):
         """
         This is a slightly subjective point, but is just for finding the point
@@ -586,20 +771,19 @@ class spatio_temporal_registration_gui:
         return inner
 
     def _shift_event_(self):
-        @magicgui(call_button="Shift Layer Temporal",
+        @magicgui(
+                call_button="Shift Layer Temporal",
                 shift={'label':'shift','min':-10_000,'max':10_000},
                 layer_name = {'label':'Layer name'},
                 persist = True
                 )
-        def inner(shift: int = 0,
+        def inner(
+                shift: int = 0,
                 layer_name: str = ""
                 ):
-            transformed = self.__fetch_layer__(layer_name)
-            transformed.data = np.roll(transformed.data,
-                                       shift = shift, 
-                                       axis = 0)
+            layer = self.__fetch_layer__(layer_name)
+            layer.translate = np.array([shift, 0, 0])
             print(f"shfited {layer_name} temporally by {shift}")
-            self.total_shift += shift
         return inner
 
     def _write_transforms_(self):
@@ -731,13 +915,15 @@ class spatio_temporal_registration_gui:
     def _preview_track_centroids_(self):
         @magicgui(call_button="Locate Centroids",
                 layer_name = {'label':'Layer Name'},
-                minmass = {'label':'minmass', 'max': 1e16},
+                minmass = {'label':'minmass', 'max': 1e16, 'step':1e-6},
                 diameter = {'label':'Diameter', 'max': 1e16},
+                threshold = {'label':'Threshold', 'max': 1e16, 'step':1e-6},
                 )
         def inner(
                 layer_name: str,
                 minmass: float,
                 diameter: int,
+                threshold: float,
                 ):
             test_frame = self.__fetch_viewer_image_index__()
             track_handle = self.__fetch_layer__(layer_name).data[test_frame].copy()
@@ -750,6 +936,7 @@ class spatio_temporal_registration_gui:
             self.track_dict = {
                     "minmass":minmass,
                     "diameter": diameter,
+                    "threshold": threshold,
                     }
             self.track_bool = True
             print(type(track_handle))
@@ -757,6 +944,7 @@ class spatio_temporal_registration_gui:
                           np.array(track_handle),
                           diameter,
                           minmass = minmass,
+                          threshold = threshold,
                           invert = False,
                           engine = 'numba'
                           )
@@ -787,6 +975,7 @@ class spatio_temporal_registration_gui:
                                      "'preview' before tracking")
             minmass = self.track_dict['minmass']
             diameter = self.track_dict['diameter']
+            threshold = self.track_dict['threshold']
             track_handle = self.__fetch_layer__(layer_name).data
             n_elem = track_handle.shape[0]
             proc = "auto" if processes < 0 else processes
@@ -801,21 +990,23 @@ class spatio_temporal_registration_gui:
             if mode == "batch":
                 # All in 1 batch
                 if batch_size == -1:
-                    f = tp.batch(np.array(track_handle, dtype = np.float32), 
-                                 diameter = diameter,
-                                 minmass = minmass,
-                                 processes = proc)
+                    f = tp.batch(
+                            np.array(track_handle, dtype = track_handle.dtype), 
+                             processes = proc,
+                             **self.track_dict
+                             )
                 # Batches...?
                 elif batch_size != -1:
                     f = []
                     n_batch = int(np.ceil(n_elem / batch_size))
                     for j in range(n_batch):
                         slice_ = slice(j*batch_size, (j+1)*batch_size)
-                        local_arr = np.array(track_handle[slice_], dtype = np.float32)
-                        local_dict = tp.batch(local_arr, 
-                                              diameter = diameter,
-                                              minmass = minmass,
-                                              processes = proc)
+                        local_arr = np.array(track_handle[slice_], dtype = track_handle.dtype)
+                        local_dict = tp.batch(
+                                              local_arr, 
+                                              processes = proc,
+                                              **self.track_dict
+                                              )
                         local_dict['frame'] += j*batch_size
                         f.append(local_dict)
                     f = pd.concat(f)
@@ -825,14 +1016,24 @@ class spatio_temporal_registration_gui:
                 f = []
                 desc =  "locating individual images"
                 for j, _image_ in tqdm(enumerate(track_handle), desc = desc):
-                    locate_dict = tp.locate(np.array(_image_, dtype = np.float32), 
-                                 diameter = diameter,
-                                 minmass = minmass)
+                    locate_dict = tp.locate(
+                                np.array(_image_, dtype = _image_.dtype), 
+                                **self.track_dict
+                                 )
                     locate_dict['frame'] = j * np.ones(len(locate_dict), dtype = int) 
                     f.append(locate_dict)
                                  
                 f = pd.concat(f)
-            self.located_frames = f
+            self.located_frames[layer_name] = f
+
+            # Save Tracks (just in case they were difficult to calculate....)
+            if platform == 'linux':
+                track_path = Path("/tmp")
+            elif platform == 'win32':
+                track_path = Path("C:/Users/mcd4/Downloads")
+            track_f_name = track_path / "_located_frames_.p"
+            print(f"saving located frames to {track_f_name}")
+            pickle.dump(f, open(track_f_name,"wb"))
         return inner
 
     def _track_link_(self):
@@ -841,20 +1042,31 @@ class spatio_temporal_registration_gui:
                 min_length = {'label':'Filter Stub Length', 'max': 1e16},
                 search_range = {'label':'Search Range', 'max': 1e16},
                 memory = {'label':'memory', 'max': 1e16},
-                drift_bool = {'label':"Correct Drift"}
+                drift_bool = {'label':"Correct Drift"},
+                omit = {'label':'Particles to omit (comma sep)'}
                 )
         def inner(
                 layer_name: str,
                 min_length: int,
                 search_range: int,
                 memory: int,
+                omit: str,
                 drift_bool: bool = False,
                 ):
             assert self.track_bool, ("Set the tracking parameters with "
                                      "'preview' before tracking")
             assert self.located_frames is not None, "locate frames first..."
-            f = self.located_frames
+            f = self.located_frames[layer_name]
             t = tp.link(f, search_range = search_range, memory = memory)
+
+            # Remove bad particles
+            if omit != "":
+                omit_indices = [int(elem) for elem in omit.split(",")]
+                remove_bool = np.zeros(len(t), dtype = bool)
+                for elem in omit_indices:
+                    remove_bool += t['particle'] == elem
+                t = t[~remove_bool]
+            
             print(t.head)
             t1 = tp.filter_stubs(t, min_length)
             if drift_bool:
@@ -905,173 +1117,259 @@ class spatio_temporal_registration_gui:
                 max_lagtime = {'label': 'max lagtime', 'max': 1e16},
                 temperature = {'label': 'Temperature (K)', 'max': 1e16},
                 bins = {'label': 'histogram bins', 'min':1e-16, 'max': 1e16},
-                track_key = {'label': 'Track Key (dict)'},
+                layer_name = {'label': 'Layer Name'},
                 #exclude_tracks = {'label':'Exclude Idx (comma separated)'}
                 )
         def inner(
                 fps: float,
                 mpp: float,
-                track_key: str,
+                layer_name: str,
                 track_id: int = -1,
                 msd_point_min: int = 0,
                 msd_point_max: int = 5,
                 max_lagtime: int = 100,
                 temperature: float = 295.0,
                 bins: int = 50,
-                #exclude_idx: str = -1
                 ):
-            T = temperature
-            eta = water_viscosity(T, unit = 'K')
-            print(f"viscosity: {eta} Pa * s")
-            imsd_kwargs = {'mpp':mpp, 'fps':fps, 'max_lagtime': max_lagtime}
-            track_handle = self.track_holder[track_key]
-            if track_id == -1:
-                print("calculating all tracks")
-                imsd = tp.motion.imsd(track_handle, **imsd_kwargs)
-                bay = []
-                for elem in track_handle['particle'].unique():
-                    
-                    bay.append(self.__calc_bayesian__(elem, track_handle, fps, mpp))
-                bay = np.vstack(bay)
-                #print("--> bay shape all elements:",bay.shape)
+            self.reduced_data[layer_name] = __calc_msd__(
+                                        self.track_holder[layer_name],
+                                        fps = fps,
+                                        mpp = mpp,
+                                        track_id = track_id,
+                                        msd_point_min = msd_point_min,
+                                        msd_point_max = msd_point_max,
+                                        max_lagtime = max_lagtime,
+                                        temperature = temperature,
+                                        bins = bins
+                                        )
+
+            self.__plot_msd_bay__(
+                    self.reduced_data[layer_name],
+                    layer_name,
+                    track_id,
+                    msd_point_min,
+                    msd_point_max,
+                    mpp,
+                    fps,
+                    bins,
+                    )
+
+        return inner
+
+    def __plot_msd_bay__(self,
+                         data_dict,
+                         layer_name,
+                         track_id,
+                         msd_point_min,
+                         msd_point_max,
+                         mpp,
+                         fps,
+                         bins):
+        keys = [
+                'imsd',
+                'bay',
+                'bay_diam',
+                'A',
+                'n_log',
+                'log_fits',
+                'm',
+                'b',
+                'lin_fits',
+                'diffusivity_log',
+                'diam_log',
+                'diffusivity_lin',
+                'diam_lin',
+                'neg_diams',
+                'track_lengths'
+                ]
+        (imsd, bay, bay_diam,
+            A, n_log, log_fits, 
+            m, b, lin_fits, 
+            diffusivity_log, diam_log, 
+            diffusivity_lin, diam_lin,
+            neg_diams,
+            track_length) = [data_dict[key] for key in keys]
+
+
+        # COMPOSE FIGURE
+        fig,ax = plt.subplots(2,3, figsize = (10,10))
+        for a in ax[0,:-1]:
+            a.plot(imsd.index, imsd, color = 'k', alpha = 0.05, 
+                   marker = '.', linestyle = '')
+
+            a.set(xlabel = "Lag time (s)", 
+                  ylabel = r"$\langle \Delta r^2 \rangle$ [$\mu$m$^2$]")
+        slice_ = slice(msd_point_min, msd_point_max)
+        ax[0,0].set(xscale = 'log', yscale = 'log')
+        ax[0,0].plot(imsd.index.values[slice_], log_fits, color = 'r', alpha = 0.05)
+        ax[0,1].plot(imsd.index.values[slice_], lin_fits, color = 'r', alpha = 0.05)
+        # Localization Uncertainty? 
+        loc_uncert_ax = ax[0,2].twinx()
+        ax[0,2].boxplot(b, positions = [0])
+        ax[0,2].set(ylabel = "y-intercept ($\mu$m$^2$)")
+        loc_uncert_ax.boxplot(np.sqrt(b[b>0]/4) / mpp, positions = [2])
+        loc_uncert_ax.set(ylabel = "Localization uncertainty (px)")
+
+        for j, arr in enumerate([n_log, diam_lin]):
+            # Stats for the entire Population
+            mean_local = np.nanmean(arr)
+            std_local = np.nanstd(arr)
+            cv_local = 100 * std_local / mean_local
+            label_local = f"mean:{mean_local:0.2f}\nstd:{std_local:0.2f}\nCV: {cv_local:0.2f} %"
+            ax[1,j].axvline(mean_local, label = label_local, color = 'k', 
+                            linestyle = '--')
+
+            med_local = np.nanmedian(arr)
+            ax[1,j].axvline(med_local,
+                            label = f"median: {med_local:0.2f}", 
+                            color = 'b', 
+                            linestyle = '--')
+
+
+        # Gaussian Fits 
+        gaussian_fit_linear = fit_param_gaussian(diam_lin, n_bins = bins, 
+                                                 mode = 'normal')
+        gaussian_fit_log = fit_param_gaussian(n_log, n_bins = bins, 
+                                                 mode = 'normal')
+        gaussian_fit_bay = fit_param_gaussian(bay_diam, n_bins = bins, 
+                                                 mode = 'normal')
+
+
+        if gaussian_fit_log is not None:
+            bins_centered, counts, log_gaussian_fit = gaussian_fit_log
+            x_local = np.linspace(bins_centered[0], bins_centered[-1], 1000)
+            ax[1,0].plot(x_local, parametric_gaussian(x_local, log_gaussian_fit))
+        else:
+            print("---> ERROR WITH GAUSSIAN FITTING")
+
+        if gaussian_fit_linear is not None:
+            bins_centered, counts, lin_gaussian_fit = gaussian_fit_linear
+            x_local = np.linspace(bins_centered[0], bins_centered[-1], 1000)
+            ax[1,1].plot(x_local, 
+                         parametric_gaussian(x_local, lin_gaussian_fit),
+                         )
+            _, mean_, std_, _ = lin_gaussian_fit
+            cv_ = 100 * std_ / mean_
+            print(mean_, std_, cv_)
+            ax[1,1].axvline(mean_, color = 'r', 
+                    label = f"mean: {mean_:0.2f}\nstd:{std_:0.2f}\ncv: {cv_:0.2f}%")
+        else:
+            print("---> ERROR WITH GAUSSIAN FITTING OF LINEAR DIAMETERS")
+
+        if gaussian_fit_bay is not None:
+            bins_centered, counts, lin_gaussian_bay = gaussian_fit_bay
+            x_local = np.linspace(bins_centered[0], bins_centered[-1], 1000)
+            ax[1,2].plot(x_local, 
+                         parametric_gaussian(x_local, lin_gaussian_bay),
+                         )
+            _, mean_, std_, _ = lin_gaussian_bay
+            cv_ = 100 * std_ / mean_
+            print(mean_, std_, cv_)
+            ax[1,2].axvline(mean_, color = 'r', 
+                    label = f"bay\nmean: {mean_:0.2f}\nstd:{std_:0.2f}\ncv: {cv_:0.2f}%")
+        else:
+            print("---> ERROR WITH GAUSSIAN FITTING OF Bayesian DIAMETERS")
+
+
+        _ = ax[1,0].hist(n_log, bins = bins)
+        _ = ax[1,1].hist(diam_lin, bins = bins)
+        for a in ax[1]:
+            a.legend()
+        ax[1,0].set(xlabel="MSD Log Exponent (-)", xlim = (0,2))
+        ax[1,1].set_xlabel("Particle Diameter msd linear (nm)")
+        ax[1,2].set_xlabel("Particle Diameter Bayesian (nm)")
+
+        ax[1,2].hist(bay_diam, bins = bins)
+        fig.tight_layout()
+        if Path("/tmp").is_dir():
+            dir_local = Path("/tmp")
+        else:
+            dir_local = Path(".")
+
+        f_name = dir_local / "_delete_me_.png"
+
+        fig.savefig(f_name, dpi = 200)
+        self.viewer.add_image(np.asarray(Image.open(f_name)), 
+                              name = f"msd {layer_name} {track_id}")
+
+    def _violin_plot_(self):
+        @magicgui(
+                call_button="Violin plot",
+                layer_name = {'label': "Layer Name"},
+                ground_truth = {'label':"Ground Truth (-1 for None)"}
+                )
+        def inner(
+                layer_name: str,
+                ground_truth: float = -1.0,
+                ):
+            gt = None if ground_truth == -1 else ground_truth
+            self.__create_violin_plot__(layer_name, ground_truth = gt)
+        return inner
+
+    def __create_violin_plot__(self, layer_name, ground_truth = None):
+        handle = self.reduced_data[layer_name]
+        track_lengths = handle['track_lengths']
+        max_length = np.max(track_lengths)
+        min_length = np.min(track_lengths)
+        length_bins = 2**np.arange(np.log2(min_length), np.log2(max_length), 1)
+        fig,ax = plt.subplots(1,2, sharey = True)
+        for elem in length_bins:
+            slice_ = track_lengths >= elem
+            diams_local = handle['diam_lin'][slice_],
+            mean_local = np.nanmean(diams_local)
+            std_local = np.nanstd(diams_local)
+            cv_local = 100*std_local/mean_local
+            n_particles = np.sum(slice_)
+            for a in ax:
+                a.violinplot(
+                        diams_local,
+                        positions = [np.log2(elem)],
+                        vert = False
+                        )
+                string = f"CV: {cv_local:0.2f} %\n{n_particles} particles"
+                xy = (mean_local + std_local*2, np.log2(elem))
+                a.annotate(string, xy = xy)
+        ax[0].set_xscale("log")
+        if ground_truth is not None:
+            for a in ax:
+                a.axvline(ground_truth, color = 'k', linestyle = '--')
+        ax[0].set(ylabel = "log$_2$(track length) >= n")
+        for a in ax:
+            a.set_xlabel("diameter (nm)")
+        fig.tight_layout()
+        plt.show()
+
+    def _figure_(self):
+        @magicgui(
+                call_button="Capture figure",
+                crop = {'label': "Crop (x1,x2,y1,y2)"},
+                fig_width = {'label': "Image width" },
+                dpi = {'label': 'dpi'},
+                file_name = {'label':'File name'}
+                )
+        def inner(crop: str = "",
+                fig_width: float = 8.0,
+                dpi: int = 150,
+                file_name: str = "",
+                ):
+            img = self.viewer.export_figure()
+            if crop != "":
+                x1,x2,y1,y2 = [int(elem) for elem in crop.split(",")]
             else:
-                print(f"calculating {track_id}")
-                particle_slice = track_handle['particle'] == track_id
-                if particle_slice.values.sum() == 0:
-                    assert False, f"Empty Particle ID {track_id}"
-                imsd = tp.motion.imsd(track_handle[particle_slice], **imsd_kwargs)
-                bay = self.__calc_bayesian__(track_id, track_handle, fps, mpp)[None,:]
-                #print("--> bay shape 1 element:",bay.shape)
-
-            # Instance's imsd
-            self.imsd = imsd
-
-            # Log-Log Fit
-            A,n_log,log_fits = imsd_powerlaw_fit(imsd, start_index = msd_point_min,
-                                              end_index = msd_point_max)
-
-            # Linear Fit
-            m,b,lin_fits = imsd_linear_fit(imsd, start_index = msd_point_min,
-                                              end_index = msd_point_max)
-
-
-            # Remove negative slopes from analysis....
-            #remove_neg_slopes = m > 0
-            #n_neg = np.sum(remove_neg_slopes)
-            #if n_neg > 0:
-            #    print(f"Removing {n_neg} trajectories...")
-            #m = m[remove_neg_slopes]
-            #b = b[remove_neg_slopes]
-            #lin_fits = lin_fits[remove_neg_slopes]
-
-            # COMPOSE FIGURE
-            fig,ax = plt.subplots(2,3, figsize = (10,10))
-            for a in ax[0,:-1]:
-                a.plot(imsd.index, imsd, color = 'k', alpha = 0.05, 
-                       marker = '.', linestyle = '')
-
-                a.set(xlabel = "Lag time (s)", 
-                      ylabel = r"$\langle \Delta r^2 \rangle$ [$\mu$m$^2$]")
-            slice_ = slice(msd_point_min, msd_point_max)
-            ax[0,0].set(xscale = 'log', yscale = 'log')
-            ax[0,0].plot(imsd.index.values[slice_], log_fits, color = 'r', alpha = 0.05)
-            ax[0,1].plot(imsd.index.values[slice_], lin_fits, color = 'r', alpha = 0.05)
-            # Localization Uncertainty? 
-            loc_uncert_ax = ax[0,2].twinx()
-            ax[0,2].boxplot(b, positions = [0])
-            ax[0,2].set(ylabel = "y-intercept ($\mu$m$^2$)")
-            loc_uncert_ax.boxplot(np.sqrt(b[b>0]/4) / mpp, positions = [2])
-            loc_uncert_ax.set(ylabel = "Localization uncertainty (px)")
-
-            kb = 1.38e-23
-            D_log = np.exp(A)/4
-            diam_log = kb * T / (3 * np.pi * eta * D_log * 1e-12) * 1e9
-            D_lin = m/4
-            diam_lin = kb * T / (3 * np.pi * eta * D_lin * 1e-12) * 1e9
-            for j, arr in enumerate([n_log, diam_lin]):
-                # Stats for the entire Population
-                mean_local = np.nanmean(arr)
-                std_local = np.nanstd(arr)
-                cv_local = 100 * std_local / mean_local
-                label_local = f"mean:{mean_local:0.2f}\nstd:{std_local:0.2f}\nCV: {cv_local:0.2f} %"
-                ax[1,j].axvline(mean_local, label = label_local, color = 'k', 
-                                linestyle = '--')
-
-                med_local = np.nanmedian(arr)
-                ax[1,j].axvline(med_local,
-                                label = f"median: {med_local:0.2f}", 
-                                color = 'b', 
-                                linestyle = '--')
-
-
-            # Gaussian Fits 
-            gaussian_fit_linear = fit_param_gaussian(diam_lin, n_bins = bins, 
-                                                     mode = 'normal')
-            gaussian_fit_log = fit_param_gaussian(n_log, n_bins = bins, 
-                                                     mode = 'normal')
-            bay_diam = kb * T / (3 * np.pi * eta * bay[:,0] * 1e-12) * 1e9
-            gaussian_fit_bay = fit_param_gaussian(bay_diam, n_bins = bins, 
-                                                     mode = 'normal')
-
-
-            if gaussian_fit_log is not None:
-                bins_centered, counts, log_gaussian_fit = gaussian_fit_log
-                x_local = np.linspace(bins_centered[0], bins_centered[-1], 1000)
-                ax[1,0].plot(x_local, parametric_gaussian(x_local, log_gaussian_fit))
+                x1,x2,y1,y2 = 0,img.shape[0],0,img.shape[1]
+            slice_ = (slice(x1,x2,1),slice(y1,y2,1))
+            img = img[slice_]
+            AR = img.shape[0] / img.shape[1]
+            fig,ax = plt.subplots(1,1,figsize = (fig_width, fig_width * AR))
+            ax.imshow(img)
+            ax.axis(False)
+            fig.subplots_adjust(left = 0, right = 1, top = 1, bottom = 0)
+            if file_name == "":
+                print("no file name specified -> not saving image")
+                plt.show()
             else:
-                print("---> ERROR WITH GAUSSIAN FITTING")
-
-            if gaussian_fit_linear is not None:
-                bins_centered, counts, lin_gaussian_fit = gaussian_fit_linear
-                x_local = np.linspace(bins_centered[0], bins_centered[-1], 1000)
-                ax[1,1].plot(x_local, 
-                             parametric_gaussian(x_local, lin_gaussian_fit),
-                             )
-                _, mean_, std_, _ = lin_gaussian_fit
-                cv_ = 100 * std_ / mean_
-                print(mean_, std_, cv_)
-                ax[1,1].axvline(mean_, color = 'r', 
-                        label = f"mean: {mean_:0.2f}\nstd:{std_:0.2f}\ncv: {cv_:0.2f}%")
-            else:
-                print("---> ERROR WITH GAUSSIAN FITTING OF LINEAR DIAMETERS")
-
-            if gaussian_fit_bay is not None:
-                bins_centered, counts, lin_gaussian_bay = gaussian_fit_bay
-                x_local = np.linspace(bins_centered[0], bins_centered[-1], 1000)
-                ax[1,2].plot(x_local, 
-                             parametric_gaussian(x_local, lin_gaussian_bay),
-                             )
-                _, mean_, std_, _ = lin_gaussian_bay
-                cv_ = 100 * std_ / mean_
-                print(mean_, std_, cv_)
-                ax[1,2].axvline(mean_, color = 'r', 
-                        label = f"bay\nmean: {mean_:0.2f}\nstd:{std_:0.2f}\ncv: {cv_:0.2f}%")
-            else:
-                print("---> ERROR WITH GAUSSIAN FITTING OF Bayesian DIAMETERS")
-
-
-            _ = ax[1,0].hist(n_log, bins = bins)
-            _ = ax[1,1].hist(diam_lin, bins = bins)
-            for a in ax[1]:
-                a.legend()
-            ax[1,0].set(xlabel="MSD Log Exponent (-)", xlim = (0,2))
-            ax[1,1].set_xlabel("Particle Diameter msd linear (nm)")
-            ax[1,2].set_xlabel("Particle Diameter Bayesian (nm)")
-
-            bay_diam = kb * T / (3 * np.pi * eta * bay[:,0] * 1e-12) * 1e9
-            ax[1,2].hist(bay_diam, bins = bins)
-            fig.tight_layout()
-            if Path("/tmp").is_dir():
-                dir_local = Path("/tmp")
-            else:
-                dir_local = Path(".")
-
-            f_name = dir_local / "_delete_me_.png"
-
-            fig.savefig(f_name, dpi = 200)
-            self.viewer.add_image(np.asarray(Image.open(f_name)), 
-                                name = f"msd {track_id}")
-            
+                file_name = file_name + ".png"
+                fig.savefig(file_name, dpi = dpi)
         return inner
 
     def _estimate_matched_particles_(self):
@@ -1141,13 +1439,14 @@ class spatio_temporal_registration_gui:
             events = self.cd_data
             noise_filter.processEvents(events)
             self.eventBin = noise_filter.eventsBin
-            event_stack = self._hdf5_to_numpy_(
+            event_stack,_ = __hdf5_to_numpy__(
+                                           self.event_file,
                                            events[noise_filter.eventsBin],
                                            acc_time = self.event_acc_time,
                                            thresh = self.event_dead_px_thresh,
                                            super_sampling = self.super_sampling,
                                            num_images = self.num_event_images,
-                                           write_trigger_indices = False
+                                           dtype = self.event_dtype
                                            )
 
             inst.viewer.add_image(event_stack, 
@@ -1216,13 +1515,14 @@ class spatio_temporal_registration_gui:
             #ax[1].scatter(events['x'][eventsBin], events['y'][eventsBin])
             #plt.show()
 
-            event_stack = self._hdf5_to_numpy_(
+            event_stack, _ = __hdf5_to_numpy__(
+                                           self.event_file,
                                            events[eventsBin],
                                            acc_time = self.event_acc_time,
                                            thresh = self.event_dead_px_thresh,
                                            super_sampling = self.super_sampling,
                                            num_images = n_images,
-                                           write_trigger_indices = False
+                                           dtype = self.event_dtype
                                            )
 
             inst.viewer.add_image(event_stack, colormap = 'viridis', 
@@ -1408,22 +1708,43 @@ class spatio_temporal_registration_gui:
 
     def _isolate_event_sign_(self):
         @magicgui(
-                    call_button="Isolate frame Event Sign (+/- polarities)",)
-        def inner(layer_name: str = 'event'):
-            layer_handle = self.__fetch_layer__(layer_name).data
-            iso_dict = {
-                    'pos':[lambda x: x > 0, 'bop orange', 1],
-                    'neg':[lambda x: x < 0, 'bop purple',-1],
-                    }
-            for name, (func, colormap, mult) in iso_dict.items():
-                temp = np.zeros_like(layer_handle)
-                bool_arr = func(layer_handle)
-                temp[bool_arr] = mult * layer_handle[bool_arr].copy()
-                self.viewer.add_image(temp,
-                                      name = name, 
-                                      colormap = colormap,
-                                      blending = 'additive')
+                    call_button="Isolate frame Event Sign (+/- polarities)",
+                    in_place_bool ={"label":"Operate in place"},
+                    positive_bool ={"label":"Positive"},
+                    negative_bool ={"label":"Negative"},
+                    persist = True,
+                    )
+        def inner(
+                layer_name: str,
+                in_place_bool: bool,
+                positive_bool: bool,
+                negative_bool: bool,
+                ):
+            print("--> iso?")
+            layer_handle = self.__fetch_layer__(layer_name)
+            iso_dict = {}
+            if positive_bool:
+                iso_dict['pos'] = [lambda x: x > 0, 'bop orange', 1]
+            if negative_bool:
+                iso_dict['neg'] = [lambda x: x < 0, 'bop purple', -1]
 
+            for name, (func, colormap, mult) in iso_dict.items():
+                bool_arr = func(layer_handle.data)
+                if not in_place_bool:
+                    temp = np.zeros_like(layer_handle.data)
+                    temp[bool_arr] = mult * layer_handle.data[bool_arr].copy()
+                    self.viewer.add_image(temp,
+                                          name = name, 
+                                          colormap = colormap,
+                                          blending = 'additive')
+                elif in_place_bool and positive_bool:
+                    layer_handle.data[layer_handle.data < 0] = 0
+
+                elif in_place_bool and negative_bool:
+                    layer_handle.data[layer_handle.data > 0] = 0
+
+            print("Done Isolating")
+            print("<-- iso?")
         return inner
 
     def _preview_rvt_filter_(self):
@@ -1486,12 +1807,59 @@ class spatio_temporal_registration_gui:
             self.viewer.add_image(temp, name = f'{layer_name} RVT preview' )
         return inner
 
+    def _filter_1d_(self):
+        @magicgui(
+                call_button="Apply 1D filter",
+                size_3d = {'label':'size 3d', "step": 2, "min": 3},
+                tile_size = {'label':'Tile size', "step": 1, "min": 1},
+                sigma = {'label':'sigma', "step": 1e-6},
+                gamma = {'label':'gamma', "step": 1e-6},
+                filter_1d = {'label':'Kernel type'},
+                persist = True
+                )
+        def inner(
+                layer_name: str,
+                size_3d: int,
+                tile_size: int,
+                sigma: float,
+                gamma: float,
+                filter_1d: filter_1d_type = filter_1d_type.gaussian_1D,
+                ):
+            handle = self.__fetch_layer__(layer_name)
+            msg = "can't operate in place unless its a floatint point dtype"
+            assert handle.dtype in [np.float32, np.float64], msg
+            n_im, nx, ny = handle.data.shape
+            re_slice_idx = size_3d // 2
+            # Create Convolution Kernel (along 0-axis)
+            x_ = np.linspace(-re_slice_idx, re_slice_idx, size_3d, endpoint = True)
+            kern_name = filter_1d.value[0]
+            kernel = filter_1d.value[1](x = x_, sigma = sigma, gamma = gamma)
+            kernel = cp.array(kernel, dtype = np.float32)
+            assert nx % tile_size == 0, f"tile size doesnt divide {nx} evenly"
+            assert ny % tile_size == 0, f"tile size doesnt divide {ny} evenly"
+            batch_x = int(nx / tile_size)
+            batch_y = int(ny / tile_size)
+            for i in tqdm(range(batch_x), desc = "1D filtering"):
+                for j in range(batch_y):
+                    slice_ = (
+                            ...,
+                            slice(i*tile_size, (i+1)*tile_size),
+                            slice(j*tile_size, (j+1)*tile_size)
+                            )
+                    cp_arr = cp.array(handle.data[slice_], dtype = cp.float32)
+                    filtered = convolve1d(cp_arr, kernel, axis = 0)
+                    handle.data[slice_] = filtered.get()
+            #self.viewer.add_image(out, 
+            #                      name = f"{layer_name} {kern_name} 1D",
+            #                      colormap = 'viridis'
+            #                      )
+        return inner
+
 
 
     #--------------------------------------------------------------------------
     #                               UTILS (dunder)
     #--------------------------------------------------------------------------
-
     def __subtract_axial_median_gpu__(self):
         @magicgui(
                 call_button="Subtract Axial Median",
@@ -1640,10 +2008,48 @@ class spatio_temporal_registration_gui:
             return 0
         else:
             return int(idx[0])
-    
+
+    def __unspecified_colormap__(self):
+        @magicgui(
+                  call_button="Colormap (not in layer controls)",
+                  colormap = {'label':"colormap"},
+                  persist = True
+                  )
+        def inner(layer_name: str, colormap: str):
+            handle = self.__fetch_layer__(layer_name)
+            handle.colormap = colormap
+        return inner
+
+    def __remove_pixels__(self):
+        @magicgui(
+                  call_button="Zero out pixels",
+                  layer_name = {'label':"Layer name (-1 for top layer)"},
+                  px = {'label':"Pixels (x1,y1,x2,y2,...)"},
+                  persist = True
+                  )
+        def inner(layer_name: str, px: str):
+            if layer_name == "-1":
+                handle = self.viewer.layers[-1]
+            else:
+                handle = self.__fetch_layer__(layer_name)
+            pixels = np.array([int(val) for val in px.split(",")]).reshape(-1,2)
+            for x_, y_ in pixels:
+                print(f"zeroing out (x,y): {x_},{y_}")
+                handle.data[:,x_,y_] = 0
+        return inner
+
+    def __measure_line_length__(self):
+        @magicgui(call_button="Measure Line Length")
+        def inner():
+            layer = self.viewer.layers[-1]
+            assert isinstance(layer, napari.layers.shapes.shapes.Shapes), "Top layer is not a shapes layer"
+            length = np.sum(np.diff(layer.data[0][:,1:], axis = 0)**2)**(1/2)
+            print("-"*80)
+            print(f"\tLength of line = {length} px")
+            print("-"*80)
+        return inner
+
 
 if __name__ == "__main__":
     inst = spatio_temporal_registration_gui()
     napari.run()
-
-
