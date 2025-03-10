@@ -10,18 +10,18 @@ import numpy as np
 def _integrate_events_wrapper_(dtype):
     if dtype == np.float32:
         print("using dtype = float32")
-        signature = void(float32[:,:], uint16[:], uint16[:], boolean[:])
+        signature = void(float32[:,:], uint16[:], uint16[:], boolean[:], boolean)
     elif dtype == np.int16:
         print("using dtype = int16")
-        signature = void(int16[:,:], uint16[:], uint16[:], boolean[:])
+        signature = void(int16[:,:], uint16[:], uint16[:], boolean[:], boolean)
     elif dtype == np.int8:
         print("using dtype = int8")
-        signature = void(int8[:,:], uint16[:], uint16[:], boolean[:])
+        signature = void(int8[:,:], uint16[:], uint16[:], boolean[:], boolean)
     else:
         print("unknown datatype")
 
     @njit(signature)
-    def _inner_(image, x, y, p) -> None:
+    def _inner_(image, x, y, p, omit_neg) -> None:
         """
         Ultra basic: iterate over all the events and increment/decrement based on
         polarity
@@ -31,7 +31,7 @@ def _integrate_events_wrapper_(dtype):
             x_ = x[j]
             y_ = y[j]
             p_ = p[j]
-            if not p_:
+            if not p_ and not omit_neg:
                 image[y_,x_] -= 1
             elif p_:
                 image[y_,x_] += 1

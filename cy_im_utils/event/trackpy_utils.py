@@ -7,6 +7,7 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import trackpy as tp
+import numba as nb
 
 
 def imsd_powerlaw_fit(imsd_dict,
@@ -61,12 +62,241 @@ def imsd_linear_fit(imsd_dict: pd.DataFrame,
     time = imsd_dict.index.values[fit_slice]
     ones = np.ones_like(time)
     A_mat = np.vstack([ones, time]).T
-    b_mat = imsd_dict.values[fit_slice, :]
-    b, m = np.linalg.lstsq(A_mat, b_mat, rcond = -1)[0]
-    fits = m[None,:] * time[:,None] + b[None,:]
+    ndim = imsd_dict.values.ndim
+    print("ndim = ",ndim)
+    if ndim == 1:
+        b_mat = imsd_dict.values[fit_slice]
+        b, m = np.linalg.lstsq(A_mat, b_mat, rcond = -1)[0]
+        fits = m * time + b
+    elif ndim == 2:
+        b_mat = imsd_dict.values[fit_slice, :]
+        b, m = np.linalg.lstsq(A_mat, b_mat, rcond = -1)[0]
+        fits = m[None,:] * time[:,None] + b[None,:]
+    else:
+        return None
+
     if np.isnan(fits[0]).sum() > 0:
         print("warning -> nans in fit")
     return m, b, fits
+
+
+@nb.njit
+def isin(a,b) -> np.array:
+    """
+    this does the same thing as np.isin, but is implemented for numba since np.isin is not
+    """
+    out = np.empty(a.shape[0], dtype = nb.boolean)
+    b = set(b)
+    for i in nb.prange(a.shape[0]):
+        if a[i] in b:
+            out[i] = True
+        else:
+            out[i] = False
+    return out
+                    
+
+@nb.jit(nb.void(nb.float64[:,:], nb.float64[:,:], nb.boolean[:,:], nb.float64, nb.int64), parallel = True)
+def _fetch_particle_pairs_(tr_1, tr_2, matches, thresh, super_sampling = 1) -> None:
+    """
+    This matches particle pairs whose median displacement is within a given
+    threshold distance
+
+    Note if an array is super-sampled it should be the second argument
+    """
+    tr_1_particles = np.unique(tr_1[:,3])
+    tr_2_particles = np.unique(tr_2[:,3])
+    for i in nb.prange(tr_1_particles.shape[0]):
+        _particle_1_ = tr_1_particles[i]
+        tr_1_slice = np.where(tr_1[:,3] == _particle_1_)[0]
+        tr_1_fr = tr_1[tr_1_slice,2]
+        for j in nb.prange(tr_2_particles.shape[0]):
+        #for j in range(tr_2_particles.shape[0]):
+            _particle_2_  = tr_2_particles[j]
+            tr_2_slice = np.where(tr_2[:,3] == _particle_2_)[0]
+            tr_2_fr = tr_2[tr_2_slice,2]
+            # Align frames (if super sampling != 1)
+            aligned = np.where(tr_2_fr % super_sampling == 0)[0]
+            intersect_frames = np.intersect1d(
+                                          tr_1_fr, 
+                                          tr_2_fr[aligned] // super_sampling
+                                          )
+            if len(intersect_frames) == 0:
+                continue
+            tr_1_fr_slice = isin(tr_1_fr, intersect_frames)
+            tr_2_fr_slice = isin(tr_2_fr[aligned] // super_sampling, intersect_frames)
+            y_1 = tr_1[tr_1_slice[tr_1_fr_slice],0]
+            x_1 = tr_1[tr_1_slice[tr_1_fr_slice],1]
+            y_2 = tr_2[tr_2_slice[aligned][tr_2_fr_slice],0]
+            x_2 = tr_2[tr_2_slice[aligned][tr_2_fr_slice],1]
+            dx = x_1-x_2
+            dy = y_1-y_2
+            dr = (dx**2+dy**2)**(1/2)
+            if np.median(dr) < thresh:
+                matches[i,j] = True
+
+
+def associate_particles_recursive(
+                                  n,
+                                  idx, 
+                                  rows = np.array([]),
+                                  cols = np.array([]),
+                                  match_matrix = []
+                                  ) -> (np.array, np.array):
+    """
+    Recursive particle re-association fetches the entire set of particles from
+    two datasets that are the same particle. This avoids nesting while loops,
+    etc. 
+
+    description: 
+        n controls which dimension of the match matrix is being sliced
+            n == 0 --> looking at a row, finding all column matches 
+            n == 1 --> looking at a column, finding all row matches 
+            
+        if the current index is not in the aggregated rows/columns it is added
+        for all the newly detected rows/columns iterate over them by self call
+
+        once there are no more new values it breaks the recursion and returns
+
+    There's probably a syntactax with fewer lines to express this, but I am
+    trying to keep it readable
+
+    Parameters:
+    -----------
+        n: int - 0 or 1
+        idx: int - row or column index depending on n
+        rows: np.array - aggregator of all the rows that gets passed through the recursion
+        cols: np.array - aggregator of all the columns that gets passed through the recursion
+        match_matrix: np.array (n,m) - array of all the match indices
+
+    Returns:
+    --------
+        (np.array, np.array) - tuple of rows and columns that are matched 
+        
+    """
+    if n == 0:
+        n_p1 = 1 
+        _cols_ = np.where(match_matrix[idx])[0]
+        new_cols = _cols_[~np.isin(_cols_, cols)]
+        cols = np.hstack([cols,new_cols])
+        if ~np.isin(idx, rows):
+            rows = np.hstack([rows, idx])
+        for elem in new_cols:
+            rows, cols = associate_particles_recursive(1,
+                                                       elem,
+                                                       rows = rows,
+                                                       cols = cols,
+                                                       match_matrix = match_matrix)
+        return rows, cols
+    elif n == 1:
+        n_p1 = 0
+        _rows_ = np.where(match_matrix[:,idx])[0]
+        new_rows = _rows_[~np.isin(_rows_,rows)]
+        rows = np.hstack([rows, new_rows])
+        if ~np.isin(idx, cols):
+            cols = np.hstack([cols, idx])
+        for elem in new_rows:
+            rows,cols = associate_particles_recursive(0,
+                                                      elem,
+                                                      rows = rows,
+                                                      cols = cols,
+                                                      match_matrix = match_matrix)
+        return rows, cols
+    else:
+        assert False, f"invalid array dimension?: {n}"
+
+
+def fetch_particle_pairs(
+                         df_1: pd.DataFrame, 
+                         df_2: pd.DataFrame,
+                         thresh: float,
+                         super_sampling: int
+                         ) -> np.array:
+    """
+    wrapper for the call to _fetch_particle_pairs_ that preps the arrays and
+    strips the particles out that did not have any matches.
+
+    note -1 is the flag for unmatched so the entire array is seeded with -1
+    which are expected to be overwritten by _fetch_particle_pairs_. if there are
+    -1's in the matched array then something went wrong
+    """
+    tr_1 = df_1[['y','x','frame','particle']].values
+    tr_2 = df_2[['y','x','frame','particle']].values
+    tr_1_particles = np.unique(tr_1[:,3])
+    tr_2_particles = np.unique(tr_2[:,3])
+    matches = np.zeros([len(tr_1_particles),len(tr_2_particles)], dtype = bool)
+    _fetch_particle_pairs_(tr_1, tr_2, matches, thresh, super_sampling = super_sampling)
+
+    # Fetch all the associations and extrac the particle names that are
+    # associated with them
+    associations = []
+    row_assoc, col_assoc = np.array([]), np.array([])
+    for j in tqdm(range(matches.shape[0]), "rec associating"):
+        row, col = associate_particles_recursive(0, j, match_matrix = matches)
+        if len(row) > 0 and len(col) > 0:
+            intersect_rows = np.intersect1d(row, row_assoc)
+            intersect_cols = np.intersect1d(col, col_assoc)
+            if len(intersect_rows) > 0 and len(intersect_cols) > 0:
+                print("already found")
+                print(row, intersect_rows, row_assoc)
+                print(col, intersect_cols, col_assoc)
+                continue
+            tr_1_assoc = tr_1_particles[row.astype(int)]
+            tr_2_assoc = tr_2_particles[col.astype(int)]
+            associations.append([tr_1_assoc, tr_2_assoc])
+            row_assoc = np.hstack([row, row_assoc])
+            col_assoc = np.hstack([col, col_assoc])
+    
+    return associations
+
+
+def re_link(tracks_1, tracks_2, matches) -> tuple:
+    """
+    This takes two sets of matched tracks and turns them into two synchronized
+    track dataframes where each particle index matches 1:1
+
+    The first track dataframe is expected to be the more stable so only its
+    unique values are used. This means that if for instance one of its
+    particles becomes lost and re-associated with another particle that the
+    latter track dataframe tracked more stably, it will not become confused by
+    this edge case
+
+    Parameters:
+    -----------
+        - tracks_1: pd.DataFrame - stable(r) particle track dataframe (output
+                    of trackpy locate) 
+        - tracks_2: pd.DataFrame - less stable particle track dataframe
+        - matches: np.array [n,2] - array of matched particle indices where
+                    first column is associated with tracks_1 and second column
+                    is associated with tracks_2
+    Returns:
+    --------
+        - (pd.DataFrame, pd.Dataframe): tracks_1 "matched", tracks_2 "matched"
+
+    """
+    matched_1 = []
+    matched_2 = []
+    for q, (idx_1, idx_2) in tqdm(enumerate(matches)):
+        iterable = zip(
+                       [idx_1,idx_2],
+                       [tracks_1, tracks_2],
+                       [matched_1, matched_2]
+                       )
+        for indices, track_dict, match in iterable:
+            local_tracks = []
+            for elem in indices:
+                slice_ = track_dict['particle'].values == elem
+                tracks_local = track_dict[slice_].copy()
+                tracks_local['particle'] = q*np.ones(len(tracks_local), dtype = int)
+                local_tracks.append(tracks_local.copy())
+            local_tracks = pd.concat(local_tracks)
+            u,c = np.unique(local_tracks['frame'].values, return_counts = True)
+            duplicates = u[c > 1]
+            if len(duplicates) > 0:
+                print(f"found duplicates {duplicates}")
+            local_tracks.drop_duplicates('frame', keep = 'first', inplace = True)
+            match.append(local_tracks)
+
+    return pd.concat(matched_1), pd.concat(matched_2)
 
 
 class event_tracks:

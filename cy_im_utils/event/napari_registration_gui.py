@@ -8,6 +8,7 @@ from magicgui import magicgui
 from os import mkdir
 from pathlib import Path
 from scipy.optimize import least_squares
+from scipy.stats import median_abs_deviation
 from tifffile import imwrite
 from tqdm import tqdm
 import cupy as cp
@@ -30,11 +31,12 @@ util_paths = [
 for elem in util_paths:
     path.append(elem)
 from cy_im_utils.imgrvt_cuda import rvt
-from cy_im_utils.event.trackpy_utils import imsd_powerlaw_fit, imsd_linear_fit
+from cy_im_utils.event.trackpy_utils import imsd_powerlaw_fit, imsd_linear_fit, fetch_particle_pairs, re_link
 from cy_im_utils.event.integrate_intensity import _integrate_events_wrapper_, fetch_indices_wrapper
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
+
 
 
 def cp_free_mem() -> None:
@@ -62,13 +64,16 @@ def __calc_msd__(
         imsd_kwargs = {'mpp':mpp, 'fps':fps, 'max_lagtime': max_lagtime}
         track_handle = track_dict
         track_lengths = []
+        bay_step = msd_point_min + 1
         if track_id == -1:
             print("calculating all tracks")
             imsd = tp.motion.imsd(track_handle, **imsd_kwargs)
+            emsd = tp.motion.emsd(track_handle, **imsd_kwargs)
             bay = []
             for elem in track_handle['particle'].unique():
                 particle_slice = track_handle['particle'] == elem
-                bay.append(__calc_bayesian__(elem, track_handle, fps, mpp))
+                bay.append(__calc_bayesian__(elem, track_handle, fps, mpp,
+                    lagtime_step = bay_step))
                 track_lengths.append(np.sum(particle_slice))
             bay = np.vstack(bay)
             #print("--> bay shape all elements:",bay.shape)
@@ -79,7 +84,12 @@ def __calc_msd__(
                 assert False, f"Empty Particle ID {track_id}"
             track_lengths.append(np.sum(particle_slice))
             imsd = tp.motion.imsd(track_handle[particle_slice], **imsd_kwargs)
-            bay = __calc_bayesian__(track_id, track_handle, fps, mpp)[None,:]
+            emsd = imsd
+            bay = __calc_bayesian__(track_id,
+                                    track_handle,
+                                    fps,
+                                    mpp,
+                                    lagtime_step= bay_step)[None,:]
             #print("--> bay shape 1 element:",bay.shape)
 
         # Log-Log Fit
@@ -87,8 +97,18 @@ def __calc_msd__(
                                              start_index = msd_point_min,
                                              end_index = msd_point_max)
 
+        A_ensemble,n_log_ensemble,log_fits_ensemble = imsd_powerlaw_fit(
+                                             emsd, 
+                                             start_index = msd_point_min,
+                                             end_index = msd_point_max)
+
         # Linear Fit
         m,b,lin_fits = imsd_linear_fit(imsd, 
+                                       start_index = msd_point_min,
+                                       end_index = msd_point_max)
+
+        m_ensemble,b_ensemble,lin_fits_ensemble = imsd_linear_fit(
+                                       emsd, 
                                        start_index = msd_point_min,
                                        end_index = msd_point_max)
 
@@ -102,14 +122,21 @@ def __calc_msd__(
 
         return  {
                 'imsd':imsd,
+                'emsd':emsd,
                 'bay':bay,
                 'bay_diam':bay_diam,
                 'A':A,
                 'n_log':n_log,
                 'log_fits':log_fits,
+                'A_ensemble':A_ensemble,
+                'n_log_ensemble':n_log_ensemble,
+                'log_fits_ensemble':log_fits_ensemble,
                 'm':m,
                 'b':b,
                 'lin_fits':lin_fits,
+                'm_ensemble':m_ensemble,
+                'b_ensemble':b_ensemble,
+                'lin_fits_ensemble':lin_fits_ensemble,
                 'diffusivity_log':diffusivity_log,
                 'diam_log':diam_log,
                 'diffusivity_lin':diffusivity_log,
@@ -119,19 +146,26 @@ def __calc_msd__(
                 }
 
 
-def __calc_bayesian__(track_id, track_handle, fps, mpp) -> np.array:
+def __calc_bayesian__(track_id, 
+                      track_handle,
+                      fps,
+                      mpp,
+                      lagtime_step = 1) -> np.array:
     """
     wrapper for the call to hd.estimate_diffusion...
 
     """
     particle_slice = track_handle['particle'] == track_id
     # Convert displacement from pixels to nm?
-    dframe = np.diff(track_handle['frame'][particle_slice].values)
-    frame_drop_bool = dframe != 1
-    dx = np.diff(track_handle['x'][particle_slice].values)
-    dy = np.diff(track_handle['y'][particle_slice].values)
+    fr_handle = track_handle['frame'][particle_slice].values
+    dframe = np.abs(fr_handle[lagtime_step:] - fr_handle[:-lagtime_step])
+    frame_drop_bool = dframe != lagtime_step
+    x_handle = track_handle['x'][particle_slice].values
+    y_handle = track_handle['y'][particle_slice].values
+    dx = x_handle[lagtime_step:] - x_handle[:-lagtime_step]
+    dy = y_handle[lagtime_step:] - y_handle[:-lagtime_step]
     dr = np.sqrt(dx**2 + dy**2) * mpp
-    dr[ dframe != 1] = np.nan
+    dr[ dframe != lagtime_step] = np.nan
     posterior, alpha, beta = hd.estimate_diffusion(
             n_dim = 2,
             dt = 1 / fps,
@@ -272,6 +306,63 @@ def fetch_dirac_kernel(x, sigma, gamma, x0 = 0) -> np.array:
     return kern
 
 
+def re_link(tracks_1, tracks_2, matches) -> tuple:
+    """
+    This takes two sets of matched tracks and turns them into two synchronized
+    track dataframes where each particle index matches 1:1
+
+    The first track dataframe is expected to be the more stable so only its
+    unique values are used. This means that if for instance one of its
+    particles becomes lost and re-associated with another particle that the
+    latter track dataframe tracked more stably, it will not become confused by
+    this edge case
+
+    Parameters:
+    -----------
+        - tracks_1: pd.DataFrame - stable(r) particle track dataframe (output
+                    of trackpy locate) 
+        - tracks_2: pd.DataFrame - less stable particle track dataframe
+        - matches: np.array [n,2] - array of matched particle indices where
+                    first column is associated with tracks_1 and second column
+                    is associated with tracks_2
+    Returns:
+    --------
+        - (pd.DataFrame, pd.Dataframe): tracks_1 "matched", tracks_2 "matched"
+
+    """
+    matched_1 = []
+    matched_2 = []
+    for q,a in tqdm(enumerate(np.unique(matches[:,0]))):
+        slice_1 = tracks_1['particle'].values == a
+        tracks_a = tracks_1[slice_1].copy()
+        tracks_a['particle'] = q*np.ones(len(tracks_a), dtype = int)
+        matched_1.append(tracks_a)
+        bool_idx = matches[:,0] == a
+        match_2_indices = matches[bool_idx,1]
+        local_tracks = [] 
+        for elem in match_2_indices:
+            slice_2 = tracks_2['particle'] == elem
+            temp = tracks_2[slice_2].copy()
+            temp['particle'] = q*np.ones(len(temp), dtype = int)
+            local_tracks.append(temp)
+        local_tracks = pd.concat(local_tracks)
+        u,c = np.unique(local_tracks['frame'].values, return_counts = True)
+        duplicates = u[c > 1]
+        if len(duplicates) > 0:
+            print(f"found duplicates {duplicates}")
+        local_tracks.drop_duplicates('frame', keep = 'first', inplace = True)
+        matched_2.append(local_tracks)
+    return pd.concat(matched_1), pd.concat(matched_2)
+
+
+def fetch_square_kernel(x, sigma, gamma, x0 = 0) -> np.array:
+    """
+    normalized square unweighted integrator (sum = 1)
+    """
+    kern = np.ones_like(x)
+    return kern / np.sum(kern)
+
+
 def __read_hdf5__(file_name, field_name) -> np.array:
     """
     wrapper for hdf5 reading call field name can be "CD" (which stands for
@@ -292,7 +383,8 @@ def __hdf5_to_numpy__(
                     width: int = 720,
                     height: int = 1280,
                     dtype= np.int16,
-                    ) -> np.array:
+                    omit_neg: bool = False,
+                    ) -> (np.array, np.array):
     """
     This is for loading in an hdf5 file so that the exposure time of the
     frame camera can be matched to the event signal directly.....
@@ -333,7 +425,9 @@ def __hdf5_to_numpy__(
         integrator_fun(image_buffer, 
                        cd_data['x'][slice_],
                        cd_data['y'][slice_], 
-                       cd_data['p'][slice_].astype(bool))
+                       cd_data['p'][slice_].astype(bool),
+                       omit_neg
+                       )
         image_buffer[np.abs(image_buffer) > thresh] = 0
         image_stack[j] = image_buffer.copy()
 
@@ -356,6 +450,7 @@ class filter_1d_type(Enum):
     cauchy_1D = "Cauchy",partial(fetch_cauchy_kernel)
     voigt_1D = "Voigt",partial(fetch_voigt_kernel)
     dirac_1D = "Dirac",partial(fetch_dirac_kernel)
+    square_1D = "Square",partial(fetch_square_kernel)
 
 
 class transform_type(Enum):
@@ -416,25 +511,24 @@ class spatio_temporal_registration_gui:
                                  ],
                 'Filtering 2':[
                             self._filter_1d_(),
+                            self.__remove_pixels__(),
+                            self.__subtract_axial_median_gpu__(),
+                            #self._diff_layer_(),
                     ],
                 'Tracking':[
                             self._preview_track_centroids_(),
                             self._track_batch_locate_(),
                             self._track_link_(),
                             self._calc_msd_(),
-                            self._estimate_matched_particles_()
                               ],
-
+                'Fusion':[self._estimate_matched_particles_()],
                 'Figures':[
                             self._figure_(),
                             self._violin_plot_()
                               ],
                 'Utils':[
-                    self.__remove_pixels__(),
-                    self.__subtract_axial_median_gpu__(),
                     self.__free_memory__(),
                     self.__compute__(),
-                    self._diff_layer_(),
                     self.__unspecified_colormap__(),
                     self.__measure_line_length__(),
                     ]
@@ -468,7 +562,8 @@ class spatio_temporal_registration_gui:
                   num_images = {'label': "Number of Images (-1 for all triggers)",'max':1e16},
                   event_thresh = {'label': "Dead Pixel Threshold",'max':1e16},
                   super_sampling = {'label': "Samples per trigger"},
-                  dtype = {'label': "Data type"}
+                  dtype = {'label': "Data type"},
+                  omit_negative = {'label': "Omit Negative Polarity"}
                   )
         def inner(
                 event_file: Path = Path.home(),
@@ -477,7 +572,8 @@ class spatio_temporal_registration_gui:
                 event_thresh: float = 0.0,
                 num_images: int = -1,
                 super_sampling: int = 1,
-                dtype: np_dtype = np_dtype.int16
+                dtype: np_dtype = np_dtype.int16,
+                omit_negative: bool = False
                 ):
             self.event_file = event_file
             self.event_acc_time = acc_time
@@ -485,6 +581,7 @@ class spatio_temporal_registration_gui:
             self.num_event_images = num_images
             self.super_sampling = super_sampling
             self.event_dtype = dtype.value
+            self.event_omit_neg = omit_negative
             event_files = event_file.as_posix()
             print(event_files)
             msg = "use hdf5 format (metavision_file_to_hdf5 -i <input>.raw -o <output>.hdf5)"
@@ -499,7 +596,8 @@ class spatio_temporal_registration_gui:
                                        thresh = event_thresh,
                                        super_sampling = self.super_sampling,
                                        num_images = self.num_event_images,
-                                       dtype = dtype.value
+                                       dtype = dtype.value,
+                                       omit_neg = self.event_omit_neg
                                                )
 
             inst.viewer.add_image(event_stack, colormap = 'viridis', 
@@ -1312,13 +1410,16 @@ class spatio_temporal_registration_gui:
         max_length = np.max(track_lengths)
         min_length = np.min(track_lengths)
         length_bins = 2**np.arange(np.log2(min_length), np.log2(max_length), 1)
+        _k_ = 1.4826
         fig,ax = plt.subplots(1,2, sharey = True)
         for elem in length_bins:
             slice_ = track_lengths >= elem
-            diams_local = handle['diam_lin'][slice_],
+            diams_local = handle['diam_lin'][slice_]
             mean_local = np.nanmean(diams_local)
             std_local = np.nanstd(diams_local)
+            med_local = np.nanmedian(diams_local)
             cv_local = 100*std_local/mean_local
+            mad_med = _k_*100*median_abs_deviation(diams_local, nan_policy = 'omit') / med_local
             n_particles = np.sum(slice_)
             for a in ax:
                 a.violinplot(
@@ -1326,7 +1427,8 @@ class spatio_temporal_registration_gui:
                         positions = [np.log2(elem)],
                         vert = False
                         )
-                string = f"CV: {cv_local:0.2f} %\n{n_particles} particles"
+                print(mad_med)
+                string = f"k mad/med:{mad_med:0.2f} %\nCV: {cv_local:0.2f} %\n{n_particles} particles"
                 xy = (mean_local + std_local*2, np.log2(elem))
                 a.annotate(string, xy = xy)
         ax[0].set_xscale("log")
@@ -1376,40 +1478,22 @@ class spatio_temporal_registration_gui:
         @magicgui(
                 call_button="Estimate matched particle pairs",
                 track_1 = {'label':'Track 1 Name'},
-                track_2 = {'label':'Track 2 Size'},
-                thresh = {'label':'Thresh'}
+                track_2 = {'label':'Track 2 Name'},
+                thresh = {'label':'Thresh'},
+                super_sampling = {'label':'Super Sampling'}
                 )
         def inner(
                 track_1: str,
                 track_2: str,
                 thresh: float,
+                super_sampling: int = 1,
                 ):
-            handle_1 = inst.track_holder[track_1]
-            handle_2 = inst.track_holder[track_2]
-            matches = []
-            thresh = 20
-            for elem in tqdm(handle_1['particle'].unique()):
-                bool_slice_1 = handle_1['particle'] == elem
-                frame_1 = handle_1['frame'].values[bool_slice_1]
-                ev_x = handle_1['x'].values[bool_slice_1]
-                ev_y = handle_1['y'].values[bool_slice_1]
-                for fr_elem in handle_2['particle'].unique():
-                    bool_slice_2 = handle_2['particle'] == fr_elem
-                    frame_2 = handle_2['frame'].values[bool_slice_2]
-                    fr_x = handle_2['x'].values[bool_slice_2]
-                    fr_y = handle_2['y'].values[bool_slice_2]
-                    intersection, ev_idx, fr_idx = np.intersect1d(frame_1, 
-                                                                  frame_2,
-                                                                  return_indices = True)
-                    if len(intersection) == 0:
-                        continue
-                    dx = fr_x[fr_idx] - ev_x[ev_idx]
-                    dy = fr_y[fr_idx] - ev_y[ev_idx]
-                    dr = (dx**2+dy**2)**(1/2)
-                    if dr.max() < thresh:
-                        matches.append([elem, fr_elem])
-            self.matches = np.vstack(matches)
-
+            inst.matches = fetch_particle_pairs(
+                                                inst.track_holder[track_1],
+                                                inst.track_holder[track_2],
+                                                thresh = thresh,
+                                                super_sampling = super_sampling
+                                                )
         return inner
 
 
@@ -1446,7 +1530,8 @@ class spatio_temporal_registration_gui:
                                            thresh = self.event_dead_px_thresh,
                                            super_sampling = self.super_sampling,
                                            num_images = self.num_event_images,
-                                           dtype = self.event_dtype
+                                           dtype = self.event_dtype,
+                                           omit_neg = self.event_omit_neg
                                            )
 
             inst.viewer.add_image(event_stack, 
@@ -1522,7 +1607,8 @@ class spatio_temporal_registration_gui:
                                            thresh = self.event_dead_px_thresh,
                                            super_sampling = self.super_sampling,
                                            num_images = n_images,
-                                           dtype = self.event_dtype
+                                           dtype = self.event_dtype,
+                                           omit_neg = self.event_omit_neg
                                            )
 
             inst.viewer.add_image(event_stack, colormap = 'viridis', 
