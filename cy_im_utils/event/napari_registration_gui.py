@@ -34,6 +34,7 @@ from cy_im_utils.imgrvt_cuda import rvt
 from cy_im_utils.event.trackpy_utils import imsd_powerlaw_fit, imsd_linear_fit, fetch_particle_pairs, re_link
 from cy_im_utils.event.integrate_intensity import _integrate_events_wrapper_, fetch_indices_wrapper
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
+from cy_im_utils.event.clustering import *
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
 
@@ -176,6 +177,7 @@ def __calc_bayesian__(track_id,
     return bay_diffusivity
 
 
+
 def residual_affine(mat: list, input_pair: np.array, target_pair: np.array) -> np.array:
     """
     This function is used by scipy.optimize.least_squares to fit the affine
@@ -301,58 +303,9 @@ def fetch_dirac_kernel(x, sigma, gamma, x0 = 0) -> np.array:
     """
     kern = np.zeros_like(x)
     numel = len(kern)
-    assert numel % 2 == 1, "Diract must have odd kernel shape"
+    assert numel % 2 == 1, "Dirac must have odd kernel shape"
     kern[numel // 2] = 1
     return kern
-
-
-def re_link(tracks_1, tracks_2, matches) -> tuple:
-    """
-    This takes two sets of matched tracks and turns them into two synchronized
-    track dataframes where each particle index matches 1:1
-
-    The first track dataframe is expected to be the more stable so only its
-    unique values are used. This means that if for instance one of its
-    particles becomes lost and re-associated with another particle that the
-    latter track dataframe tracked more stably, it will not become confused by
-    this edge case
-
-    Parameters:
-    -----------
-        - tracks_1: pd.DataFrame - stable(r) particle track dataframe (output
-                    of trackpy locate) 
-        - tracks_2: pd.DataFrame - less stable particle track dataframe
-        - matches: np.array [n,2] - array of matched particle indices where
-                    first column is associated with tracks_1 and second column
-                    is associated with tracks_2
-    Returns:
-    --------
-        - (pd.DataFrame, pd.Dataframe): tracks_1 "matched", tracks_2 "matched"
-
-    """
-    matched_1 = []
-    matched_2 = []
-    for q,a in tqdm(enumerate(np.unique(matches[:,0]))):
-        slice_1 = tracks_1['particle'].values == a
-        tracks_a = tracks_1[slice_1].copy()
-        tracks_a['particle'] = q*np.ones(len(tracks_a), dtype = int)
-        matched_1.append(tracks_a)
-        bool_idx = matches[:,0] == a
-        match_2_indices = matches[bool_idx,1]
-        local_tracks = [] 
-        for elem in match_2_indices:
-            slice_2 = tracks_2['particle'] == elem
-            temp = tracks_2[slice_2].copy()
-            temp['particle'] = q*np.ones(len(temp), dtype = int)
-            local_tracks.append(temp)
-        local_tracks = pd.concat(local_tracks)
-        u,c = np.unique(local_tracks['frame'].values, return_counts = True)
-        duplicates = u[c > 1]
-        if len(duplicates) > 0:
-            print(f"found duplicates {duplicates}")
-        local_tracks.drop_duplicates('frame', keep = 'first', inplace = True)
-        matched_2.append(local_tracks)
-    return pd.concat(matched_1), pd.concat(matched_2)
 
 
 def fetch_square_kernel(x, sigma, gamma, x0 = 0) -> np.array:
@@ -475,6 +428,7 @@ class spatio_temporal_registration_gui:
         self.reduced_data = {}
         self.super_sampling = 1
         self.frame_size = np.array([720, 1280], dtype = np.int64)
+        self.global_translation = {}
 
         dock_widgets = {
                 'Data Loading': [
@@ -493,7 +447,7 @@ class spatio_temporal_registration_gui:
                               self._reset_affine_(),
                               self._fit_affine_(),
                               self._apply_transform_(),
-                              self._shift_event_(),
+                              self._translate_layer_(),
                               #self._write_transforms_(),
                               self._mutual_information_(),
                               self._zip_centroids_to_points_(),
@@ -521,7 +475,9 @@ class spatio_temporal_registration_gui:
                             self._track_link_(),
                             self._calc_msd_(),
                               ],
-                'Fusion':[self._estimate_matched_particles_()],
+                'Fusion':[
+                            self._estimate_matched_particles_()
+                            ],
                 'Figures':[
                             self._figure_(),
                             self._violin_plot_()
@@ -600,7 +556,7 @@ class spatio_temporal_registration_gui:
                                        omit_neg = self.event_omit_neg
                                                )
 
-            inst.viewer.add_image(event_stack, colormap = 'viridis', 
+            self.viewer.add_image(event_stack, colormap = 'viridis', 
                                   name = 'event')
         return inner
 
@@ -620,7 +576,7 @@ class spatio_temporal_registration_gui:
             frame_files = frame_file.as_posix()
             print(frame_files)
             frame_stack = imread(frame_files)
-            inst.viewer.add_image(frame_stack, colormap = 'hsv',
+            self.viewer.add_image(frame_stack, colormap = 'viridis_r',
                                 name = 'frame', opacity = 0.4)
 
         return inner
@@ -682,6 +638,10 @@ class spatio_temporal_registration_gui:
             assert isinstance(handle, _points_type_), "not a points layer"
             data_handle = handle.data
             event_pairs = data_handle[::2,1:]
+            if self.affine_matrix is None and self.pull_affine_matrix is None:
+                if 'event' in self.global_translation:
+                    print("INCORPORATING GLOBAL LAYER TRANSLATION")
+                    event_pairs -= self.global_translation['event'][1:]
             frame_pairs = data_handle[1::2,1:]
             assert event_pairs.shape == frame_pairs.shape, "shape mismatch between pairs"
             n_points = event_pairs.shape[0]
@@ -772,7 +732,7 @@ class spatio_temporal_registration_gui:
             self.viewer.add_image(frame_transformed, 
                                   visible = False,
                                   name = "frame -> event",
-                                  colormap = "hsv"
+                                  colormap = "viridis_r"
                                   )
             self.viewer.add_image(event_raw_transformed, 
                                   opacity = 0.4,
@@ -868,20 +828,30 @@ class spatio_temporal_registration_gui:
             print(f"first frame set to {self.frame_0}")
         return inner
 
-    def _shift_event_(self):
+    def _translate_layer_(self):
+        """
+        This widget enables translating the canvas of a specific layer so you
+        can manually align the features...
+        """
         @magicgui(
-                call_button="Shift Layer Temporal",
-                shift={'label':'shift','min':-10_000,'max':10_000},
+                call_button="Translate Layer",
+                shift_z={'label':'shift z','min':0,'max':10_000},
+                shift_y={'label':'shift y','min':-10_000,'max':10_000},
+                shift_x={'label':'shift x','min':-10_000,'max':10_000},
                 layer_name = {'label':'Layer name'},
                 persist = True
                 )
         def inner(
-                shift: int = 0,
+                shift_x: int = 0,
+                shift_y: int = 0,
+                shift_z: int = 0,
                 layer_name: str = ""
                 ):
             layer = self.__fetch_layer__(layer_name)
-            layer.translate = np.array([shift, 0, 0])
-            print(f"shfited {layer_name} temporally by {shift}")
+            tformed = np.array([shift_z, shift_y, shift_x])
+            layer.translate = tformed
+            self.global_translation[layer_name] = tformed.copy()
+            print(f"translated {layer_name} by {tformed}")
         return inner
 
     def _write_transforms_(self):
@@ -1024,6 +994,10 @@ class spatio_temporal_registration_gui:
                 threshold: float,
                 ):
             test_frame = self.__fetch_viewer_image_index__()
+            if layer_name in self.global_translation:
+                z_offset = self.global_translation[layer_name][0]
+                print(f"offsetting tracked frame {z_offset}")
+                test_frame -= z_offset
             track_handle = self.__fetch_layer__(layer_name).data[test_frame].copy()
             if track_handle.ndim == 3:
                 print("--> not sure what to do for 4d images?")
@@ -1075,6 +1049,12 @@ class spatio_temporal_registration_gui:
             diameter = self.track_dict['diameter']
             threshold = self.track_dict['threshold']
             track_handle = self.__fetch_layer__(layer_name).data
+            if layer_name in self.global_translation:
+                z_offset = self.global_translation[layer_name][0]
+            else:
+                z_offset = 0
+            print(f"tracking z offset = {z_offset}")
+
             n_elem = track_handle.shape[0]
             proc = "auto" if processes < 0 else processes
             if track_handle.ndim == 4:
@@ -1122,6 +1102,8 @@ class spatio_temporal_registration_gui:
                     f.append(locate_dict)
                                  
                 f = pd.concat(f)
+            
+            f['frame'] += z_offset
             self.located_frames[layer_name] = f
 
             # Save Tracks (just in case they were difficult to calculate....)
@@ -1480,20 +1462,45 @@ class spatio_temporal_registration_gui:
                 track_1 = {'label':'Track 1 Name'},
                 track_2 = {'label':'Track 2 Name'},
                 thresh = {'label':'Thresh'},
-                super_sampling = {'label':'Super Sampling'}
+                super_sampling = {'label':'Super Sampling'},
+                link_bool = {'label':"Link"},
+                tracks_bool = {'label':"Tracks to viewer"}
                 )
         def inner(
                 track_1: str,
                 track_2: str,
                 thresh: float,
                 super_sampling: int = 1,
+                link_bool: bool = True,
+                tracks_bool: bool = True,
                 ):
-            inst.matches = fetch_particle_pairs(
-                                                inst.track_holder[track_1],
-                                                inst.track_holder[track_2],
+            self.matches = fetch_particle_pairs(
+                                                self.track_holder[track_1],
+                                                self.track_holder[track_2],
                                                 thresh = thresh,
                                                 super_sampling = super_sampling
                                                 )
+            print("finished matching")
+            if link_bool:
+                temp = re_link(
+                               self.track_holder[track_1],
+                               self.track_holder[track_2],
+                               self.matches
+                               )
+                handle_1_match = track_1 + " matched"
+                handle_2_match = track_2 + " matched"
+                self.track_holder[handle_1_match] = temp[0]
+                self.track_holder[handle_2_match] = temp[1]
+                print(f"added {handle_1_match} to tracks")
+                print(f"added {handle_2_match} to tracks")
+                if tracks_bool:
+                    slice_ = ['particle','frame','y','x']
+                    for key in [handle_1_match, handle_2_match]:
+                        print(f"adding {key} tracks to viewer")
+                        self.viewer.add_tracks(
+                                self.track_holder[key][slice_],
+                                name = key
+                                )
         return inner
 
 
@@ -1534,7 +1541,7 @@ class spatio_temporal_registration_gui:
                                            omit_neg = self.event_omit_neg
                                            )
 
-            inst.viewer.add_image(event_stack, 
+            self.viewer.add_image(event_stack, 
                                   colormap = 'viridis', 
                                   name = 'event filtered')
 
@@ -1611,7 +1618,7 @@ class spatio_temporal_registration_gui:
                                            omit_neg = self.event_omit_neg
                                            )
 
-            inst.viewer.add_image(event_stack, colormap = 'viridis', 
+            self.viewer.add_image(event_stack, colormap = 'viridis', 
                                   name = 'event filtered preview (1st acc time)')
 
         return inner
@@ -1788,7 +1795,7 @@ class spatio_temporal_registration_gui:
                 diff = cp_arr[1] - cp_arr[0]
                 output[j] = diff.get()
             cp_free_mem()
-            inst.viewer.add_image(output[:-1], name = "diff frame",
+            self.viewer.add_image(output[:-1], name = "diff frame",
                     colormap = "hsv")
         return inner
 
@@ -2054,7 +2061,7 @@ class spatio_temporal_registration_gui:
         """
         file_name_prefix = f"{self.microscope}_{self.dataset}"
         points = self.__fetch_layer__("Points").data
-        frame_shape  = inst.__fetch_layer__("frame").data.shape
+        frame_shape  = self.__fetch_layer__("frame").data.shape
         affine_mat = self.affine_matrix
         horz_scale = affine_mat[0,0]
         horz_shear = affine_mat[0,1]
