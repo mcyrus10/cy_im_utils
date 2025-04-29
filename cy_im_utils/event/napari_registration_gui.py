@@ -477,7 +477,7 @@ def smart_slice(arr: np.array, x0: int, x1: int, y0: int, y1: int) -> np.array:
     if y0 < 0:
         dy_0 = -y0
         y0 = 0
-    slice_ = (slice(x0,x1), slice(y0,y1))
+    slice_ = (slice(x0, x1), slice(y0, y1))
     temp = arr[slice_]
     pad_shape = ((dx_0, dx_1), (dy_0, dy_1))
     return np.pad(temp, pad_shape)
