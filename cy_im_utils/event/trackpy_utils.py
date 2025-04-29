@@ -249,7 +249,7 @@ def fetch_particle_pairs(
     return associations
 
 
-def re_link(tracks_1, tracks_2, matches) -> tuple:
+def re_link(tracks_1, tracks_2, matches, mode: str = 'frame match') -> tuple:
     """
     This takes two sets of matched tracks and turns them into two synchronized
     track dataframes where each particle index matches 1:1
@@ -295,6 +295,21 @@ def re_link(tracks_1, tracks_2, matches) -> tuple:
                 print(f"found duplicates {duplicates}")
             local_tracks.drop_duplicates('frame', keep = 'first', inplace = True)
             match.append(local_tracks)
+
+    # This section makes only tracks that are mutually shared ON FRAMES. 
+    if mode == 'frame match':
+        print("Asserting only passing particles that are in the same frame")
+        desc = "iterating over particles"
+        for q, (m1, m2) in tqdm(enumerate(zip(matched_1, matched_2)), desc = desc):
+            t1 = m1['frame'].values
+            t2 = m2['frame'].values
+            intersect = np.intersect1d(t1,t2)
+            m1_bool = np.isin(t1, intersect)
+            m2_bool = np.isin(t2, intersect)
+            matched_1[q] = m1[m1_bool].copy()
+            matched_2[q] = m2[m2_bool].copy()
+    else:
+        print("Warning -> tracks that are not frame synced are shared here")
 
     return pd.concat(matched_1), pd.concat(matched_2)
 

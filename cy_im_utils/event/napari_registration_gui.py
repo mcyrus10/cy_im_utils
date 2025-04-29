@@ -8,7 +8,7 @@ from magicgui import magicgui
 from os import mkdir
 from pathlib import Path
 from scipy.optimize import least_squares
-from scipy.stats import median_abs_deviation
+from scipy.stats import median_abs_deviation, distributions
 from tifffile import imwrite
 from tqdm import tqdm
 import cupy as cp
@@ -17,6 +17,7 @@ import diffusive_distinguishability.ndim_homogeneous_distinguishability as hd
 import gc
 import h5py
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 import napari
 import numpy as np
 import pandas as pd
@@ -31,13 +32,14 @@ util_paths = [
 for elem in util_paths:
     path.append(elem)
 from cy_im_utils.imgrvt_cuda import rvt
-from cy_im_utils.event.trackpy_utils import imsd_powerlaw_fit, imsd_linear_fit, fetch_particle_pairs, re_link
-from cy_im_utils.event.integrate_intensity import _integrate_events_wrapper_, fetch_indices_wrapper
+from cy_im_utils.event.trackpy_utils import (imsd_powerlaw_fit, imsd_linear_fit,
+                                             fetch_particle_pairs, re_link)
+from cy_im_utils.event.integrate_intensity import (_integrate_events_wrapper_,
+                                                   fetch_indices_wrapper)
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
 from cy_im_utils.event.clustering import *
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
-
 
 
 def cp_free_mem() -> None:
@@ -46,6 +48,46 @@ def cp_free_mem() -> None:
     """
     mempool = cp.get_default_memory_pool()
     mempool.free_all_blocks()
+
+
+def plot_joint_hist(arr_0,
+                    arr_1,
+                    bins = 50,
+                    figsize = (8,8), 
+                    xlabel = "",
+                    ylabel = "",
+                    mode = 'match_bins') -> None:
+    """
+    """
+    _k_ = 1.4826
+    fig = plt.figure(figsize = figsize)
+    gs = GridSpec(4,4)
+    ax = [fig.add_subplot(gs[1:,:-1])]
+    ax.append(fig.add_subplot(gs[0,:-1], sharex = ax[0]))
+    ax.append(fig.add_subplot(gs[1:,-1], sharey = ax[0]))
+
+    ax[0].scatter(arr_0, arr_1)
+    ax[0].axline((0,0), (1,1), color = 'k', linestyle = '--')
+    hist_data = ax[1].hist(arr_0, bins = bins)
+    med_0 = np.nanmedian(arr_0)
+    mad_0 = median_abs_deviation(arr_0, nan_policy = 'omit')
+    rCV_0 = 100*mad_0*_k_/med_0
+    label_0 = f"diam: {med_0:0.2f} nm\nrCV: {rCV_0:0.2f}%"
+    ax[1].axvline(med_0, color = 'r', linestyle = '--', label = label_0)
+    if mode == 'match_bins':
+        bins_2 = hist_data[1]
+    else:
+        bins_2 = bins
+    ax[2].hist(arr_1, bins = bins_2, orientation = 'horizontal')
+    med_1 = np.nanmedian(arr_1)
+    mad_1 = median_abs_deviation(arr_1, nan_policy = 'omit')
+    rCV_1 = 100*mad_1*_k_/med_1
+    label_1 = f"{med_1:0.2f} nm\nrCV: {rCV_1:0.2f}%"
+    ax[2].axhline(med_1, color = 'r', linestyle = '--', label = label_1)
+    for a in [ax[1], ax[2]]:
+        a.legend()
+    ax[0].set(xlabel=xlabel, ylabel=ylabel)
+    fig.tight_layout()
 
 
 def __calc_msd__(
@@ -175,7 +217,6 @@ def __calc_bayesian__(track_id,
     bay_diffusivity = np.array([posterior.mean(), posterior.std()])
 
     return bay_diffusivity
-
 
 
 def residual_affine(mat: list, input_pair: np.array, target_pair: np.array) -> np.array:
@@ -414,6 +455,34 @@ class transform_type(Enum):
     affine = residual_affine, [1,0,0,1,0,0], 'affine'
 
 
+def contrast(im, low = 0.1, high = 0.9):
+    return np.quantile(im.flatten(), low), np.quantile(im.flatten(), high)
+
+
+def smart_slice(arr: np.array, x0: int, x1: int, y0: int, y1: int) -> np.array:
+    """
+    This funciton is for padding an array slice with zeros if the slice extends
+    beyond the edge of the array
+    """
+    nx, ny = arr.shape
+    dx_0, dx_1, dy_0, dy_1 = 0,0,0,0
+
+    if x1 > nx:
+        dx_1 = x1-nx
+    if y1 > ny:
+        dy_1 = y1-ny
+    if x0 < 0:
+        dx_0 = -x0
+        x0 = 0
+    if y0 < 0:
+        dy_0 = -y0
+        y0 = 0
+    slice_ = (slice(x0,x1), slice(y0,y1))
+    temp = arr[slice_]
+    pad_shape = ((dx_0, dx_1), (dy_0, dy_1))
+    return np.pad(temp, pad_shape)
+
+
 class spatio_temporal_registration_gui:
     def __init__(self):
         self.viewer = napari.Viewer()
@@ -427,6 +496,7 @@ class spatio_temporal_registration_gui:
         self.track_holder = {}
         self.reduced_data = {}
         self.super_sampling = 1
+        self.hot_px_layer = None
         self.frame_size = np.array([720, 1280], dtype = np.int64)
         self.global_translation = {}
 
@@ -439,8 +509,6 @@ class spatio_temporal_registration_gui:
 
                               ],
                 'Registration': [
-                              #self._flip_ud_(),
-                              #self._flip_lr_(),
                               self._flip_(),
                               self._align_sub_super_sampled_frame_(),
                               self._load_affine_mat_(),
@@ -461,13 +529,13 @@ class spatio_temporal_registration_gui:
                             self._apply_gaussian_layer_(),
                             self._apply_median_layer_(),
                             self._apply_conditional_median_layer_(),
-
                                  ],
                 'Filtering 2':[
                             self._filter_1d_(),
                             self.__remove_pixels__(),
                             self.__subtract_axial_median_gpu__(),
-                            #self._diff_layer_(),
+                            self.__calculate_hot_pixels__(),
+                            self._filter_hot_pixels_(),
                     ],
                 'Tracking':[
                             self._preview_track_centroids_(),
@@ -476,17 +544,20 @@ class spatio_temporal_registration_gui:
                             self._calc_msd_(),
                               ],
                 'Fusion':[
-                            self._estimate_matched_particles_()
+                            self._estimate_matched_particles_(),
+                            self._add_match_points_(),
                             ],
-                'Figures':[
+                'Vis':[
                             self._figure_(),
-                            self._violin_plot_()
+                            self._violin_plot_(),
+                            self._plot_particle_iso_()
                               ],
                 'Utils':[
                     self.__free_memory__(),
                     self.__compute__(),
                     self.__unspecified_colormap__(),
                     self.__measure_line_length__(),
+                    self.__particles_in_rectangle__(),
                     ]
                 }
         tabs = []
@@ -556,7 +627,8 @@ class spatio_temporal_registration_gui:
                                        omit_neg = self.event_omit_neg
                                                )
 
-            self.viewer.add_image(event_stack, colormap = 'viridis', 
+            self.viewer.add_image(event_stack, 
+                                  colormap = 'coolwarm', 
                                   name = 'event')
         return inner
 
@@ -983,6 +1055,7 @@ class spatio_temporal_registration_gui:
     def _preview_track_centroids_(self):
         @magicgui(call_button="Locate Centroids",
                 layer_name = {'label':'Layer Name'},
+                persist = True,
                 minmass = {'label':'minmass', 'max': 1e16, 'step':1e-6},
                 diameter = {'label':'Diameter', 'max': 1e16},
                 threshold = {'label':'Threshold', 'max': 1e16, 'step':1e-6},
@@ -1033,6 +1106,7 @@ class spatio_temporal_registration_gui:
     def _track_batch_locate_(self):
         @magicgui(call_button="Locate Particles",
                 layer_name = {'label':'Layer Name'},
+                persist = True,
                 mode = {'label':'Mode (batch/locate)'},
                 processes = {'label': "Num Processes", "max":1e16},
                 batch_size = {'label': "Batch size", "max":1e16}
@@ -1119,6 +1193,7 @@ class spatio_temporal_registration_gui:
     def _track_link_(self):
         @magicgui(call_button="Track Particles",
                 layer_name = {'label':'Layer Name'},
+                persist = True,
                 min_length = {'label':'Filter Stub Length', 'max': 1e16},
                 search_range = {'label':'Search Range', 'max': 1e16},
                 memory = {'label':'memory', 'max': 1e16},
@@ -1189,6 +1264,7 @@ class spatio_temporal_registration_gui:
     def _calc_msd_(self):
         @magicgui(
                 call_button="Calculate MSD and Bayesian Diam",
+                persist = True,
                 track_id = {'label':'Track ID (-1 for all tracks)', 'min':-1, 'max': 1e16},
                 fps = {'label':'fps', 'max': 1e16},
                 mpp = {'label':'micron per pixel', 'max': 1e16, 'step': 1e-4},
@@ -1372,90 +1448,6 @@ class spatio_temporal_registration_gui:
         self.viewer.add_image(np.asarray(Image.open(f_name)), 
                               name = f"msd {layer_name} {track_id}")
 
-    def _violin_plot_(self):
-        @magicgui(
-                call_button="Violin plot",
-                layer_name = {'label': "Layer Name"},
-                ground_truth = {'label':"Ground Truth (-1 for None)"}
-                )
-        def inner(
-                layer_name: str,
-                ground_truth: float = -1.0,
-                ):
-            gt = None if ground_truth == -1 else ground_truth
-            self.__create_violin_plot__(layer_name, ground_truth = gt)
-        return inner
-
-    def __create_violin_plot__(self, layer_name, ground_truth = None):
-        handle = self.reduced_data[layer_name]
-        track_lengths = handle['track_lengths']
-        max_length = np.max(track_lengths)
-        min_length = np.min(track_lengths)
-        length_bins = 2**np.arange(np.log2(min_length), np.log2(max_length), 1)
-        _k_ = 1.4826
-        fig,ax = plt.subplots(1,2, sharey = True)
-        for elem in length_bins:
-            slice_ = track_lengths >= elem
-            diams_local = handle['diam_lin'][slice_]
-            mean_local = np.nanmean(diams_local)
-            std_local = np.nanstd(diams_local)
-            med_local = np.nanmedian(diams_local)
-            cv_local = 100*std_local/mean_local
-            mad_med = _k_*100*median_abs_deviation(diams_local, nan_policy = 'omit') / med_local
-            n_particles = np.sum(slice_)
-            for a in ax:
-                a.violinplot(
-                        diams_local,
-                        positions = [np.log2(elem)],
-                        vert = False
-                        )
-                print(mad_med)
-                string = f"k mad/med:{mad_med:0.2f} %\nCV: {cv_local:0.2f} %\n{n_particles} particles"
-                xy = (mean_local + std_local*2, np.log2(elem))
-                a.annotate(string, xy = xy)
-        ax[0].set_xscale("log")
-        if ground_truth is not None:
-            for a in ax:
-                a.axvline(ground_truth, color = 'k', linestyle = '--')
-        ax[0].set(ylabel = "log$_2$(track length) >= n")
-        for a in ax:
-            a.set_xlabel("diameter (nm)")
-        fig.tight_layout()
-        plt.show()
-
-    def _figure_(self):
-        @magicgui(
-                call_button="Capture figure",
-                crop = {'label': "Crop (x1,x2,y1,y2)"},
-                fig_width = {'label': "Image width" },
-                dpi = {'label': 'dpi'},
-                file_name = {'label':'File name'}
-                )
-        def inner(crop: str = "",
-                fig_width: float = 8.0,
-                dpi: int = 150,
-                file_name: str = "",
-                ):
-            img = self.viewer.export_figure()
-            if crop != "":
-                x1,x2,y1,y2 = [int(elem) for elem in crop.split(",")]
-            else:
-                x1,x2,y1,y2 = 0,img.shape[0],0,img.shape[1]
-            slice_ = (slice(x1,x2,1),slice(y1,y2,1))
-            img = img[slice_]
-            AR = img.shape[0] / img.shape[1]
-            fig,ax = plt.subplots(1,1,figsize = (fig_width, fig_width * AR))
-            ax.imshow(img)
-            ax.axis(False)
-            fig.subplots_adjust(left = 0, right = 1, top = 1, bottom = 0)
-            if file_name == "":
-                print("no file name specified -> not saving image")
-                plt.show()
-            else:
-                file_name = file_name + ".png"
-                fig.savefig(file_name, dpi = dpi)
-        return inner
-
     def _estimate_matched_particles_(self):
         @magicgui(
                 call_button="Estimate matched particle pairs",
@@ -1464,7 +1456,8 @@ class spatio_temporal_registration_gui:
                 thresh = {'label':'Thresh'},
                 super_sampling = {'label':'Super Sampling'},
                 link_bool = {'label':"Link"},
-                tracks_bool = {'label':"Tracks to viewer"}
+                tracks_bool = {'label':"Tracks to viewer"},
+                mode_bool = {'label':"Mutual frames only"},
                 )
         def inner(
                 track_1: str,
@@ -1473,6 +1466,7 @@ class spatio_temporal_registration_gui:
                 super_sampling: int = 1,
                 link_bool: bool = True,
                 tracks_bool: bool = True,
+                mode_bool: bool = True
                 ):
             self.matches = fetch_particle_pairs(
                                                 self.track_holder[track_1],
@@ -1485,7 +1479,8 @@ class spatio_temporal_registration_gui:
                 temp = re_link(
                                self.track_holder[track_1],
                                self.track_holder[track_2],
-                               self.matches
+                               self.matches,
+                               mode = "frame match" if mode_bool else ""
                                )
                 handle_1_match = track_1 + " matched"
                 handle_2_match = track_2 + " matched"
@@ -1503,6 +1498,40 @@ class spatio_temporal_registration_gui:
                                 )
         return inner
 
+    def _add_match_points_(self):
+        @magicgui(
+                call_button="Add match points to viewer",
+                track_1_name = {'label':'Track 1 Name'},
+                track_2_name = {'label':'Track 2 Name'},
+                )
+        def inner(
+                track_1_name: str,
+                track_2_name: str,
+                ):
+            print("Recall event needs to be the first track set...")
+            assert track_1_name in self.track_holder, f"{track_1_name} not tracked"
+            assert track_2_name in self.track_holder, f"{track_2_name} not tracked"
+
+            track_1 = self.track_holder[track_1_name]
+            track_2 = self.track_holder[track_2_name]
+
+            assert len(track_1) == len(track_2), "disimilar tracks...????"
+
+            n_points = len(track_1)
+            new_pts = np.zeros([n_points*2, 3])
+            new_pts[::2,:] = np.vstack([
+                                        track_1['frame'].values,
+                                        track_1['y'].values,
+                                        track_1['x'].values
+                                        ]).T
+            new_pts[1::2,:] = np.vstack([
+                                         track_2['frame'].values,
+                                         track_2['y'].values,
+                                         track_2['x'].values
+                                         ]).T
+
+            self.viewer.add_points(new_pts, name = "match points")
+        return inner
 
     #--------------------------------------------------------------------------
     #                               FILTERS    
@@ -1541,8 +1570,10 @@ class spatio_temporal_registration_gui:
                                            omit_neg = self.event_omit_neg
                                            )
 
+
+            colormap = self.__event_colormap_fetch__(ref_layer = "event")
             self.viewer.add_image(event_stack, 
-                                  colormap = 'viridis', 
+                                  colormap = colormap, 
                                   name = 'event filtered')
 
         return inner
@@ -1618,7 +1649,10 @@ class spatio_temporal_registration_gui:
                                            omit_neg = self.event_omit_neg
                                            )
 
-            self.viewer.add_image(event_stack, colormap = 'viridis', 
+
+            colormap = self.__event_colormap_fetch__(ref_layer = "event")
+            self.viewer.add_image(event_stack,
+                                  colormap = colormap, 
                                   name = 'event filtered preview (1st acc time)')
 
         return inner
@@ -1678,20 +1712,72 @@ class spatio_temporal_registration_gui:
                 layer_name: str,
                 kernel: int = 3
                 ):
+            print("Median Operating In Place")
             layer_handle = self.__fetch_layer__(layer_name).data
             if layer_handle.ndim == 3:
                 print("applying median to 3D image")
                 n_im = layer_handle.shape[0]
-                temp = np.zeros_like(layer_handle).astype(np.float32)
+                #temp = np.zeros_like(layer_handle).astype(np.float32)
                 for j in tqdm(range(n_im), desc = "applying median_filter"):
                     cp_arr = cp.array(layer_handle[j], dtype = np.float32)
-                    temp[j] = median_filter(cp_arr, (kernel,kernel)).get()
+                    layer_handle[j] = median_filter(cp_arr, (kernel,kernel)).get()
             elif layer_handle.ndim == 2:
                 print("applying median to 2D image")
                 cp_arr = cp.array(layer_handle, dtype = np.float32)
-                temp = median_filter(cp_arr, (kernel,kernel)).get()
+                layer_handle = median_filter(cp_arr, (kernel,kernel)).get()
 
-            self.viewer.add_image(temp, name = f'{layer_name} Median Filtered' )
+        return inner
+
+    def __calculate_hot_pixels__(self):
+        @magicgui(
+                call_button="Calculate Hot Pixels",
+                layer_name = {'label':'Layer Name'},
+                persist = True,
+                z = {'label':'z', 'min': 1},
+                )
+        def inner(
+                layer_name: str,
+                z: int = 2,
+                ):
+            dtype = np.float32
+            image_buffer = np.zeros([720,1280], dtype = np.float32)
+            integrator_fun = _integrate_events_wrapper_(dtype)
+            integrator_fun(
+                    image_buffer,
+                    self.cd_data['x'],
+                    self.cd_data['y'],
+                    self.cd_data['p'].astype(bool),
+                    omit_neg = False
+                    )
+            med = np.median(image_buffer.flatten())
+            iqr = np.subtract(*np.percentile(image_buffer.flatten(),[75,25]))
+            self.hot_px_layer = layer_name
+            print(f"med = {med}; iqr = {iqr}")
+            hot_px_bool = image_buffer > (med + (iqr * z))
+            if 'hot px' in self.viewer.layers:
+                del self.viewer.layers['hot px']
+            self.viewer.add_image(hot_px_bool, name = 'hot px', colormap = 'viridis')
+            
+        return inner
+
+    def _filter_hot_pixels_(self):
+        @magicgui(
+                call_button="Apply Hot Pixel Filter",
+                kernel = {'label':'kernel size','max': 100, "step": 2 },
+                persist = True,
+                )
+        def inner(
+                kernel: int = 3,
+                ):
+            assert self.hot_px_layer is not None,"Calculate hot pixel layer first"
+            print("Median Operating In Place")
+            handle = self.__fetch_layer__(self.hot_px_layer).data
+            hot_px_map = self.__fetch_layer__('hot px').data
+            for j in tqdm(range(handle.shape[0]), desc = "filtering hot px"):
+                im_cp = cp.array(handle[j], dtype = handle.dtype)
+                med_local = median_filter(im_cp, (kernel, kernel)).get()
+                handle[j][hot_px_map] = med_local[hot_px_map]
+
         return inner
 
     def _apply_conditional_median_layer_(self):
@@ -1948,7 +2034,179 @@ class spatio_temporal_registration_gui:
             #                      )
         return inner
 
+    #--------------------------------------------------------------------------
+    #                               Visualization
+    #--------------------------------------------------------------------------
+    def _violin_plot_(self):
+        @magicgui(
+                call_button="Violin plot",
+                layer_name = {'label': "Layer Name"},
+                ground_truth = {'label':"Ground Truth (-1 for None)"}
+                )
+        def inner(
+                layer_name: str,
+                ground_truth: float = -1.0,
+                ):
+            gt = None if ground_truth == -1 else ground_truth
+            self.__create_violin_plot__(layer_name, ground_truth = gt)
+        return inner
 
+    def __create_violin_plot__(self, layer_name, ground_truth = None):
+        handle = self.reduced_data[layer_name]
+        track_lengths = handle['track_lengths']
+        max_length = np.max(track_lengths)
+        min_length = np.min(track_lengths)
+        length_bins = 2**np.arange(np.log2(min_length), np.log2(max_length), 1)
+        _k_ = 1.4826
+        fig,ax = plt.subplots(1,2, sharey = True)
+        for elem in length_bins:
+            slice_ = track_lengths >= elem
+            diams_local = handle['diam_lin'][slice_]
+            mean_local = np.nanmean(diams_local)
+            std_local = np.nanstd(diams_local)
+            med_local = np.nanmedian(diams_local)
+            cv_local = 100*std_local/mean_local
+            mad_med = _k_*100*median_abs_deviation(diams_local, nan_policy = 'omit') / med_local
+            n_particles = np.sum(slice_)
+            for a in ax:
+                a.violinplot(
+                        diams_local,
+                        positions = [np.log2(elem)],
+                        vert = False
+                        )
+                print(mad_med)
+                string = f"k mad/med:{mad_med:0.2f} %\nCV: {cv_local:0.2f} %\n{n_particles} particles"
+                xy = (mean_local + std_local*2, np.log2(elem))
+                a.annotate(string, xy = xy)
+        ax[0].set_xscale("log")
+        if ground_truth is not None:
+            for a in ax:
+                a.axvline(ground_truth, color = 'k', linestyle = '--')
+        ax[0].set(ylabel = "log$_2$(track length) >= n")
+        for a in ax:
+            a.set_xlabel("diameter (nm)")
+        fig.tight_layout()
+        plt.show()
+
+    def _figure_(self):
+        @magicgui(
+                call_button="Capture figure",
+                crop = {'label': "Crop (x1,x2,y1,y2)"},
+                fig_width = {'label': "Image width" },
+                dpi = {'label': 'dpi'},
+                file_name = {'label':'File name'}
+                )
+        def inner(crop: str = "",
+                fig_width: float = 8.0,
+                dpi: int = 150,
+                file_name: str = "",
+                ):
+            img = self.viewer.export_figure()
+            if crop != "":
+                x1,x2,y1,y2 = [int(elem) for elem in crop.split(",")]
+            else:
+                x1,x2,y1,y2 = 0,img.shape[0],0,img.shape[1]
+            slice_ = (slice(x1,x2,1),slice(y1,y2,1))
+            img = img[slice_]
+            AR = img.shape[0] / img.shape[1]
+            fig,ax = plt.subplots(1,1,figsize = (fig_width, fig_width * AR))
+            ax.imshow(img)
+            ax.axis(False)
+            fig.subplots_adjust(left = 0, right = 1, top = 1, bottom = 0)
+            if file_name == "":
+                print("no file name specified -> not saving image")
+                plt.show()
+            else:
+                file_name = file_name + ".png"
+                fig.savefig(file_name, dpi = dpi)
+        return inner
+
+    def _plot_particle_iso_(self):
+        @magicgui(
+                call_button="Capture figure",
+                persist = True,
+                track_dataset_name={'label':"Track Dataset Name"},
+                image_layer_name={'label':"Image Layer Name"},
+                particle_idx={'label':"Particle Index"},
+                slice_size={'label':"Slice Size", "min":1,"step":2},
+                )
+        def inner(
+                    track_dataset_name: str,
+                    image_layer_name: str,
+                    particle_idx: int,
+                    slice_size: int,
+                ):
+            track_handle = self.track_holder[track_dataset_name]
+            slice_ = track_handle['particle'].values == particle_idx
+            fr_, x_, y_ = np.round(
+                    track_handle[['frame','x','y']].values[slice_].T
+                    ).astype(int)
+            image_handle = self.__fetch_layer__(image_layer_name).data
+            im_out = np.zeros([len(fr_), slice_size, slice_size], 
+                              dtype = image_handle.dtype)
+            x0 = x_ - slice_size // 2
+            y0 = y_ - slice_size // 2
+            if image_layer_name in self.global_translation:
+                fr_diff = self.global_translation[image_layer_name][0]
+            else:
+                fr_diff = 0
+            for j in tqdm(range(len(fr_)-1)):
+                #image_slice = (fr_[j] - fr_diff,
+                #               slice(y0[j], y0[j]+slice_size),
+                #               slice(x0[j], x0[j]+slice_size))
+                #im_out[j] = image_handle[image_slice]
+                fr_idx = fr_[j] - fr_diff
+                im_out[j] = smart_slice(
+                                        image_handle[fr_idx],
+                                        y0[j], 
+                                        y0[j]+slice_size,
+                                        x0[j],
+                                        x0[j]+slice_size
+                                        )
+
+            inst.viewer.add_image(
+                    im_out,
+                    name = f"{image_layer_name}:{particle_idx} iso",
+                    colormap = 'viridis'
+                    )
+
+        return inner
+
+    def _create_gif_(self):
+        @magicgui(
+                call_button="Save figures for GIF",
+                crop = {'label': "Crop (x1,x2,y1,y2)"},
+                fig_width = {'label': "Image width" },
+                dpi = {'label': 'dpi'},
+                file_name = {'label':'File name'}
+                )
+        def inner(crop: str = "",
+                fig_width: float = 8.0,
+                dpi: int = 150,
+                file_name: str = "",
+                ):
+            print("-"*80)
+            print("NOT IMPLEMENTED GIF MAKING???")
+            print("-"*80)
+            img = self.viewer.export_figure()
+            if crop != "":
+                x1,x2,y1,y2 = [int(elem) for elem in crop.split(",")]
+            else:
+                x1,x2,y1,y2 = 0,img.shape[0],0,img.shape[1]
+            slice_ = (slice(x1,x2,1),slice(y1,y2,1))
+            img = img[slice_]
+            AR = img.shape[0] / img.shape[1]
+            fig,ax = plt.subplots(1,1,figsize = (fig_width, fig_width * AR))
+            ax.imshow(img)
+            ax.axis(False)
+            fig.subplots_adjust(left = 0, right = 1, top = 1, bottom = 0)
+            if file_name == "":
+                print("no file name specified -> not saving image")
+                plt.show()
+            else:
+                file_name = file_name + ".png"
+                fig.savefig(file_name, dpi = dpi)
+        return inner
 
     #--------------------------------------------------------------------------
     #                               UTILS (dunder)
@@ -1956,6 +2214,7 @@ class spatio_temporal_registration_gui:
     def __subtract_axial_median_gpu__(self):
         @magicgui(
                 call_button="Subtract Axial Median",
+                persist = True,
                 layer_name = {'label':'Layer Name'},
                 tile_size = {'label':'Tile Size'},
                 dtype = {'label':'Data type'}
@@ -1969,10 +2228,8 @@ class spatio_temporal_registration_gui:
             print(f"median dtype = {dtype}")
             handle = self.__fetch_layer__(layer_name).data
             n_images, nx, ny = handle.shape
-            n_tile_x = nx / tile_size
-            n_tile_y = ny / tile_size
-            assert n_tile_x % 1 == 0,"tile size should evenly divide image (x failed)"
-            assert n_tile_y % 1 == 0,"tile size should evenly divide image (y failed)"
+            n_tile_x = int(np.ceil(nx / tile_size))
+            n_tile_y = int(np.ceil(ny / tile_size))
             cp_free_mem()
             med = cp.zeros([nx,ny], dtype = dtype)
             for tile_x in tqdm(range(int(n_tile_x))):
@@ -2003,6 +2260,16 @@ class spatio_temporal_registration_gui:
         else:
             print(f"Layer {layer_name} not found")
             return 
+
+    def __event_colormap_fetch__(
+                                 self,
+                                 ref_layer = 'event', 
+                                 default_cmap = "coolwarm"
+                                 ) -> str:
+        if ref_layer in self.viewer.layers:
+            return self.__fetch_layer__(ref_layer).colormap.name
+        else:
+            return default_cmap
 
     def __free_memory__(self):
         @magicgui(
@@ -2142,6 +2409,30 @@ class spatio_temporal_registration_gui:
             print("-"*80)
         return inner
 
+    def __particles_in_rectangle__(self):
+        @magicgui(
+                 call_button="Fetch Particles inside Rectangle",
+                 persist = True,
+                 track_key={'label':'Track key'}
+                )
+        def inner(track_key: str):
+            msg =  "Top layer is not a shapes layer"
+            assert isinstance(self.viewer.layers[-1], 
+                              napari.layers.shapes.shapes.Shapes), msg
+            tracks = self.track_holder[track_key]
+            handle = inst.viewer.layers[-1].data[0]
+            x0,x1 = np.min(handle[:,2]), np.max(handle[:,2])
+            y0,y1 = np.min(handle[:,1]), np.max(handle[:,1])
+            bool_arr = (tracks['x'].values >= x0) * \
+                       (tracks['x'].values <= x1) * \
+                       (tracks['y'].values >= y0) * \
+                       (tracks['y'].values <= y1)
+            parts = np.unique(tracks['particle'][bool_arr])
+            print("-"*70)
+            print("particles inside rectangle:")
+            print(",".join([f"{elem}" for elem in parts]))
+            print("-"*70)
+        return inner
 
 if __name__ == "__main__":
     inst = spatio_temporal_registration_gui()
