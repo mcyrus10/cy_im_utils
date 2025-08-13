@@ -243,5 +243,6 @@ def rvt(img, rmin, rmax, kind="basic", highpass_size=None, upsample=1,
 
 
 def convert_upsampled_coordinate(coord, upsampling):
-    """Convert the localized position in the upsampled image into the corresponding position in the original image"""
+    """Convert the localized position in the upsampled image into the
+    corresponding position in the original image"""
     return (coord+0.5)/upsampling-0.5

@@ -14,6 +14,7 @@ def imsd_powerlaw_fit(imsd_dict,
         start_index: int = 0, 
         end_index: int = None, 
         stride: int = 1,
+        verbose = True,
         ) -> tuple:
     """
     This performs the log-log fit on all the imsd curves
@@ -34,7 +35,7 @@ def imsd_powerlaw_fit(imsd_dict,
     ndim = imsd_dict.values.ndim
     if ndim == 2:
         fits = np.exp(A)[None,:] * time[:,None] ** n[None,:]
-        if np.isnan(fits[0]).sum() > 0:
+        if np.isnan(fits[0]).sum() > 0 and verbose:
             print("warning -> nans in fit")
     elif ndim == 1:
         fits = np.exp(A) * time ** n
@@ -45,6 +46,7 @@ def imsd_linear_fit(imsd_dict: pd.DataFrame,
                     start_index: int = 0,
                     end_index: int = None,
                     stride: int = 1,
+                    verbose = True,
                     ) -> tuple:
     """
     This performs the linear fit on all the imsd curves
@@ -63,7 +65,7 @@ def imsd_linear_fit(imsd_dict: pd.DataFrame,
     ones = np.ones_like(time)
     A_mat = np.vstack([ones, time]).T
     ndim = imsd_dict.values.ndim
-    print("ndim = ",ndim)
+    if verbose: print("ndim = ",ndim)
     if ndim == 1:
         b_mat = imsd_dict.values[fit_slice]
         b, m = np.linalg.lstsq(A_mat, b_mat, rcond = -1)[0]
@@ -75,7 +77,7 @@ def imsd_linear_fit(imsd_dict: pd.DataFrame,
     else:
         return None
 
-    if np.isnan(fits[0]).sum() > 0:
+    if np.isnan(fits[0]).sum() > 0 and verbose:
         print("warning -> nans in fit")
     return m, b, fits
 
