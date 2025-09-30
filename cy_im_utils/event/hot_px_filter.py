@@ -1,29 +1,51 @@
 import cupy as cp
 import numpy as np
-from integrate_intensity import _integrate_events_wrapper_
+from tqdm import tqdm
+
+from sys import path
+path.append("/home/mcd4/cy_im_utils")
+from cy_im_utils.event.integrate_intensity import _integrate_events_wrapper_
 
 
-def hot_px_cd_filter(hot_px_map, cd_data) -> np.array:
+def hot_px_cd_filter(hot_px_map, cd_data, verbose = True, nx: int = 1280, 
+        ny: int = 720, batch_size: int = 10_000_000) -> np.array:
     """
     Steps:
         1) converts a hot pixel image (2D boolean array) into complex values (
-        x + jy )
+            x + jy ); Note, you could alternatively cast this as a uint32
+            operation where you discretize the pixel array so each pixel has a
+            unique coordinate, but this does not afford any memory savings over
+            casting as a 64 bit complex....). uint16 cannot represent every
+            pixel in the array if you discretize the grid! (720*1280 > 2**16)
         2) convert CD data (n x 4) into complex coordinate array (x + jy)
         3) calculate isin to find intersection between hot pixels and cd data
         4) return boolean slice of cd data excluding all hot pixels
     """
+    assert nx*ny < 2**32, "pixels exceed casting to uint32"
+    dtype = cp.uint32
     # Convert Hot Pixels into Imaginary Array
-    hot_px, cd_complex, temp = None, None, None
+    if verbose: 
+        print("\tHot px to cp")
+    hot_px = None
     hot_px = np.where(hot_px_map)
-    hot_px_complex = cp.array(hot_px[1] + 1j*hot_px[0], dtype = cp.complex64)
+    #hot_px_cp = cp.array(hot_px[1] + 1j*hot_px[0], dtype = cp.complex64)
+    hot_px_cp = cp.array(hot_px[1]*nx + hot_px[0], dtype = dtype)
 
     # CD Data as Complex Array 
-    cd_complex = cp.array(cd_data['x'] + 1j*cd_data['y'], dtype = cp.complex64)
+    if verbose: 
+        print("\tcd data to cp")
 
-    # Intersection
-    slice_ = cp.isin(cd_complex, hot_px_complex)
+    numel = len(cd_data['x'])
+    n_batch = int(np.ceil(numel / batch_size))
+    slice_ = cp.zeros(numel, dtype = bool)
+    for j in tqdm(range(n_batch), desc = 'cp.isin'):
+        local_slice = slice(j*batch_size, (j+1)*batch_size)
+        x_cp = cp.array(cd_data['x'][local_slice], dtype = dtype)
+        y_cp = cp.array(cd_data['y'][local_slice], dtype = dtype)
+        cd_temp = x_cp * nx + y_cp
+        slice_[local_slice] = cp.isin(cd_temp, hot_px_cp)
 
-    return cd_data[~slice_.get()]
+    return ~slice_.get()
 
 
 def calc_hot_px(cd_data: np.array,

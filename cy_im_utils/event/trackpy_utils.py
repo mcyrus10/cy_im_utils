@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import trackpy as tp
 import numba as nb
+import cupy as cp
 
 
 def imsd_powerlaw_fit(imsd_dict,
@@ -314,6 +315,27 @@ def re_link(tracks_1, tracks_2, matches, mode: str = 'frame match') -> tuple:
         print("Warning -> tracks that are not frame synced are shared here")
 
     return pd.concat(matched_1), pd.concat(matched_2)
+
+
+def tracks_to_mask(input_array, input_tracks) -> np.array:
+    """
+    Converts trackpy tracks into a boolean mask
+    """
+    nz,nx,ny = input_array.shape
+    mask = cp.zeros(input_array[0].shape, dtype = bool)
+    xx, yy = cp.meshgrid(cp.arange(mask.shape[1]), cp.arange(mask.shape[0]))
+    xx = xx.astype(cp.float32)
+    yy = yy.astype(cp.float32)
+    mask = np.zeros(input_array.shape, dtype = bool)
+    desc = "tracks -> mask"
+    for idx in tqdm(range(input_array.shape[0]), desc = desc):
+        fr_slice = input_tracks['frame'].values == idx
+        y,x,size = cp.array(input_tracks[fr_slice][['y','x','size']].values.T)
+        radial_arr = cp.sqrt((xx[None,:,:] - x[:,None,None])**2 + (yy[None,:,:] - y[:,None,None])**2)
+        bool_arr = radial_arr <= size[:,None,None]*2
+        mask_local = bool_arr.sum(axis = 0)
+        mask[idx] = mask_local.get()
+    return mask
 
 
 class event_tracks:

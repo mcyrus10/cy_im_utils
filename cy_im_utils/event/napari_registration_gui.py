@@ -17,7 +17,6 @@ import matplotlib.pyplot as plt
 import napari
 import numpy as np
 import pandas as pd
-import pickle
 import trackpy as tp
 
 from sys import path, platform
@@ -28,13 +27,14 @@ util_paths = [
 for elem in util_paths:
     path.append(elem)
 from cy_im_utils.imgrvt_cuda import rvt
+from cy_im_utils.event.msd_utils import water_viscosity
 from cy_im_utils.event.trackpy_utils import (imsd_powerlaw_fit, imsd_linear_fit,
-                                             fetch_particle_pairs, re_link)
+                                             fetch_particle_pairs, re_link, tracks_to_mask)
 from cy_im_utils.event.integrate_intensity import (_integrate_events_wrapper_,
-                                                   fetch_indices_wrapper)
+                                                   fetch_trigger_indices)
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
 from cy_im_utils.event.clustering import *
-from cy_im_utils.event.read_hdf5 import __read_hdf5__
+from cy_im_utils.event.read_hdf5 import __read_hdf5__, __hdf5_to_numpy__
 from cy_im_utils.event.hot_px_filter import calc_hot_px, hot_px_cd_filter
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
@@ -292,32 +292,6 @@ def residual_rigid(mat: list, input_pair: np.array, target_pair: np.array) -> np
     return np.abs(diff).flatten()
 
 
-def water_viscosity(T, unit = 'C') -> float:
-    """
-    returns viscosity of water as a function of temperature
-    Input temperature unit can be 'C' or 'K'
-    Output is Dynamics viscosity in units of Pa*s
-
-    Source for formula
-    https://en.wikipedia.org/wiki/Temperature_dependence_of_viscosity, which in
-    turn cites: Reid, Robert C.; Prausnitz, John M.; Poling, Bruce E. (1987),
-    The Properties of Gases and Liquids, McGraw-Hill Book Company, ISBN
-    0-07-051799-1
-    """
-    if unit == 'C':
-        T += 273.15
-    elif unit == 'K':
-        T = T
-    else:
-        print ('Temperature unit unknown. C and K are supported')
-        return
-    A = 1.856e-14 #Pa*s
-    B = 4209 # K
-    C = 0.04527 # K^-1
-    D = -3.376e-5 # K^-2
-    return A*np.exp(B/T + C*T +D*T**2)
-
-
 def fetch_cauchy_kernel(x, gamma, sigma = None, x0 = 0) -> np.array:
     """
     normalized lorentzian kernel (sum = 1)
@@ -363,67 +337,6 @@ def fetch_square_kernel(x, sigma, gamma, x0 = 0) -> np.array:
     """
     kern = np.ones_like(x)
     return kern / np.sum(kern)
-
-
-def __hdf5_to_numpy__(
-                    event_file,
-                    cd_data, 
-                    acc_time: float, 
-                    thresh: float,
-                    num_images: int,
-                    super_sampling: int,
-                    width: int = 720,
-                    height: int = 1280,
-                    dtype= np.int16,
-                    omit_neg: bool = False,
-                    ) -> (np.array, np.array):
-    """
-    This is for loading in an hdf5 file so that the exposure time of the
-    frame camera can be matched to the event signal directly.....
-    
-    Just use the regular raw -> numpy function if you want a finer frame
-    rate sampling since this will load the data with gaps!!!
-    (discontinuous event data)
-    """
-    trigger_data = __read_hdf5__(event_file, "EXT_TRIGGER")['t']
-    if trigger_data.shape[0] == 0 and num_images != -1:
-        print("No triggers found")
-        trigger_data = None
-    else:
-        print(f"trigger shape = {trigger_data.shape} (2x the triggers)")
-    trigger_indices = fetch_indices_wrapper(
-                                        trigger_data,
-                                        acc_time,
-                                        cd_data['t'],
-                                        super_sampling = super_sampling,
-                                        frame_comp_triggers = num_images
-                                        )
-
-    print("fetched indices")
-    if num_images == -1:
-        print("sampling all triggers")
-        n_im = trigger_indices.shape[0]
-    else:
-        print(f"only taking first {num_images} images (subset of total triggers)")
-        n_im = num_images
-    image_stack = np.zeros([n_im, width, height], dtype = dtype)
-    image_buffer = np.zeros([width, height], dtype = dtype)
-    integrator_fun = _integrate_events_wrapper_(dtype)
-
-    for j in tqdm(range(n_im), desc = "reading hdf5"):
-        id_0, id_1 = trigger_indices[j]
-        image_buffer[:] = 0
-        slice_ = slice(id_0, id_1, 1)
-        integrator_fun(image_buffer, 
-                       cd_data['x'][slice_],
-                       cd_data['y'][slice_], 
-                       cd_data['p'][slice_].astype(bool),
-                       omit_neg
-                       )
-        image_buffer[np.abs(image_buffer) > thresh] = 0
-        image_stack[j] = image_buffer.copy()
-
-    return image_stack, trigger_indices
 
 
 class np_dtype(Enum):
@@ -502,6 +415,38 @@ def batch_axial_median(arr, x_batch_size, y_batch_size, size, mode = 'reflect') 
     return out
 
 
+def fetch_dump_path_base() -> Path:
+    if platform == 'linux':
+        return Path("/tmp")
+    elif platform == 'win32':
+        return Path("C:/Users/mcd4/Downloads")
+
+
+def reduced_data_writer(reduced_data_dict, name) -> None:
+    """
+    Helper function to write the reduced data output
+    """
+    base_path = fetch_dump_path_base()
+    f_name_red = base_path / f"_reduced_{name}_.csv"
+    f_name_imsd = base_path / "_imsd_.csv"
+    print(f"writing reduced data to : {f_name_red}; {f_name_imsd}")
+
+    #--------------------------------------------------------------------------
+    #       MAIN REDUCED DATA
+    #--------------------------------------------------------------------------
+    main_keys = ['bay_diam','n_log','m','b','diffusivity_log','diam_log',
+                 'diffusivity_lin','diam_lin','neg_diams','track_lengths'
+            ]
+    temp = {}
+    for key in main_keys:
+        temp[key] = reduced_data_dict[key]
+    
+    pd.DataFrame.from_dict(temp).to_csv(f_name_red)
+
+    #--------------------------------------------------------------------------
+    #       IMSD
+    #--------------------------------------------------------------------------
+    reduced_data_dict['imsd'].to_csv(f_name_imsd)
 
 
 class spatio_temporal_registration_gui:
@@ -512,6 +457,7 @@ class spatio_temporal_registration_gui:
         self.affine_matrix = None
         self.located_frames = {}
         self.frame_0 = 0
+        self.link_settings = None
         self.frame_track = {}
         self.track_bool = False
         self.track_holder = {}
@@ -540,8 +486,8 @@ class spatio_temporal_registration_gui:
                               self._fit_affine_(),
                               self._apply_transform_(),
                               self._translate_layer_(),
-                              #self._mutual_information_(),
-                              #self._zip_centroids_to_points_(),
+                              self._mutual_information_(),
+                              self._zip_centroids_to_points_(),
                               ],
                 'Filtering 1':[
                             self._isolate_event_sign_(),
@@ -558,6 +504,7 @@ class spatio_temporal_registration_gui:
                             self._remove_pixels_(),
                             self._subtract_axial_median_gpu_(),
                             self._calc_median_background_(),
+                            self._diff_layer_(),
                     ],
                 'Tracking':[
                             self._preview_track_centroids_(),
@@ -571,6 +518,7 @@ class spatio_temporal_registration_gui:
                             ],
                 'Vis':[
                             self._figure_(),
+                            self.__tracks_to_mask__(),
                             self._violin_plot_(),
                             self._joint_hist_(),
                             self._plot_particle_iso_()
@@ -581,8 +529,9 @@ class spatio_temporal_registration_gui:
                     self.__transform_tracks_coordinate_system__(),
                     self.__sub_sample_tracks__(),
                     self.__compute_noise_floor__(),
-                    self.__compute__(),
+                    #self.__compute__(),
                     self.__unspecified_colormap__(),
+                    self.__set_contrast_lims__(),
                     self.__measure_line_length__(),
                     self.__particles_in_rectangle__(),
                     ]
@@ -611,19 +560,15 @@ class spatio_temporal_registration_gui:
                   persist = True,
                   layout = 'vertical',
                   event_file = {"label": "Select Event File (.hdf5)"},
-                  load_event_bool = {"label": "Load Event"},
                   acc_time = {'label': "Accumulation Time",'max':1e16},
                   num_images = {'label': "Number of Images (-1 for all triggers)",'max':1e16},
-                  event_thresh = {'label': "Dead Pixel Threshold",'max':1e16},
                   super_sampling = {'label': "Samples per trigger"},
                   dtype = {'label': "Data type"},
                   omit_negative = {'label': "Omit Negative Polarity"}
                   )
         def inner(
                 event_file: Path = Path.home(),
-                load_event_bool: bool = True,
                 acc_time: float = 0.0,
-                event_thresh: float = 0.0,
                 num_images: int = -1,
                 super_sampling: int = 1,
                 dtype: np_dtype = np_dtype.int16,
@@ -631,7 +576,6 @@ class spatio_temporal_registration_gui:
                 ):
             self.event_file = event_file
             self.event_acc_time = acc_time
-            self.event_dead_px_thresh = event_thresh
             self.num_event_images = num_images
             self.super_sampling = super_sampling
             self.event_dtype = dtype.value
@@ -642,13 +586,23 @@ class spatio_temporal_registration_gui:
             assert event_file.suffix == ".hdf5", msg
             print("Reading .hdf5 file")
             self.cd_data = __read_hdf5__(event_file, "CD")
+            
+            self.trigger_data = __read_hdf5__(event_file, "EXT_TRIGGER")['t']
+            if len(self.trigger_data) == 0:
+                print("No Triggers -> self.trigger_data = None")
+                self.trigger_data = None
 
-            event_stack, self.trigger_indices = __hdf5_to_numpy__(
-                                       self.event_file,
+
+            self.trigger_indices = fetch_trigger_indices(
+                                                        self.trigger_data,
+                                                        self.event_acc_time,
+                                                        self.cd_data['t'],
+                                                        self.super_sampling,
+                                                        )
+
+            event_stack  = __hdf5_to_numpy__(
+                                       self.trigger_indices,
                                        self.cd_data,
-                                       acc_time,
-                                       thresh = event_thresh,
-                                       super_sampling = self.super_sampling,
                                        num_images = self.num_event_images,
                                        dtype = self.event_dtype,
                                        omit_neg = self.event_omit_neg
@@ -665,18 +619,18 @@ class spatio_temporal_registration_gui:
               persist = True,
               layout = 'vertical',
               frame_file = {"label": "Select Frame File (.tif)"},
-              load_frame_bool = {"label": "Load Frame"},
+              alpha = {'label':'Alpha / opacity',"widget_type":"FloatSlider",'max':1,'min':0}
                   )
         def inner(
                 frame_file: Path = Path.home(),
-                load_frame_bool: bool = True,
+                alpha: float = 0.5,
                 ):
             self.frame_file = frame_file
             frame_files = frame_file.as_posix()
             print(frame_files)
             frame_stack = imread(frame_files)
             self.viewer.add_image(frame_stack, colormap = 'viridis',
-                                name = 'frame', opacity = 0.4)
+                                name = 'frame', opacity = alpha)
 
         return inner
 
@@ -931,9 +885,9 @@ class spatio_temporal_registration_gui:
         """
         @magicgui(
                 call_button="Translate Layer",
-                shift_z={'label':'shift z','min':0,'max':10_000},
-                shift_y={'label':'shift y','min':-10_000,'max':10_000},
-                shift_x={'label':'shift x','min':-10_000,'max':10_000},
+                shift_z={'label':'shift z','min':-1e16,'max':1e16, "step":1},
+                shift_y={'label':'shift y','min':-1e16,'max':1e16, "step":1},
+                shift_x={'label':'shift x','min':-1e16,'max':1e16, "step":1},
                 layer_name = {'label':'Layer name'},
                 persist = True
                 )
@@ -978,9 +932,18 @@ class spatio_temporal_registration_gui:
             log_hist_global = []
             zeros_slice = cp.ones(self.__fetch_layer__(layer_1).data[0].shape,
                                   dtype = bool)
+            offset_1, offset_2 = 0, 0
+            # Offset for global translation?
+            for key,val in zip([layer_1, layer_2], [offset_1, offset_2]):
+                if key not in self.global_translation:
+                    continue
+                val += self.global_translation[key][0]
+
             for j in tqdm(idx, desc = "iterating mutual info metric over idx"):
-                layer_1_handle = self.__fetch_layer__(layer_1).data[j]
-                layer_2_handle = self.__fetch_layer__(layer_2).data[j]
+                if (j+offset_1 > n_im) or (j + offset_2 > n_im):
+                    continue
+                layer_1_handle = self.__fetch_layer__(layer_1).data[j + offset_1]
+                layer_2_handle = self.__fetch_layer__(layer_2).data[j + offset_2]
                 layer_1_cp = cp.array(layer_1_handle, 
                                       dtype = layer_1_handle.dtype)
                 layer_2_cp = cp.array(layer_2_handle,
@@ -1004,7 +967,7 @@ class spatio_temporal_registration_gui:
             print(log_hist_global.shape)
             fig,ax = plt.subplots(1,1, figsize = (8,8))
             X_,Y_ = np.meshgrid(x_edge.get(), y_edge.get())
-            ax.pcolormesh(X_-0.5, Y_, log_hist_global.get().T)
+            ax.pcolormesh(X_-0.5, Y_-0.5, log_hist_global.get().T)
             ax.set_title(f"Mutual Information:\n{mutual_information(log_hist)}")
             fig.tight_layout()
             plt.show()
@@ -1092,6 +1055,9 @@ class spatio_temporal_registration_gui:
                           )
             self.frame_track[layer_name] = f.copy()
             points_array = f[['y','x']].values
+
+            self.__remove_layer_string_match__(layer_name = "tracked centroids")
+
             self.viewer.add_points(
                     points_array,
                     name = f'tracked centroids {test_frame}',
@@ -1175,17 +1141,14 @@ class spatio_temporal_registration_gui:
             self.located_frames[layer_name] = f
 
             # Save Tracks (just in case they were difficult to calculate....)
-            if platform == 'linux':
-                track_path = Path("/tmp")
-            elif platform == 'win32':
-                track_path = Path("C:/Users/mcd4/Downloads")
-            track_f_name = track_path / "_located_frames_.p"
+            track_path = fetch_dump_path_base()
+            track_f_name = track_path / f"_located_frames_{layer_name}_.csv"
             print(f"saving located frames to {track_f_name}")
-            pickle.dump(f, open(track_f_name,"wb"))
+            self.located_frames[layer_name].to_csv(track_f_name)
         return inner
 
     def _track_link_(self):
-        @magicgui(call_button="Track Particles",
+        @magicgui(call_button="Link Particles",
                 layer_name = {'label':'Layer Name'},
                 persist = True,
                 min_length = {'label':'Filter Stub Length', 'max': 1e16},
@@ -1224,12 +1187,17 @@ class spatio_temporal_registration_gui:
                 t1 = t1.droplevel("particle")
             self.track_holder[layer_name] = t1.copy()
             # Add Track Centroids to viewer as points layer
-            #slice_handle = ['frame','y','x']
-            #self.viewer.add_points(t1[slice_handle], 
-            #                       name = "tracked centroids",
-            #                       face_color = 'k')
 
             self.viewer.add_tracks(t1[['particle','frame','y','x']])
+
+            self.link_settings = {
+                                  'min_length':min_length,
+                                  'search_range': search_range,
+                                  'memory':memory
+                                  }
+            for key,val in self.link_settings.items():
+                print(f"\t{key}: {val}")
+            print(f"\tDrift Correction: {drift_bool}")
 
         return inner
 
@@ -1303,6 +1271,10 @@ class spatio_temporal_registration_gui:
                     fps,
                     bins,
                     )
+            
+
+            reduced_data_writer(self.reduced_data[layer_name], layer_name)
+            self.__write_reduction_notes__()
 
         return inner
 
@@ -1550,7 +1522,7 @@ class spatio_temporal_registration_gui:
     #                               FILTERS    
     #--------------------------------------------------------------------------
     def _apply_event_noise_filter_(self):
-        @magicgui(call_button="Apply Interpolation Event Noise Filter")
+        @magicgui(call_button="Apply Interpolation Noise Filter to CD Data")
         def inner():
             """
             Apply Event Noise filter
@@ -1571,13 +1543,18 @@ class spatio_temporal_registration_gui:
                             )
             events = self.cd_data
             noise_filter.processEvents(events)
-            self.eventBin = noise_filter.eventsBin
-            event_stack,_ = __hdf5_to_numpy__(
-                                           self.event_file,
-                                           events[noise_filter.eventsBin],
-                                           acc_time = self.event_acc_time,
-                                           thresh = self.event_dead_px_thresh,
-                                           super_sampling = self.super_sampling,
+            self.cd_data = self.cd_data[noise_filter.eventsBin]
+
+            self.trigger_indices = fetch_trigger_indices(
+                                                        self.trigger_data,
+                                                        self.event_acc_time,
+                                                        self.cd_data['t'],
+                                                        self.super_sampling,
+                                                        )
+
+            event_stack = __hdf5_to_numpy__(
+                                           self.trigger_indices,
+                                           self.cd_data,
                                            num_images = self.num_event_images,
                                            dtype = self.event_dtype,
                                            omit_neg = self.event_omit_neg
@@ -1645,18 +1622,17 @@ class spatio_temporal_registration_gui:
             events = self.cd_data[cd_slice].copy()
             noise_filter.processEvents(events)
             eventsBin = noise_filter.eventsBin
+            local_triggers = fetch_trigger_indices(
+                                    self.trigger_data,
+                                    self.event_acc_time,
+                                    self.cd_data[cd_slice]['t'][eventsBin],
+                                    self.super_sampling,
+                                    )
 
-            #fig,ax = plt.subplots(1,2, sharex = True, sharey = True)
-            #ax[0].scatter(events['x'], events['y'])
-            #ax[1].scatter(events['x'][eventsBin], events['y'][eventsBin])
-            #plt.show()
 
-            event_stack, _ = __hdf5_to_numpy__(
-                                           self.event_file,
+            event_stack = __hdf5_to_numpy__(
+                                           local_triggers,
                                            events[eventsBin],
-                                           acc_time = self.event_acc_time,
-                                           thresh = self.event_dead_px_thresh,
-                                           super_sampling = self.super_sampling,
                                            num_images = n_images,
                                            dtype = self.event_dtype,
                                            omit_neg = self.event_omit_neg
@@ -1664,9 +1640,11 @@ class spatio_temporal_registration_gui:
 
 
             colormap = self.__event_colormap_fetch__(ref_layer = "event")
+            preview_layer_name = "event filter preview"
+            self.__remove_layer_string_match__(layer_name = preview_layer_name)
             self.viewer.add_image(event_stack,
                                   colormap = colormap, 
-                                  name = 'event filtered preview (1st acc time)')
+                                  name = preview_layer_name)
             if "event" in self.viewer.layers:
                 contrast_limits = self.__fetch_layer__("event").contrast_limits
                 self.viewer.layers[-1].contrast_limits = contrast_limits
@@ -1774,16 +1752,23 @@ class spatio_temporal_registration_gui:
             assert self.hot_px_layer is not None,"Calculate hot pixel layer first"
             hot_px_map = self.__fetch_layer__('hot px').data
             print("\t---> Filtering CD Data <---")
-            self.cd_data = hot_px_cd_filter(hot_px_map, self.cd_data)
+            hot_px_bool = hot_px_cd_filter(hot_px_map, self.cd_data)
+            self.cd_data = self.cd_data[hot_px_bool]
             cp_free_mem()
 
+
+            print("\t---> Updating Trigger Index <---")
+            self.trigger_indices = fetch_trigger_indices(
+                                                        self.trigger_data,
+                                                        self.event_acc_time,
+                                                        self.cd_data['t'],
+                                                        self.super_sampling,
+                                                        )
+
             print("\t---> Updating Event Image Stack <---")
-            event_stack, self.trigger_indices = __hdf5_to_numpy__(
-                                       self.event_file,
+            event_stack = __hdf5_to_numpy__(
+                                       self.trigger_indices,
                                        self.cd_data,
-                                       acc_time = self.event_acc_time,
-                                       thresh = self.event_dead_px_thresh,
-                                       super_sampling = self.super_sampling,
                                        num_images = self.num_event_images,
                                        dtype = self.event_dtype,
                                        omit_neg = self.event_omit_neg
@@ -1873,26 +1858,28 @@ class spatio_temporal_registration_gui:
         """
         this is for "approximating" an event image by diffing two images
         """
-        @magicgui(call_button="Simulate events from layer (diff layer)")
+        @magicgui(
+                  call_button="Simulate events from layer (diff layer)",
+                  persist = True)
         def inner(
                 layer_name: str = "frame",
-                median_kernel: int = 3,
                 ):
             frame_handle = self.__fetch_layer__(layer_name).data
             cp_free_mem()
             n_frames = frame_handle.shape[0]
-            kernel = (1, median_kernel, median_kernel)
             output = np.zeros(frame_handle.shape, dtype = np.float32)
             print(n_frames, type(n_frames))
             for j in tqdm(range(n_frames-1), desc = "diff frame"):
                 slice_ = slice(j,j+2)
                 cp_arr = cp.array(frame_handle[slice_], dtype = cp.float32)
-                cp_arr = median_filter(cp_arr, kernel)
                 diff = cp_arr[1] - cp_arr[0]
                 output[j] = diff.get()
             cp_free_mem()
-            self.viewer.add_image(output[:-1], name = "diff frame",
-                    colormap = "hsv")
+            self.viewer.add_image(
+                                    output, 
+                                    name = "diff",
+                                    colormap = "Spectral"
+                                    )
         return inner
 
     def _isolate_event_sign_(self):
@@ -1993,7 +1980,15 @@ class spatio_temporal_registration_gui:
                 temp = median_filter(temp, (3,3)).get()
             else:
                 temp = temp.get()
-            self.viewer.add_image(temp, name = f'{layer_name} RVT preview' )
+
+            # Add to viewer (and remove if one already exists)
+            self.__remove_layer_string_match__(layer_name = "RVT preview")
+            idx = self.__fetch_viewer_image_index__()
+            self.viewer.add_image(temp[None,:,:], 
+                                  name = f'{layer_name} RVT preview',
+                                  translate = (idx, 0, 0)
+                                  )
+            cp_free_mem()
         return inner
 
     def _filter_1d_(self):
@@ -2305,6 +2300,23 @@ class spatio_temporal_registration_gui:
 
         return inner
 
+    def __tracks_to_mask__(self) -> None:
+        @magicgui(
+                  call_button="Tracks to mask",
+                  track_key = {'label':"Track Layer Name"},
+                  image_key = {'label':"Layer (Shape reference)"},
+                  persist = True
+                  )
+        def inner(track_key: str, image_key: str):
+            mask = tracks_to_mask(
+                    self.__fetch_layer__(image_key).data,
+                    self.track_holder[track_key]
+                    )
+            name = f"mask {track_key} -> {image_key}"
+            self.viewer.add_image(mask, name = name)
+        return inner
+
+
     #--------------------------------------------------------------------------
     #                               UTILS (dunder)
     #--------------------------------------------------------------------------
@@ -2473,6 +2485,8 @@ class spatio_temporal_registration_gui:
             tracks_cpy = track_handle.copy()
             tracks_cpy['y'] = tracks_tform[0]
             tracks_cpy['x'] = tracks_tform[1]
+            tracks_cpy['size'] *= affine[0,0]
+            print("is the scale the diagonal component?????")
             label = layer_name + " (tform)"
             self.viewer.add_tracks(tracks_cpy[['particle','frame','y','x']],
                                     name = label)
@@ -2491,8 +2505,55 @@ class spatio_temporal_registration_gui:
             handle.colormap = colormap
         return inner
 
+    def __set_contrast_lims__(self):
+        @magicgui(
+                  call_button="Set Contrast Limits",
+                  layer_name = {'label':"Layer Name"},
+                  low = {'label':"Min","min":-1e16,"max":1e16},
+                  high = {'label':"Max","min":-1e16,"max":1e16},
+                  persist = True
+                  )
+        def inner(layer_name: str, low: float, high: float):
+            self.__fetch_layer__(layer_name).contrast_limits = (low, high)
+        return inner
+
+    def __write_reduction_notes__(self) -> None:
+        """
+        Writes the settings for the data reduction....somewhat
+        """
+        notes_dict = {}
+        for elem in dir(self):
+            handle = getattr(self, elem)
+            str_chk = isinstance(handle, str)
+            int_chk = isinstance(handle, int)
+            float_chk = isinstance(handle, float)
+            path_chk = isinstance(handle, Path)
+            if str_chk or int_chk or float_chk or path_chk:
+                notes_dict[elem] = handle
+
+        # Tracking Settings (Stored in Dict)
+        track_dicts = [self.track_dict, self.link_settings]
+        for track_data in track_dicts:
+            for key in track_data:
+                notes_dict[key] = track_data[key]
+
+        dump_path = fetch_dump_path_base()
+        f_name = dump_path / "_settings_.csv"
+        with open(f_name, "w") as f:
+            f.write("setting, value")
+            for key,val in notes_dict.items():
+                f.write(f"{key},{val}\n")
+
+    def __remove_layer_string_match__(self, layer_name: str) -> None:
+        """
+        Wrapper for deleting image layers.....
+        """
+        for j, elem in enumerate(self.viewer.layers):
+            if layer_name in elem.name:
+                print(f"Removing layer {j}: {elem}")
+                del self.viewer.layers[j]
+
 
 if __name__ == "__main__":
     inst = spatio_temporal_registration_gui()
     napari.run()
-

@@ -160,7 +160,7 @@ def _fetch_indices_no_triggers_(t, dt, indices, t0: np.int64 = 0) -> None:
         trigger_idx += 1
 
 
-def fetch_indices_wrapper(
+def fetch_trigger_indices(
                           triggers, 
                           acc_time,
                           timestamp_arr, 
@@ -176,6 +176,7 @@ def fetch_indices_wrapper(
     if triggers is not None:
         tr_handle = triggers[::2]
     else:
+        print(f"No Triggers -> Using frame_comp_triggers argument:{frame_comp_triggers}")
         tr_handle = np.arange(0, frame_comp_triggers * acc_time, acc_time).astype(np.int64)
 
     n_iter = tr_handle.shape[0] * super_sampling
