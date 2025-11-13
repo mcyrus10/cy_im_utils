@@ -19,13 +19,6 @@ import numpy as np
 import pandas as pd
 import trackpy as tp
 
-from sys import path, platform
-util_paths = [
-        "/home/mcd4/cy_im_utils",
-        "C:\\Users\\mcd4\\Documents\\cy_im_utils",
-        ]
-for elem in util_paths:
-    path.append(elem)
 from cy_im_utils.imgrvt_cuda import rvt
 from cy_im_utils.event.msd_utils import water_viscosity
 from cy_im_utils.event.trackpy_utils import (imsd_powerlaw_fit, imsd_linear_fit,

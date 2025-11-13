@@ -9,3 +9,4 @@ debugging
 sync_to_nvision.sh
 cy_im_utils/tomography/__pycache__/
 cy_im_utils/event/__pycache__/
+cy_im_utils.egg-info/
