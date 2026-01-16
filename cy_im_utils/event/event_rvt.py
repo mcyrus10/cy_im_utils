@@ -28,14 +28,15 @@ _signature_dict_ = {
                   'im':int16[:,:],
                   'kernels':float32[:,:,:],
                   'r_max':int64,
-                  'alpha':float64
+                  'alpha':float64,
+                  'binning':int64
                   }
 _signature_keys_ = ['x','y','p','t','filter','timestamp','time_surface','im',
-                    'kernels', 'r_max','alpha']
+                    'kernels', 'r_max','alpha','binning']
 _signature_ = void(*(_signature_dict_[key] for key in _signature_keys_))
 @njit(_signature_, fastmath = True)
 def event_rvt_filter(x, y, p, t, mean_filter_state, timestamps, time_surface,
-                     image, kernels, r_max, alpha):
+                     image, kernels, r_max, alpha, binning):
     """
     Basically a combination of "Asynchronous spatial image convolutions for
     event cameras" and "Precision single-particle localization using radial
@@ -55,13 +56,13 @@ def event_rvt_filter(x, y, p, t, mean_filter_state, timestamps, time_surface,
           run through being the noise filter is not a killer for efficiency...
 
     """
-    nx,ny = 1280,720
+    nx,ny = 1280//binning,720//binning
     numel = x.size
     kz, kx, ky = kernels.shape
     kern_z, kern_x, kern_y = np.where(kernels)
     n_kern = len(kern_z)
     for j in range(numel):
-        _x_, _y_, _p_, _t_ = x[j], y[j], p[j], t[j]
+        _x_, _y_, _p_, _t_ = x[j] // binning, y[j] // binning, p[j], t[j]
         x_min = _x_ - r_max < 0
         x_max = _x_ + r_max >= nx
         y_min = _y_ - r_max < 0

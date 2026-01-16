@@ -39,6 +39,7 @@ def worker(args):
     r_max = args.r_max
     r_min = args.r_min
     r_step = args.r_step
+    binning = args.binning
     radii = np.arange(r_min, r_max, r_step)
     n_radii = len(radii)
     kernels = np.zeros([n_radii, r_max*2+1, r_max*2+1], dtype = np.float32)
@@ -48,7 +49,6 @@ def worker(args):
     mean_filter_state = np.zeros([n_radii, nx, ny], dtype = np.float32)
     timestamps = np.zeros([nx,ny], dtype = np.float32)
     image = np.zeros([nx,ny], dtype = np.int16)
-    alpha = 1e-5
     alpha = args.alpha
     print("alpha = ",alpha)
     time_surface = np.zeros([2, nx, ny], dtype = np.float32)
@@ -64,18 +64,19 @@ def worker(args):
         time_surface[:] = 0
         mean_filter_state[:] = 0
         event_rvt_filter(
-                                         events['x'],
-                                         events['y'],
-                                         events['p'],
-                                         events['t'],
-                                         mean_filter_state,
-                                         timestamps,
-                                         time_surface,
-                                         image,
-                                         kernels,
-                                         r_max,
-                                         alpha,
-                                        )
+                         events['x'],
+                         events['y'],
+                         events['p'],
+                         events['t'],
+                         mean_filter_state,
+                         timestamps,
+                         time_surface,
+                         image,
+                         kernels,
+                         r_max,
+                         alpha,
+                         binning,
+                        )
         VoM = np.var(mean_filter_state, axis = 0)
         
         if j < args.n_im:
@@ -123,13 +124,16 @@ def fetch_data(data_file: Path,
         assert False, f"unknown file extension: {data_file}"
 
     z = args.hot_px_z
-    print(f"filtering hot px with z = {z}")
-    hot_px_map = calc_hot_px(cd_data, z = z, dtype = np.float32)
-    hot_px_bool = hot_px_cd_filter(hot_px_map, cd_data)
-    cd_data = cd_data[hot_px_bool]
+    if z != -1:
+        print(f"filtering hot px with z = {z}")
+        hot_px_map = calc_hot_px(cd_data, z = z, dtype = np.float32)
+        hot_px_bool = hot_px_cd_filter(hot_px_map, cd_data)
+        cd_data = cd_data[hot_px_bool]
+    else:
+        print(f"Skipping Hot Px Filter")
 
     noise_filter_kwargs = {
-            'frame_size':np.array([ny, nx], dtype = np.int64),
+            'frame_size':np.array([720, 1280], dtype = np.int64),
             'filter_length':args.evt_filter_length,
             'scale':args.evt_filter_scale,
             'update_factor':args.evt_filter_update_factor,
@@ -256,22 +260,29 @@ def arg_parser():
                         dest="hot_px_z",
                         type = float,
                         help = "# standard deviations above mean to filter out",
-                        default = 30
+                        default = -1
                         )
     parser.add_argument(
                         "--alpha",
                         dest="alpha",
                         type = float,
                         help = "decay factor for RVT filter",
-                        default = 1e-5
+                        default = None
+                        )
+    parser.add_argument(
+                        "--binning",
+                        dest="binning",
+                        type = int,
+                        help = "pixel binning stride",
+                        default = 1
                         )
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    nx, ny = 1280, 720
     args = arg_parser()
+    nx, ny = np.array([1280 , 720], dtype = np.int64) // args.binning
     super_sampling = args.ss
     idx_0, n_im = 0, 2000*super_sampling
     cd_data, trigger_indices = None,None

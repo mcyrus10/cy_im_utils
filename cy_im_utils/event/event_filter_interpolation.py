@@ -771,7 +771,8 @@ def _processEvents_(
         TimestampMap: np.int64,
         IntervalMap: np.float64, 
         ActiveMap: bool,
-        UpdateFactor: float):
+        UpdateFactor: float,
+        ):
     """
     event = np.array([[x, y, p, t]] ???????
     """
@@ -785,7 +786,7 @@ def _processEvents_(
 
 class event_filter_interpolation_compiled:
     def __init__(self, frame_size, filter_length, scale, update_factor, 
-                 interpolation_method, filtered_ts = None):
+            interpolation_method, filtered_ts = None):
         """
         Parameters:
         -----------
@@ -810,6 +811,7 @@ class event_filter_interpolation_compiled:
         
         sz_0 = int(np.floor(frame_size[0] / scale))
         sz_1 = int(np.floor(frame_size[1] / scale))
+        print(f"output shapes from interpolation filter:\n\t{sz_0, sz_1}")
         
         self.TimestampMap = np.zeros([sz_0, sz_1], dtype = np.float64)
         self.IntervalMap = 1e4 * np.ones([sz_0, sz_1], dtype = np.float64)

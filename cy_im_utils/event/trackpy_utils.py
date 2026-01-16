@@ -328,14 +328,37 @@ def tracks_to_mask(input_array, input_tracks) -> np.array:
     yy = yy.astype(cp.float32)
     mask = np.zeros(input_array.shape, dtype = bool)
     desc = "tracks -> mask"
+    batch_size = 50
     for idx in tqdm(range(input_array.shape[0]), desc = desc):
         fr_slice = input_tracks['frame'].values == idx
         y,x,size = cp.array(input_tracks[fr_slice][['y','x','size']].values.T)
-        radial_arr = cp.sqrt((xx[None,:,:] - x[:,None,None])**2 + (yy[None,:,:] - y[:,None,None])**2)
-        bool_arr = radial_arr <= size[:,None,None]*2
-        mask_local = bool_arr.sum(axis = 0)
-        mask[idx] = mask_local.get()
+        numel = len(x)
+        n_batch = int(np.ceil(numel/batch_size))
+        for q in range(n_batch):
+            batch_slice = slice(q*batch_size,(q+1)*batch_size)
+            radial_arr = cp.sqrt((xx[None,:,:] - x[batch_slice,None,None])**2 + (yy[None,:,:] - y[batch_slice,None,None])**2)
+            bool_arr = radial_arr <= size[batch_slice,None,None]*2
+            mask_local = bool_arr.sum(axis = 0)
+            mask[idx] += mask_local.astype(bool).get()
     return mask
+
+
+def locate_hot_region(located_x, located_y, nx, ny, bin_size, threshold) -> tuple:
+    """
+    This is for locating image regions that are corrupted by stuck particles or
+    structured noise particles... 
+
+    inputs:
+        located_x: trackpy x coordinates (np.array)
+        located_y: trackpy y coordinates (np.array)
+        nx,ny : image extents
+        threshold: this function returns the coordinates where the histogram
+                   exceeds the threshold
+    """
+    bins_x = np.arange(0, nx+1, bin_size)
+    bins_y = np.arange(0, ny+1, bin_size)
+    hist = np.histogram2d(located_x, located_y, bins = (bins_x, bins_y))
+    return hist[0].T, np.vstack(np.where(hist[0].T > threshold)).T
 
 
 class event_tracks:

@@ -1,6 +1,6 @@
 #!/home/mcd4/miniconda3/envs/openeb/bin/python
 from PIL import Image 
-from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter, convolve, convolve1d
+from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter, convolve, convolve1d, zoom
 from enum import Enum 
 from functools import partial 
 from magicgui import magicgui
@@ -18,11 +18,13 @@ import napari
 import numpy as np
 import pandas as pd
 import trackpy as tp
+from sys import platform
 
 from cy_im_utils.imgrvt_cuda import rvt
 from cy_im_utils.event.msd_utils import water_viscosity
 from cy_im_utils.event.trackpy_utils import (imsd_powerlaw_fit, imsd_linear_fit,
-                                             fetch_particle_pairs, re_link, tracks_to_mask)
+                                             fetch_particle_pairs, re_link, tracks_to_mask,
+                                             locate_hot_region)
 from cy_im_utils.event.integrate_intensity import (_integrate_events_wrapper_,
                                                    fetch_trigger_indices)
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
@@ -122,7 +124,7 @@ def __calc_msd__(
                 assert False, f"Empty Particle ID {track_id}"
             track_lengths.append(np.sum(particle_slice))
             imsd = tp.motion.imsd(track_handle[particle_slice], **imsd_kwargs)
-            emsd = imsd
+            emsd = tp.motion.emsd(track_handle[particle_slice], **imsd_kwargs)
             bay = __calc_bayesian__(track_id,
                                     track_handle,
                                     fps,
@@ -163,6 +165,8 @@ def __calc_msd__(
         diam_lin = kb * T / (3 * np.pi * eta * diffusivity_lin * 1e-12) * 1e9
         neg_diams = diam_lin < 0
         bay_diam = kb * T / (3 * np.pi * eta * bay[:,0] * 1e-12) * 1e9
+        diffusivity_ensemble = m_ensemble / 4
+        diam_ensemble = kb * T / (3 * np.pi * eta * diffusivity_ensemble * 1e-12) * 1e9
 
         return  {
                 'imsd':imsd,
@@ -185,6 +189,8 @@ def __calc_msd__(
                 'diam_log':diam_log,
                 'diffusivity_lin':diffusivity_log,
                 'diam_lin':diam_lin,
+                'diffusivity_ensemble':diffusivity_ensemble,
+                'diam_ensemble':diam_ensemble,
                 'neg_diams': neg_diams,
                 'track_lengths': np.array(track_lengths),
                 }
@@ -330,6 +336,24 @@ def fetch_square_kernel(x, sigma, gamma, x0 = 0) -> np.array:
     """
     kern = np.ones_like(x)
     return kern / np.sum(kern)
+
+
+def points_to_ellipse_coords(centroids, diameter) -> list:
+    """
+    This is for formatting the output of trackpy to show the coordinates of the
+    diameter mask in napari...
+    """
+    output = []
+    radius = diameter/2
+    for centroid in centroids:
+        ellipse = np.array([
+            [centroid[0]-radius, centroid[1]-radius],
+            [centroid[0]-radius, centroid[1]+radius],
+            [centroid[0]+radius, centroid[1]+radius],
+            [centroid[0]+radius, centroid[1]-radius],
+            ])
+        output.append(ellipse)
+    return output
 
 
 class np_dtype(Enum):
@@ -526,6 +550,7 @@ class spatio_temporal_registration_gui:
                     self.__unspecified_colormap__(),
                     self.__set_contrast_lims__(),
                     self.__measure_line_length__(),
+                    self.__locate_stuck__(),
                     self.__particles_in_rectangle__(),
                     ]
                 }
@@ -1049,14 +1074,27 @@ class spatio_temporal_registration_gui:
             self.frame_track[layer_name] = f.copy()
             points_array = f[['y','x']].values
 
-            self.__remove_layer_string_match__(layer_name = "tracked centroids")
+            self.__remove_layer_string_match__(layer_name = "Tracked Centroids")
+            self.__remove_layer_string_match__(layer_name = "Diameter Mask")
 
             self.viewer.add_points(
                     points_array,
-                    name = f'tracked centroids {test_frame}',
+                    name = f'Tracked Centroids {test_frame}',
                     symbol = 'x',
                     face_color = 'b'
                     )
+            
+            ellipse_data = points_to_ellipse_coords(points_array, diameter)
+            self.viewer.add_shapes(
+                    ellipse_data,
+                    name = f'Diameter Mask {test_frame}',
+                    shape_type = "ellipse",
+                    blending = "minimum",
+                    edge_color = "red"
+                    )
+
+            napari.experimental.link_layers(self.viewer.layers[-2:])
+
         return inner
 
     def _track_batch_locate_(self):
@@ -1179,9 +1217,12 @@ class spatio_temporal_registration_gui:
                 t1 = tp.subtract_drift(t1.copy(), drift)
                 t1 = t1.droplevel("particle")
             self.track_holder[layer_name] = t1.copy()
-            # Add Track Centroids to viewer as points layer
 
-            self.viewer.add_tracks(t1[['particle','frame','y','x']])
+            # Add Track Centroids to viewer as Track Layer
+            track_name = f"{layer_name} Tracks"
+            self.__remove_layer_string_match__(layer_name = track_name)
+            self.viewer.add_tracks(t1[['particle','frame','y','x']],
+                                   name = track_name)
 
             self.link_settings = {
                                   'min_length':min_length,
@@ -1282,6 +1323,7 @@ class spatio_temporal_registration_gui:
                          bins):
         keys = [
                 'imsd',
+                'emsd',
                 'bay',
                 'bay_diam',
                 'A',
@@ -1294,14 +1336,19 @@ class spatio_temporal_registration_gui:
                 'diam_log',
                 'diffusivity_lin',
                 'diam_lin',
+                'm_ensemble',
+                'b_ensemble',
+                'diam_ensemble',
                 'neg_diams',
                 'track_lengths'
                 ]
-        (imsd, bay, bay_diam,
+        (imsd, emsd, bay, bay_diam,
             A, n_log, log_fits, 
             m, b, lin_fits, 
             diffusivity_log, diam_log, 
             diffusivity_lin, diam_lin,
+            m_ensemble, b_ensemble,
+            diam_ensemble,
             neg_diams,
             track_length) = [data_dict[key] for key in keys]
 
@@ -1318,6 +1365,7 @@ class spatio_temporal_registration_gui:
             a.set(xlabel = "Lag time (s)", 
                   ylabel = r"$\langle \Delta r^2 \rangle$ [$\mu$m$^2$]")
 
+
         # ---------------------------------------------------------------------
         # Fit Region of MSD Curve
         # ---------------------------------------------------------------------
@@ -1326,6 +1374,16 @@ class spatio_temporal_registration_gui:
         ax[0,0].plot(imsd.index.values[slice_], log_fits, color = 'r', alpha = 0.05)
         ax[0,1].plot(imsd.index.values[slice_], lin_fits, color = 'r', alpha = 0.05)
 
+        # ---------------------------------------------------------------------
+        # ENSEMBLE PLOTS
+        # ---------------------------------------------------------------------
+        for a in ax[0,:-1]:
+            a.plot(emsd.index, emsd, color = 'tab:purple', marker = '.', 
+                   markerfacecolor = 'w', alpha = 0.8)
+        x_emsd = emsd.index.values[slice_]
+        ax[0,1].plot(x_emsd, np.polyval([m_ensemble, b_ensemble], x_emsd), 
+                color = 'tab:green', label = f"ensemble: {diam_ensemble:0.2f} nm")
+        ax[0,1].legend(loc = 'upper left')
         # ---------------------------------------------------------------------
         # Localization Uncertainty? 
         # ---------------------------------------------------------------------
@@ -1564,9 +1622,9 @@ class spatio_temporal_registration_gui:
     def _preview_event_noise_filter_(self):
         @magicgui(
                 call_button="Preview Interpolation Event Noise Filter",
-                scale = {'label':'Scale'},
-                filter_length = {'label':'filter_length', 'max': 1e16},
-                update_factor = {'label':'update_factor', 'step': 1e-6 },
+                scale = {'label':'Scale (px)'},
+                filter_length = {'label':'filter_length (us)', 'max': 1e16},
+                update_factor = {'label':'update_factor (-)', 'step': 1e-6 },
                 interpolation_method = {'label':'interpolation method'},
                 n_images = {'label':'Images to filter','min':1,'max':1e16},
                 persist = True
@@ -1722,7 +1780,7 @@ class spatio_temporal_registration_gui:
                 call_button="Calculate Hot Pixels",
                 layer_name = {'label':'Layer Name'},
                 persist = True,
-                z = {'label':'z', 'min': 1},
+                z = {'label':'z', 'min': 1,'max':1e16},
                 )
         def inner(
                 layer_name: str,
@@ -2203,7 +2261,7 @@ class spatio_temporal_registration_gui:
         if ground_truth is not None:
             for a in ax:
                 a.axvline(ground_truth, color = 'k', linestyle = '--')
-        ax[0].set(ylabel = "log$_2$(track length) >= n")
+        ax[0].set(ylabel = "log$_2$(track length)")
         for a in ax:
             a.set_xlabel("diameter (nm)")
         fig.tight_layout()
@@ -2307,6 +2365,50 @@ class spatio_temporal_registration_gui:
                     )
             name = f"mask {track_key} -> {image_key}"
             self.viewer.add_image(mask, name = name)
+        return inner
+
+
+    def __locate_stuck__(self) -> None:
+        @magicgui(
+                  call_button="Find Hot Regions",
+                  layer = {'label':"Layer Name"},
+                  threshold = {'label':"threshold", "min":0, "max":1e16},
+                  bin_size = {'label':"hist bin size", "min":1, "max":1e16},
+                  persist = True
+                  )
+        def inner(
+                  layer: str, 
+                  threshold: float,
+                  bin_size: int,
+                  ):
+            loc_handle = self.located_frames[layer]
+            loc_x, loc_y = loc_handle[['x','y']].values.T
+            _, ny, nx  = self.__fetch_layer__(layer).data.shape
+            hist, coords = locate_hot_region(loc_x, loc_y, nx, ny, bin_size, threshold)
+            hist_rsz = zoom(cp.array(hist), bin_size).get()
+
+
+
+            # Add image of histograms
+            #self.viewer.add_image(hist_rsz, colormap = 'plasma', opacity = 0.5, 
+            #                      name = "Stuck px")
+            rectangles = []
+            for xx, yy in coords:
+                x0, x1 = xx*bin_size, (xx+1)*bin_size
+                y0, y1 = yy*bin_size, (yy+1)*bin_size
+                elem = np.array([
+                    [x0, y0],
+                    [x1, y0],
+                    [x1, y1],
+                    [x0, y1],
+                    ])
+                rectangles.append(elem)
+
+            self.__remove_layer_string_match__(layer_name = "hot regions")
+            self.viewer.add_shapes(data = rectangles, 
+                                   shape_type = 'rectangle', 
+                                   name = 'hot regions')
+
         return inner
 
 
@@ -2419,14 +2521,19 @@ class spatio_temporal_registration_gui:
             assert isinstance(self.viewer.layers[-1], 
                               napari.layers.shapes.shapes.Shapes), msg
             tracks = self.track_holder[track_key]
-            handle = inst.viewer.layers[-1].data[0]
-            x0,x1 = np.min(handle[:,2]), np.max(handle[:,2])
-            y0,y1 = np.min(handle[:,1]), np.max(handle[:,1])
-            bool_arr = (tracks['x'].values >= x0) * \
-                       (tracks['x'].values <= x1) * \
-                       (tracks['y'].values >= y0) * \
-                       (tracks['y'].values <= y1)
-            parts = np.unique(tracks['particle'][bool_arr])
+            bounding_rectangles = inst.viewer.layers[-1].data
+            parts = []
+            for rectangle in bounding_rectangles:
+                n_col = rectangle.shape[1]
+                x0,x1 = np.min(rectangle[:,n_col-1]), np.max(rectangle[:,n_col-1])
+                y0,y1 = np.min(rectangle[:,n_col-2]), np.max(rectangle[:,n_col-2])
+                bool_arr = (tracks['x'].values >= x0) * \
+                           (tracks['x'].values <= x1) * \
+                           (tracks['y'].values >= y0) * \
+                           (tracks['y'].values <= y1)
+                local_unique = np.unique(tracks['particle'][bool_arr])
+                parts.append(local_unique)
+            parts = np.hstack(parts)
             print("-"*70)
             print("particles inside rectangle:")
             print(",".join([f"{elem}" for elem in parts]))

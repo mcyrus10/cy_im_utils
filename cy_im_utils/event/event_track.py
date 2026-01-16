@@ -129,6 +129,7 @@ def evt_track(
 
 def apply_evt_track(cd_data,
                     trigger_idx,
+                    track_polarity = 1,
                     R_min = 20.0,
                     R_max = 20.0,
                     R_multiple = 2.0,
@@ -184,7 +185,7 @@ def apply_evt_track(cd_data,
         #    print(ve)
         #    continue
 
-        for z in [1]:
+        for z in [track_polarity]:
             pts = clusters[1:,:2,z][:,::-1]
             z_loc = j*np.ones(pts.shape[0])[:,None]
             pts = np.hstack([z_loc,pts])
