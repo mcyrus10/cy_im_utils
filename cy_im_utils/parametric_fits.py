@@ -26,7 +26,7 @@ def fit_param_gaussian(data, n_bins, mode = 'normal', density = False) -> tuple:
     else:
         iterator = range(len(n_bins)-1)
     bins_centered = np.array([(bins[j] + bins[j+1]) / 2 for j in iterator])
-    x0 = [1,np.median(data_handle),np.std(data_handle),0]
+    x0 = [np.max(data_handle),np.median(data_handle),np.std(data_handle),np.min(data_handle)]
     bounds = [(0, 0, 0, 0), (np.inf, np.inf, np.inf, np.inf)]
     residual = lambda params, x, data: parametric_gaussian(x, params) - data
     try:

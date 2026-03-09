@@ -22,7 +22,7 @@ def __hdf5_to_numpy__(
                     height: int = 1280,
                     dtype= np.int16,
                     omit_neg: bool = False,
-                    ) -> (np.array, np.array):
+                    ) -> np.array:
     """
     This is for loading in an hdf5 file so that the exposure time of the
     frame camera can be matched to the event signal directly.....

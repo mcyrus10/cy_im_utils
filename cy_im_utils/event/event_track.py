@@ -29,7 +29,7 @@ def numba_min(arr, ref) -> np.array:
     
 
 #                      x            y        p        t           clust         Rx       Rmax    Rmin      ax        aw      ar       w       filter   kern   nx     ny
-@njit(float64[:,:,:](uint16[:], uint16[:], int16[:], int64[:], float64[:,:,:], float64, float64, float64, float64, float64, float64, float64, int64, int64))
+@njit(float64[:,:,:](uint16[:], uint16[:], int16[:], int64[:], float64[:,:,:], float64, float64, float64, float64, float64, float64, float64, int64, int64, int64))
 def evt_track(
               x_coords, # cd data x coordinates
               y_coords, # cd data y coordinates
@@ -45,6 +45,7 @@ def evt_track(
               weight_min = 0.01,  # Weigted frequency cutoff?
               nx: int = 1280,  # image extent
               ny: int = 720, # image extent
+              reset_freq: int = 100
              ) -> np.array:
     """
     Implementation of "Embedded Vision System for Real-Time Object tracking
@@ -118,7 +119,7 @@ def evt_track(
         # -------------------------------------------
         # CLEAR OUT INACTIVE/LOW FREQUENCY?
         # -------------------------------------------
-        if j % 100 == 0 and j > 0:
+        if j % reset_freq == 0 and j > 0:
             reset_idx = clusters[:,4,1] <= weight_min
             clusters = clusters[~reset_idx]
             sort_idx = np.argsort(clusters[:,5,1])
@@ -138,6 +139,7 @@ def apply_evt_track(cd_data,
                     alpha_w = 0.8,
                     alpha_r = 0.9,
                     weight_min = 5e-3,
+                    reset_freq: int = 100,
                     nx = 1280,           # image extent
                     ny = 720,            # image extent
                     ) -> (np.array, pd.DataFrame):
@@ -180,6 +182,7 @@ def apply_evt_track(cd_data,
                              weight_min = weight_min,
                              nx = nx,
                              ny = ny,
+                             reset_freq = reset_freq,
                             )
         #except ValueError as ve:
         #    print(ve)

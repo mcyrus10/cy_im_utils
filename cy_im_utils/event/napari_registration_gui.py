@@ -4,10 +4,13 @@ from cupyx.scipy.ndimage import affine_transform, median_filter, gaussian_filter
 from enum import Enum 
 from functools import partial 
 from magicgui import magicgui
+from magicgui.widgets import Container
+from qtpy.QtWidgets import QScrollArea
 from matplotlib.gridspec import GridSpec
 from pathlib import Path
 from scipy.optimize import least_squares
 from scipy.stats import median_abs_deviation
+from scipy.signal import find_peaks
 from tifffile import imread
 from tqdm import tqdm
 import cupy as cp
@@ -21,6 +24,7 @@ import trackpy as tp
 from sys import platform
 
 from cy_im_utils.imgrvt_cuda import rvt
+from cy_im_utils.calc_angular_speed import calc_auto_correlation
 from cy_im_utils.event.msd_utils import water_viscosity
 from cy_im_utils.event.trackpy_utils import (imsd_powerlaw_fit, imsd_linear_fit,
                                              fetch_particle_pairs, re_link, tracks_to_mask,
@@ -34,6 +38,18 @@ from cy_im_utils.event.hot_px_filter import calc_hot_px, hot_px_cd_filter
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
 
+
+def make_scrollabel(magicgui_container):
+    """
+
+        ENABLES SCROLLABLE TABS!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+    """
+    scroll_area = QScrollArea()
+    scroll_area.setWidgetResizable(True)
+
+    scroll_area.setWidget(magicgui_container.native)
+    return scroll_area
 
 def cp_free_mem() -> None:
     """
@@ -168,6 +184,7 @@ def __calc_msd__(
         diffusivity_ensemble = m_ensemble / 4
         diam_ensemble = kb * T / (3 * np.pi * eta * diffusivity_ensemble * 1e-12) * 1e9
 
+        #print(f"m/4:{m/4}; diffusivity_lin: {diffusivity_lin}" )
         return  {
                 'imsd':imsd,
                 'emsd':emsd,
@@ -187,7 +204,7 @@ def __calc_msd__(
                 'lin_fits_ensemble':lin_fits_ensemble,
                 'diffusivity_log':diffusivity_log,
                 'diam_log':diam_log,
-                'diffusivity_lin':diffusivity_log,
+                'diffusivity_lin':diffusivity_lin,
                 'diam_lin':diam_lin,
                 'diffusivity_ensemble':diffusivity_ensemble,
                 'diam_ensemble':diam_ensemble,
@@ -493,8 +510,8 @@ class spatio_temporal_registration_gui:
                               self._filter_hot_pixels_(),
                               self._preview_event_noise_filter_(),
                               self._apply_event_noise_filter_(),
-
-                              ],
+                              ]
+                            ,
                 'Registration': [
                               self._flip_(),
                               self._align_sub_super_sampled_frame_(),
@@ -506,7 +523,7 @@ class spatio_temporal_registration_gui:
                               self._mutual_information_(),
                               self._zip_centroids_to_points_(),
                               ],
-                'Filtering 1':[
+                'Filtering 1': [
                             self._isolate_event_sign_(),
                             #self._combine_event_channels_(),
                             self._abs_of_layer_(),
@@ -515,32 +532,31 @@ class spatio_temporal_registration_gui:
                             self._apply_gaussian_layer_(),
                             self._apply_median_layer_(),
                             self._apply_conditional_median_layer_(),
-                                 ],
-                'Filtering 2':[
                             self._filter_1d_(),
                             self._remove_pixels_(),
                             self._subtract_axial_median_gpu_(),
                             self._calc_median_background_(),
                             self._diff_layer_(),
-                    ],
-                'Tracking':[
+                            ],
+                'Tracking': [
                             self._preview_track_centroids_(),
                             self._track_batch_locate_(),
                             self._track_link_(),
                             self._calc_msd_(),
                               ],
-                'Fusion':[
+                'Fusion': [
                             self._estimate_matched_particles_(),
                             self._add_match_points_(),
                             ],
-                'Vis':[
+                'Vis':   [
                             self._figure_(),
                             self.__tracks_to_mask__(),
                             self._violin_plot_(),
                             self._joint_hist_(),
-                            self._plot_particle_iso_()
+                            self._plot_particle_iso_(),
+                            self.__estimate_angular_speed__()
                               ],
-                'Utils':[
+                'Utils':  [
                     self.__free_memory__(),
                     self.__add_empty_image__(),
                     self.__transform_tracks_coordinate_system__(),
@@ -556,17 +572,24 @@ class spatio_temporal_registration_gui:
                 }
         tabs = []
         for j,(key,val) in enumerate(dock_widgets.items()):
-            handle = self.viewer.window.add_dock_widget(val,
+            handle = self.viewer.window.add_dock_widget(
+                                               make_scrollabel(Container(widgets = 
+                                                               val, 
+                                                               labels = False )
+                                                               ),
                                                name = key,
-                                               add_vertical_stretch = False,
-                                               area = 'right'
+                                               #add_vertical_stretch = False,
+                                               area = 'right',
                                                )
+           
             tabs.append(handle)
             if j > 0:
                 self.viewer.window._qt_window.tabifyDockWidget(
                         tabs[0],
                         handle
                         )
+        #self.viewer.window._qt_window.tabifyDockWidget(tabs)
+        tabs[0].raise_()
         self.total_shift = 0
 
     #--------------------------------------------------------------------------
@@ -2652,6 +2675,47 @@ class spatio_temporal_registration_gui:
             if layer_name in elem.name:
                 print(f"Removing layer {j}: {elem}")
                 del self.viewer.layers[j]
+
+
+    def __estimate_angular_speed__(self):
+        @magicgui(
+                call_button="estimate angular speed (ACL)",
+                persist = True,
+                layer_name = {'label':'Layer Name'},
+                down_sampling = {'label':'down sampling','min':0,'max':1e16}
+                )
+        def inner(
+                layer_name: str,
+                down_sampling: int,
+                fps: float
+                ):
+            im_handle = self.__fetch_layer__(layer_name).data
+            n_im = im_handle.shape[0]
+            acl = calc_auto_correlation(im_handle, down_sampling = down_sampling)
+            frames = np.arange(1,n_im+1,1)
+            angular_speed_str = [f"{elem:0.3f}" for elem in 2*np.pi/frames*fps]
+            max_corr = np.where(acl == np.max(acl))[0]
+            if len(max_corr == 1):
+                print(f"peak correlation -> {angular_speed_str[max_corr[0]]} rad/s")
+            fig,ax = plt.subplots(1,1)
+            ax = [ax]
+            ax.append(ax[0].twiny())
+            peaks = find_peaks(acl)
+            for a in ax:
+                a.plot(frames, acl)
+                for p in peaks[0]:
+                    a.axvline(frames[p], color = 'k', linestyle = '--', alpha = 0.1)
+                    a.plot(frames[p], acl[p], 'rx')
+            xtick_spacing = int(np.round(n_im/15))
+            ax[1].set_xticks(frames[::xtick_spacing], angular_speed_str[::xtick_spacing], rotation = 45)
+            ax[0].set_xlabel("Image Index")
+            ax[1].set_xlabel("Angular Speed (rad/s)")
+            ax[0].set_ylabel("Auto Correlation")
+            fig.tight_layout()
+            plt.show()
+            print("Done")
+
+        return inner
 
 
 if __name__ == "__main__":
