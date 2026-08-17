@@ -313,6 +313,23 @@ def hdf5_integrator(file_name,
     imwrite(f_name, image_stack_global)
 
 
+def event_summation(cd_data, trigger_indices, nx = 1280, ny = 720) -> np.array:
+    """
+
+    This sums all the events regardless of sign to form the "summed event array"
+
+    """
+    n_im = trigger_indices.shape[0]
+    temp = np.zeros([n_im, ny, nx])
+    im_buffer = np.zeros([ny, nx], dtype = np.uint16)
+
+    for j, elem in tqdm(enumerate(trigger_indices), desc = "summing all events"):
+        slice_ = slice(*elem)
+        x,y = [cd_data[slice_][key] for key in ['x','y']]
+        im_buffer[:] = 0
+        np.add.at(im_buffer, (y,x), 1)
+        temp[j] = im_buffer.copy()
+    return temp
 
 
 if __name__ == "__main__":

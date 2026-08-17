@@ -30,9 +30,12 @@ from cy_im_utils.event.trackpy_utils import (imsd_powerlaw_fit, imsd_linear_fit_
                      fetch_particle_pairs, re_link, tracks_to_mask,
                      locate_hot_region, predict_curry, generate_velocity_field)
 from cy_im_utils.event.integrate_intensity import (_integrate_events_wrapper_,
-                                                   fetch_trigger_indices)
+                                                   fetch_trigger_indices, 
+                                                   event_summation)
+from cy_im_utils.event.time_surface_ops import calc_time_surface_square
 from cy_im_utils.event.event_filter_interpolation import event_filter_interpolation_compiled
 from cy_im_utils.event.clustering import *
+from cy_im_utils.event.composite_centroid import composite_centroid
 from cy_im_utils.event.read_hdf5 import __read_hdf5__, __hdf5_to_numpy__
 from cy_im_utils.event.hot_px_filter import calc_hot_px, hot_px_cd_filter
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
@@ -650,6 +653,10 @@ class spatio_temporal_registration_gui:
         self.noise_floor  = None
         self.velo_field = {}
         self.frame_comp_triggers = -1
+        self.ny = 720
+        self.nx = 1280
+        print(f"[INFO] Hard coding nx and ny for event size: {self.nx}, {self.ny}")
+
 
         dock_widgets = {
                 'Data Loading': [
@@ -675,6 +682,8 @@ class spatio_temporal_registration_gui:
                 'Filtering': [
                             self._isolate_event_sign_(),
                             #self._combine_event_channels_(),
+                            self._sum_of_events_(),
+                            self._calculate_time_surface(),
                             self._abs_of_layer_(),
                             self._preview_rvt_filter_(),
                             self._apply_rvt_to_layer_(),
@@ -699,6 +708,7 @@ class spatio_temporal_registration_gui:
                 'Fusion': [
                             self._estimate_matched_particles_(),
                             self._add_match_points_(),
+                            self._calculate_composite_centroids(),
                             ],
                 'Vis':   [
                             self._figure_(),
@@ -815,10 +825,13 @@ class spatio_temporal_registration_gui:
                         
                         )
 
+
             event_stack  = __hdf5_to_numpy__(
                                        self.trigger_indices,
                                        self.cd_data,
                                        num_images = self.num_event_images,
+                                       width = self.ny,
+                                       height = self.nx,
                                        dtype = self.event_dtype,
                                        omit_neg = self.event_omit_neg
                                                )
@@ -1817,6 +1830,36 @@ class spatio_temporal_registration_gui:
                                 )
         return inner
 
+    def _calculate_composite_centroids(self):
+        @magicgui(
+                call_button="calcualte mutual centroids",
+                persist = True,
+                located_1_name = {'label':'Located 1 Name'},
+                located_2_name = {'label':'Located 2 Name'},
+                threshold = {"label":"threshold"},
+                weight = {"label":"weight (dataframe 1)","min":0,"max":1},
+                add_image_layer = {"label":"add blank image"}
+                )
+        def inner(
+                located_1_name: str,
+                located_2_name: str,
+                threshold: float = 0,
+                weight: float = 0.5,
+                add_image_layer: bool = True
+                ):
+            new_centroids = composite_centroid(
+                    self.located_frames[located_1_name],
+                    self.located_frames[located_2_name],
+                    threshold = threshold,
+                    weight = weight,
+                    )
+            self.located_frames['composite'] = new_centroids
+            if add_image_layer:
+                self.__add_empty_image__()(layer_name = "composite", 
+                        shape = f"2,{self.ny},{self.nx}")
+        return inner
+
+
     def _add_match_points_(self):
         @magicgui(
                 call_button="Add match points to viewer",
@@ -2182,6 +2225,39 @@ class spatio_temporal_registration_gui:
             self.__fetch_layer__(layer_name).data = np.abs(self.__fetch_layer__(layer_name).data)
             print(f"Applied absolute value to {layer_name}")
         return inner
+
+    def _sum_of_events_(self):
+        @magicgui(call_button="CD events to grayscale event sum")
+        def inner():
+            triggers = inst.trigger_indices[0:self.num_event_images]
+            event_mag = event_summation(self.cd_data, triggers, self.nx, self.ny)
+            inst.viewer.add_image(event_mag, name = "|event|", colormap = "inferno")
+        return inner
+
+    def _calculate_time_surface(self):
+        @magicgui(
+                call_button="Calculate Exponential Time Surface",
+                persist = True,
+                tau = {"label":"tau","min":0,"max":1e16},
+                R = {"label":"size"},
+                )
+        def inner(tau: float,
+                  R: int = 1):
+            n_im = self.num_event_images
+            ts = calc_time_surface_square(
+                    self.cd_data,
+                    self.trigger_indices[:n_im],
+                    shape = [n_im, self.ny, self.nx],
+                    R = R,
+                    tau = tau,
+                    nx = self.nx,
+                    ny = self.ny,
+                    )
+            self.viewer.add_image(ts, name = "time surface", colormap = "plasma")
+
+        return inner
+
+
 
     def _combine_event_channels_(self):
         @magicgui(
