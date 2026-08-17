@@ -40,6 +40,7 @@ from cy_im_utils.event.read_hdf5 import __read_hdf5__, __hdf5_to_numpy__
 from cy_im_utils.event.hot_px_filter import calc_hot_px, hot_px_cd_filter
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
+from cy_im_utils.event.ncc import compute_local_point_symmetry_gpu_kernel
 
 
 def make_scrollabel(magicgui_container):
@@ -662,12 +663,32 @@ class spatio_temporal_registration_gui:
                 'Data Loading': [
                               self._load_frame_(),
                               self._load_event_(),
+                              ],
+                "Event Filtering":[
                               self.__calculate_hot_pixels__(),
                               self._filter_hot_pixels_(),
                               self._preview_event_noise_filter_(),
                               self._apply_event_noise_filter_(),
-                              ]
-                            ,
+                              self._isolate_event_sign_(),
+                              self._sum_of_events_(),
+                              self._calculate_time_surface_(),
+                              self._abs_of_layer_(),
+                              self._remove_pixels_(),
+                              self._filter_1d_(),
+                            ],
+                "Image Filtering": [
+                            self._preview_rvt_filter_(),
+                            self._calculate_multi_scale_ncc(),
+                            self._apply_rvt_to_layer_(),
+                            self._apply_gaussian_layer_(),
+                            self._apply_median_layer_(),
+                            self._apply_conditional_median_layer_(),
+                            self._subtract_axial_median_gpu_(),
+                            self._calc_median_background_(),
+                            #self._diff_layer_(),
+                            self._calc_contrast_(),
+                            self._line_filter_(),
+                            ],
                 'Registration': [
                               self._flip_(),
                               self._align_sub_super_sampled_frame_(),
@@ -679,25 +700,6 @@ class spatio_temporal_registration_gui:
                               self._mutual_information_(),
                               self._zip_centroids_to_points_(),
                               ],
-                'Filtering': [
-                            self._isolate_event_sign_(),
-                            #self._combine_event_channels_(),
-                            self._sum_of_events_(),
-                            self._calculate_time_surface(),
-                            self._abs_of_layer_(),
-                            self._preview_rvt_filter_(),
-                            self._apply_rvt_to_layer_(),
-                            self._apply_gaussian_layer_(),
-                            self._apply_median_layer_(),
-                            self._apply_conditional_median_layer_(),
-                            self._filter_1d_(),
-                            self._remove_pixels_(),
-                            self._subtract_axial_median_gpu_(),
-                            self._calc_median_background_(),
-                            #self._diff_layer_(),
-                            self._calc_contrast_(),
-                            self._line_filter_(),
-                            ],
                 'Tracking': [
                             self._preview_track_centroids_(),
                             self._track_batch_locate_(),
@@ -1058,7 +1060,6 @@ class spatio_temporal_registration_gui:
                                edge_color = 'black',
                                edge_width = 3
                                )
-
 
     def _reset_affine_(self):
         @magicgui(call_button="reset affine")
@@ -1814,19 +1815,22 @@ class spatio_temporal_registration_gui:
                                self.matches,
                                mode = "frame match" if mode_bool else ""
                                )
-                handle_1_match = track_1 + " matched tracks"
-                handle_2_match = track_2 + " matched tracks"
+                handle_1_match = f"{track_1} -> {track_2} matched"
+                handle_2_match = f"{track_2} -> {track_1} matched"
                 self.track_holder[handle_1_match] = temp[0]
                 self.track_holder[handle_2_match] = temp[1]
+                self.viewer.add_image(np.zeros([2,10,10]), name = handle_1_match, visible = False)
+                self.viewer.add_image(np.zeros([2,10,10]), name = handle_2_match, visible = False)
                 print(f"added {handle_1_match} to tracks")
                 print(f"added {handle_2_match} to tracks")
                 if tracks_bool:
                     slice_ = ['particle','frame','y','x']
                     for key in [handle_1_match, handle_2_match]:
+                        self.__remove_layer_string_match__(layer_name = key)
                         print(f"adding {key} tracks to viewer")
                         self.viewer.add_tracks(
                                 self.track_holder[key][slice_],
-                                name = key
+                                name = f"{key} tracks"
                                 )
         return inner
 
@@ -2234,7 +2238,7 @@ class spatio_temporal_registration_gui:
             inst.viewer.add_image(event_mag, name = "|event|", colormap = "inferno")
         return inner
 
-    def _calculate_time_surface(self):
+    def _calculate_time_surface_(self):
         @magicgui(
                 call_button="Calculate Exponential Time Surface",
                 persist = True,
@@ -2254,6 +2258,34 @@ class spatio_temporal_registration_gui:
                     ny = self.ny,
                     )
             self.viewer.add_image(ts, name = "time surface", colormap = "plasma")
+
+        return inner
+
+    def _calculate_multi_scale_ncc(self):
+        @magicgui(
+                call_button="Calculate Multi Scale NCC",
+                persist = True,
+                layer_name = {'label':'Layer Name',"widget_type": "ComboBox"},
+                R = {"label":"R (string comma sep)"},
+                )
+        def inner(layer_name: str,
+                  R: str = "5",
+                  omit_neg: bool = True,
+                  ):
+            reference_arr = self.__fetch_layer__(layer_name).data
+            ms_ncc = np.ones(reference_arr.shape)
+            radii = [int(elem) for elem in R.replace(" ","").split(",")]
+            for radius in radii:
+                desc = f"ncc; r = {radius}"
+                for j in tqdm(range(ms_ncc.shape[0]), desc = desc):
+                    im_handle = reference_arr[j]
+                    local_im = compute_local_point_symmetry_gpu_kernel(
+                                                im_handle, 
+                                                radius = radius).get()
+                    ms_ncc[j] *= -local_im
+            if omit_neg:
+                ms_ncc[ms_ncc < 0] = 0
+            self.viewer.add_image(ms_ncc, name = "ms ncc", colormap = "magma")
 
         return inner
 
@@ -2627,8 +2659,8 @@ class spatio_temporal_registration_gui:
     def _joint_hist_(self):
         @magicgui(
                 call_button="Plot Joint Histogram",
-                layer_1 = {'label': "Layer 1 Name"},
-                layer_2 = {'label': "Layer 2 Name"},
+                layer_1 = {'label': "Layer 1 Name","widget_type": "ComboBox"},
+                layer_2 = {'label': "Layer 2 Name","widget_type": "ComboBox"},
                 parameter = {'label': "Parameter"},
                 bins = {'label': "Bins", 'min':1,'max':1e16},
                 persist = True
@@ -2727,7 +2759,7 @@ class spatio_temporal_registration_gui:
         @magicgui(
                 call_button="Capture figure",
                 persist = True,
-                track_dataset_name={'label':"Track Dataset Name"},
+                track_dataset_name={'label':"Track Dataset Name", "widget_type":"ComboBox"},
                 image_layer_name={'label':"Image Layer Name"},
                 particle_idx={'label':"Particle Index", 'min':0,'max':1e16},
                 slice_size={'label':"Slice Size", "min":1,"step":2},
