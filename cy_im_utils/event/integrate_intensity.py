@@ -39,63 +39,6 @@ def _integrate_events_wrapper_(dtype):
     return _inner_
 
 
-class hdf5_event_integrator:
-    def __init__(self, file_name, nx: int = 1280, ny: int = 720):
-        self.data, self.triggers = self.fetch_hdf5(file_name)
-        self.nx = nx
-        self.ny = ny
-
-    def fetch_hdf5(self, file_name) -> (np.array, np.array):
-        """
-        Ultra basic hdf5 reader....?
-        """
-        with h5py.File(file_name, "r") as f:
-            data = f['CD']['events'][()]
-            triggers = f['EXT_TRIGGER']['events'][()]
-        return data, triggers
-
-    def __get__(self, arr):
-        """
-        helper function for arbitrary array library?
-        """
-        if isinstance(arr, np.ndarray):
-            return arr
-        elif isinstance(arr, cp.ndarray):
-            return arr.get()
-        else:
-            print(f"unknown dtype for hdf5 integrator?: {type(arr)}")
-            assert False
-
-    def hdf5_to_image_stack(self, 
-                            t0,
-                            tf,
-                            dt,
-                            arr_lib = np,
-                            thresh = np.inf
-                            ):
-        ev_keys = ['x','y','p','t']
-        x,y,p,t = [np.array(self.data[key], dtype = self.data[key].dtype) 
-                        for key in ev_keys]
-
-        t = arr_lib.array(t, dtype = t.dtype)
-        image = np.zeros([self.ny,self.nx], dtype = np.float32)
-        n_iter = ( tf - t0 ) // dt
-        out = np.zeros([n_iter, self.ny, self.nx], dtype = np.float32)
-        print(out.shape)
-        for j in tqdm(range(n_iter)):
-            t0_ = t0 + j*dt
-            t1_ = t0_ + dt
-            image[:] = 0
-            bool_arr = self.__get__((t > t0_) * (t < t1_))
-            x_local = x[bool_arr]
-            y_local = y[bool_arr]
-            p_local = p[bool_arr]
-            _integrate_events_(image, x_local, y_local, p_local)
-            image[np.abs(image) > thresh] = 0
-            out[j] = image.copy()
-        return out
-
-
 @njit(void(int64[:], int64, int64[:], int64[:,:]))
 def _fetch_indices_(triggers, acc_time, timestamp_arr, output) -> None:
     """
@@ -231,24 +174,6 @@ def __get__(arr):
     else:
         print(f"unknown dtype for hdf5 integrator?: {type(arr)}")
         assert False
-
-
-def fetch_hdf5_data(file_name) -> (np.array, np.array):
-    """
-    Ultra basic hdf5 reader....?
-    
-    The assertion here is to make sure that the first trigger corresponds to
-    the start of an exposure. Refer to metavision sdk documentation timing
-    interfaces for the EVK4 and SilkyEvCam theres a polarity inversion in the
-    trigger-in circuity that flips the meaning of the polarities....
-    """
-    with h5py.File(file_name, "r") as f:
-        data = f['CD']['events'][()]
-        triggers = f['EXT_TRIGGER']['events'][()]
-
-    assert triggers['p'][0] == 0, "First event is should be zero (Exposure opening)"
-
-    return data, triggers
 
 
 def hdf5_to_image_stack(self, 

@@ -67,7 +67,7 @@ def event_rvt_filter(x, y, p, t, mean_filter_state, timestamps, time_surface,
         x_max = _x_ + r_max >= nx
         y_min = _y_ - r_max < 0
         y_max = _y_ + r_max >= ny
-        p_cond = _p_ == 1
+        p_cond = _p_ == 0
         if x_min or x_max or y_min or y_max:# or p_cond:
             continue
 

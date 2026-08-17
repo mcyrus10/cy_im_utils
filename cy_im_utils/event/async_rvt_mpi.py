@@ -111,10 +111,14 @@ def fetch_data(data_file: Path,
                args,
                ) -> tuple:
     assert data_file.is_file(), f"file does not exist:\n\t{data_file}"
+    trigger_kwargs = {}
     if data_file.suffix == ".hdf5":
         print("reading hdf5")
         cd_data = __read_hdf5__(data_file,"CD")
         triggers = __read_hdf5__(data_file,"EXT_TRIGGER")
+        if len(triggers) == 0:
+            triggers = {'t':None}
+            trigger_kwargs["frame_comp_triggers"] = args.im_to_process
     elif data_file.suffix == ".p":
         print("reading pickled data")
         data_temp = pickle.load(open(data_file,"rb"))
@@ -174,7 +178,7 @@ def arg_parser():
     parser.add_argument(
                         "--super-sampling",
                         dest="ss",
-                        type = int,
+                        type = float,
                         help = "event trigger super sampling",
                         default = 1
                         )
@@ -256,6 +260,13 @@ def arg_parser():
                         default = -1
                         )
     parser.add_argument(
+                        "--n-im-to-process",
+                        dest="im_to_process",
+                        type = int,
+                        help = "# images to process (gets multiplied by super sampling)",
+                        default = 2000
+                        )
+    parser.add_argument(
                         "--hot-px-z",
                         dest="hot_px_z",
                         type = float,
@@ -277,20 +288,34 @@ def arg_parser():
                         default = 1
                         )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Handling for Super sampling...
+    assert args.ss > 0, "super sampling must be positive"
+    if args.ss < 1:
+        print("fractional super sampling")
+    else:
+        print("integer super sampling")
+        assert args.ss % 1 == 0, f"super sampling msut be even integer not {args.ss}"
+        args.ss = int(args.ss)
+
+    return args
 
 
 if __name__ == "__main__":
     args = arg_parser()
     nx, ny = np.array([1280 , 720], dtype = np.int64) // args.binning
     super_sampling = args.ss
-    idx_0, n_im = 0, 2000*super_sampling
+    if super_sampling < 1:
+        print("SETTING SUPER SAMPLING TO 1")
+        super_sampling = 1
+    idx_0, n_im = 0, args.im_to_process*super_sampling
     cd_data, trigger_indices = None,None
     if rank == master_rank:
         data_file = args.acc_time
         cd_data, trigger_indices = fetch_data(
                 data_file = args.event_file_name,
-                super_sampling = args.ss,
+                super_sampling = super_sampling,
                 acc_time = args.acc_time,
                 args = args
                 )

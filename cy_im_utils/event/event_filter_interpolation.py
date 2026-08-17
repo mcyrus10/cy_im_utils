@@ -1,3 +1,19 @@
+"""
+From Kowalzyk et al 2023
+
+example usage:
+    events = cd_data
+    filter_kwargs = {'frame_size': np.array([720,1280]),
+                    'filter_length': 10_000,
+                    'scale': 10,
+                    'update_factor': 0.6,
+                    'interpolation_method':3
+        }
+    noise_filter = event_filter_interpolation_compiled(**filter_kwargs)
+    noise_filter.processEvents(events)
+    events_filtered = events[noise_filter.eventsBin]
+
+"""
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -758,7 +774,23 @@ def _updateFeatures_(
     _updateFilteredTimestamp_(x, y, t, Scale, TimestampMap, UpdateFactor)
     _updateActive_(x, y, Scale, ActiveMap)
 
-@njit(void(uint16[:], uint16[:], int64[:], boolean[:], int64, int64, int64, int64[:], float64[:,:], float64[:,:], boolean[:,:], float64))
+
+@njit(void(uint16, uint16, int64, int64[:,:,:], int64))
+def hot_px_decay_throttle(x, y, t, HotPxMap, threshold):
+    # Dimension 0: Counter of number of events
+    HotPxMap[0, x, y] += 1
+
+    # Dimension 1: timestamp holder of events
+    dt = t - HotPxMap[1, x, y]
+
+    # if you are above thre threshold -> your pixel is flagged as hot, else 0
+    if HotPxMap[0, x, y] > threshold:
+        HotPxMap[2, x, y] = 1
+    else:
+        HotPxMap[2, x, y] = 0
+
+
+@njit(void(uint16[:], uint16[:], int64[:], boolean[:], int64, int64, int64, int64[:], float64[:,:], float64[:,:], int64[:,:,:], boolean[:,:], float64, int64))
 def _processEvents_(
         ev_x: np.uint16,
         ev_y: np.uint16,
@@ -770,8 +802,10 @@ def _processEvents_(
         FrameSize: np.int64,
         TimestampMap: np.int64,
         IntervalMap: np.float64, 
+        HotPxMap: np.int64,
         ActiveMap: bool,
         UpdateFactor: float,
+        HotPxThresh: np.int64
         ):
     """
     event = np.array([[x, y, p, t]] ???????
@@ -781,12 +815,32 @@ def _processEvents_(
         x = ev_x[i]
         y = ev_y[i]
         t = ev_t[i]
-        eventsBin[i] = _filterEvent_(interpolation_method, x, y, t, FilterLength, Scale, FrameSize, TimestampMap, IntervalMap)
-        _updateFeatures_(x, y, t, Scale, TimestampMap, IntervalMap, ActiveMap, UpdateFactor)
+        if i == 0:
+            # Initialize time for decaying the filter...
+            t0 = t
+        hot_px_decay_throttle(x, y, t, HotPxMap, HotPxThresh)
+        # If Pixels are Over-Firing they are Hot Pixles and they are Ignored
+        # eventsBin is initialized as all False -> skipping over events -> False
+        if not HotPxMap[2,x,y]:
+            eventsBin[i] = _filterEvent_(interpolation_method, x, y, t, 
+                                        FilterLength, Scale, FrameSize, 
+                                        TimestampMap, IntervalMap)
+            _updateFeatures_(x, y, t, Scale, TimestampMap, IntervalMap, ActiveMap, UpdateFactor)
+
+        # Decay Hot Pixel Counter every 10_000 us?
+        if t-t0 > 10_000:
+            for j in range(720):
+                for k in range(1280):
+                    if HotPxMap[0,k,j] > 0:
+                        HotPxMap[0, k, j] -= 1
+                    else:
+                        HotPxMap[0, k, j] = 0
+            t0 = t
+
 
 class event_filter_interpolation_compiled:
     def __init__(self, frame_size, filter_length, scale, update_factor, 
-            interpolation_method, filtered_ts = None):
+            interpolation_method, filtered_ts = None, hot_px_thresh: int = 15):
         """
         Parameters:
         -----------
@@ -821,6 +875,8 @@ class event_filter_interpolation_compiled:
         self.CurrentTs = 0
         self.FilteredTs = filtered_ts
         self.InterpolationMethod = interpolation_method
+        self.HotPxMap = np.zeros([3, frame_size[1], frame_size[0]], dtype = np.int64)
+        self.HotPxThresh = hot_px_thresh
 
     def processEvents(self, events):
         """
@@ -839,7 +895,9 @@ class event_filter_interpolation_compiled:
                         np.array(self.FrameSize),
                         self.TimestampMap,
                         self.IntervalMap,
+                        self.HotPxMap,
                         self.ActiveMap,
                         self.UpdateFactor,
+                        self.HotPxThresh
                         )
         self.eventsBin = eventsBin

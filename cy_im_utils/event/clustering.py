@@ -1,6 +1,11 @@
 from tqdm import tqdm
 import numpy as np
 import cupy as cp
+import pandas as pd
+from sklearn import cluster
+from joblib import Parallel, delayed
+from filterpy.kalman import ExtendedKalmanFilter
+
 
 def fetch_triggered_events(cd_data,
                            eventBin,
@@ -85,3 +90,116 @@ def extract_events(slice_idx):
                             name = f"evs {slice_idx}"
                         )
 
+
+def dbscan_tracking(trigger_indices, cd_data, fr_init: int = 1, kwargs: dict = {}, mode:str = 'flat') -> pd.DataFrame:
+    """
+
+    ULTRA BASIC
+        
+        - trigger_indices: np.array - the t0 t1 index of the timestamps or triggers
+        - cd_data: np.array 
+        - kwargs: dict - passed to cluster.DBSCAN -> e.g., eps = 10, min_samples = 5
+        - mode: string - (flat or normal) flat means that each event counts for 1 vote in the mean, crazy pixels cannot dominate, otherwise normal will take all the events
+
+
+    """
+    print("[WARN] -> use the parallel version for ~6x speedup ")
+    located = []
+    for j, elem in tqdm(enumerate(trigger_indices)):
+        if j < fr_init:
+            continue
+        slice_ = slice(*elem)
+        x,y,t = [cd_data[slice_][key] for key in ['x','y','t']]
+        X = np.vstack([x,y]).T
+        labels = cluster.DBSCAN(**kwargs).fit_predict(X)
+        located_local = []
+        for label in np.unique(labels):
+            if label == 1:
+                continue
+            label_bool = labels == label
+            x_slice = x[label_bool]
+            y_slice = y[label_bool]
+            t_slice = t[label_bool]
+            if mode == 'flat':
+                x_mean = np.unique(x_slice).mean()
+                y_mean = np.unique(y_slice).mean()
+                t_mean = np.unique(t_slice).mean()
+            elif mode == 'normal':
+                x_mean = x_slice.mean()
+                y_mean = y_slice.mean()
+                t_mean = t_slice.mean()
+            n_events = np.sum(label_bool)
+            located_local.append([j, x_mean, y_mean, t_mean, n_events])
+        located.append(pd.DataFrame(located_local, columns = ['frame','x','y','t','num events']))
+    return pd.concat(located)
+
+
+def dbscan_tracking_par(trigger_indices, cd_data, fr_init: int = 1, kwargs: dict = {}, mode:str = 'flat') -> pd.DataFrame:
+    """
+
+    ULTRA BASIC
+        
+        - trigger_indices: np.array - the t0 t1 index of the timestamps or triggers
+        - cd_data: np.array 
+        - kwargs: dict - passed to cluster.DBSCAN -> e.g., eps = 10, min_samples = 5
+        - mode: string - (flat or normal) flat means that each event counts for 1 vote in the mean, crazy pixels cannot dominate, otherwise normal will take all the events
+
+    """
+    def _track_ops_(j,elem):
+        if j < fr_init:
+            return
+        slice_ = slice(*elem)
+        x,y,t = [cd_data[slice_][key] for key in ['x','y','t']]
+        X = np.vstack([x,y]).T
+        labels = cluster.DBSCAN(**kwargs).fit_predict(X)
+        located_local = []
+        for label in np.unique(labels):
+            if label == 1:
+                continue
+            label_bool = labels == label
+            x_slice = x[label_bool]
+            y_slice = y[label_bool]
+            t_slice = t[label_bool]
+            if mode == 'flat':
+                x_mean = np.unique(x_slice).mean()
+                y_mean = np.unique(y_slice).mean()
+                t_mean = np.unique(t_slice).mean()
+            elif mode == 'normal':
+                x_mean = x_slice.mean()
+                y_mean = y_slice.mean()
+                t_mean = t_slice.mean()
+            n_events = np.sum(label_bool)
+            located_local.append([j, x_mean, y_mean, t_mean, n_events])
+        return pd.DataFrame(located_local, columns = ['frame','x','y','t','num events'])
+
+    delayed_call = [delayed(_track_ops_)(j,elem) for j, elem in tqdm(enumerate(trigger_indices))]
+    located = Parallel(n_jobs = -1)(delayed_call)
+
+    return pd.concat(located)
+
+
+def interpolate_x_y_timestamps(track_dict, dt) -> pd.DataFrame:
+    """
+
+    Once a dataset has been tracked (with the average timestamps -> see above)
+    this takes the linked dataset and interpolates the timestamps back onto the
+    regular temporal grid (MSD analysis, etc.)
+
+    """
+    time_steps = np.arange(0, (track_dict['frame'].values[-1] + 1)*dt, dt)
+    new_tracks = []
+    for particle, df in tqdm(track_dict.groupby("particle")):
+        x,y,t,frame = df[['x','y','t','frame']].values.T
+        x_flat = np.interp(time_steps, t, x, left = np.nan, right = np.nan)
+        y_flat = np.interp(time_steps, t, y, left = np.nan, right = np.nan)
+        frame_flat = np.interp(time_steps, t, frame, left = np.nan, right = np.nan)
+        frame_coords = np.where(np.isfinite(frame_flat))[0]
+        numel = len(frame_coords)
+        new_tracks.append(pd.DataFrame({
+            "particle":np.ones(numel)*particle,
+            "x":x[frame_coords],
+            "y":y[frame_coords],
+            "frame":frame_coords,
+            }))
+    new_tracks = pd.concat(new_tracks)
+    return new_tracks

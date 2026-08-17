@@ -7,6 +7,7 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import trackpy as tp
+#import trackpy.predict
 import numba as nb
 import cupy as cp
 
@@ -81,6 +82,57 @@ def imsd_linear_fit(imsd_dict: pd.DataFrame,
     if np.isnan(fits[0]).sum() > 0 and verbose:
         print("warning -> nans in fit")
     return m, b, fits
+
+
+def imsd_linear_fit_weighted(imsd_dict: pd.DataFrame,
+                    start_index: int = 0,
+                    end_index: int = None,
+                    stride: int = 1,
+                    verbose = True,
+                    mode = 'weighted',
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+
+    Weighted fits .... high variance points get less weight...
+
+    This can handle a single series or a set of msd curves...
+
+    """
+    # IF a 1D series is passed this adds a dimension converting to df
+    if isinstance(imsd_dict, pd.core.series.Series):
+        print("[INFO] Series -> DataFrame")
+        imsd_dict_local = pd.DataFrame(imsd_dict)
+    else:
+        imsd_dict_local = imsd_dict
+
+    ndim = imsd_dict.values.ndim
+
+    if mode == 'weighted':
+        std = np.nanstd(imsd_dict_local.values, axis = 1)
+    else:
+        std = np.ones(imsd_dict_local.values.shape[0])
+
+    fit_slice = slice(start_index, end_index, stride)
+    x_fit = imsd_dict_local.index.values[fit_slice]
+    print("->",x_fit)
+    weights = np.ones_like(x_fit)
+    np.divide(1, std[fit_slice], where = std[fit_slice] != 0, out = weights)
+    params = []
+    fits = []
+    for key, elem in tqdm(imsd_dict_local.items(), desc = "fitting weighted imsd curves") :
+        y_fit = elem.values[fit_slice]
+        m, b = np.polyfit(x_fit, y_fit, 1, w = weights)
+        params.append([m, b])
+        lin_fit_local = m * x_fit + b
+        fits.append(lin_fit_local)
+    print(m, b, x_fit, y_fit)
+    params = np.vstack(params)
+    m, b = params.T
+    fits = np.vstack(fits).T
+    if ndim == 1:
+        return m[0], b[0], fits.flatten()
+    else:
+        return m, b, fits
 
 
 @nb.njit
@@ -317,21 +369,27 @@ def re_link(tracks_1, tracks_2, matches, mode: str = 'frame match') -> tuple:
     return pd.concat(matched_1), pd.concat(matched_2)
 
 
-def tracks_to_mask(input_array, input_tracks) -> np.array:
+def tracks_to_mask(input_tracks: pd.DataFrame, 
+                   nz: int, 
+                   nx: int,
+                   ny: int,
+                   size_multiple: float = 1.0
+                   ) -> np.array:
     """
     Converts trackpy tracks into a boolean mask
     """
-    nz,nx,ny = input_array.shape
-    mask = cp.zeros(input_array[0].shape, dtype = bool)
-    xx, yy = cp.meshgrid(cp.arange(mask.shape[1]), cp.arange(mask.shape[0]))
+    #nz,nx,ny = input_array.shape
+    mask = cp.zeros([nx,ny], dtype = bool)
+    xx, yy = cp.meshgrid(cp.arange(ny), cp.arange(nx))
     xx = xx.astype(cp.float32)
     yy = yy.astype(cp.float32)
-    mask = np.zeros(input_array.shape, dtype = bool)
+    mask = np.zeros([nz,nx,ny], dtype = bool)
     desc = "tracks -> mask"
     batch_size = 50
-    for idx in tqdm(range(input_array.shape[0]), desc = desc):
+    for idx in tqdm(range(nz), desc = desc):
         fr_slice = input_tracks['frame'].values == idx
         y,x,size = cp.array(input_tracks[fr_slice][['y','x','size']].values.T)
+        size *= size_multiple
         numel = len(x)
         n_batch = int(np.ceil(numel/batch_size))
         for q in range(n_batch):
@@ -340,7 +398,13 @@ def tracks_to_mask(input_array, input_tracks) -> np.array:
             bool_arr = radial_arr <= size[batch_slice,None,None]*2
             mask_local = bool_arr.sum(axis = 0)
             mask[idx] += mask_local.astype(bool).get()
-    return mask
+    if nz > 1:
+        return mask
+    elif nz == 1:
+        return mask[0]
+    else:
+        assert False, "mask generation failed"
+        
 
 
 def locate_hot_region(located_x, located_y, nx, ny, bin_size, threshold) -> tuple:
@@ -439,3 +503,91 @@ class event_tracks:
                                   keep = 'last')
     
         return df
+
+
+def predict_curry(U, V, grid_size, default_x):
+    """
+    curried function to pass a quantized velocity field into trackpy to improve
+    the linking
+
+    usage:
+        U,V = ....<use a function to calculate the velcotiy field>
+        predictor = predict_curry(U ,V, grid_size, 0)
+        tracks = tp.link(<dataframe>, search_range = <range>, memory = <mem>, predictor = predictor)
+    """
+    @tp.predict.predictor
+    def predict(t1, particle):
+        # This is supposed to be close to the velocity in fakeframe().
+        # Note that the default order for coordinates in trackpy is (y, x).
+        # You will rarely have to know this unless you are doing something
+        # nerdy like making your own predictor.
+        grid_y, grid_x = np.round((np.array(particle.pos) // grid_size)).astype(int)
+        spatial_args = (grid_y, grid_x)
+        v_y = V[spatial_args]
+        v_x = U[spatial_args]
+        if (v_x == 0 and v_y == 0):
+            velocity = np.array([0, default_x])
+        else:
+            velocity = np.array([v_y, v_x])  # (v_y, v_x)
+        return particle.pos + velocity * (t1 - particle.t)
+
+    return predict
+
+
+def generate_velocity_field(df_input, grid_size=10, img_width=None, img_height=None):
+    """
+    Converts tracked particle coordinates into a quantized 2D velocity field.
+    """
+    # 2. Sort to ensure chronological order for each particle
+    df = df_input.copy()
+    df.index.name = None
+    df = df.sort_values(by=['particle', 'frame'])
+    
+    # 3. Calculate position and time differences
+    # group by particle so we don't calculate differences between two distinct particles
+    df['dx'] = df.groupby('particle')['x'].diff()
+    df['dy'] = df.groupby('particle')['y'].diff()
+    df['dt'] = df.groupby('particle')['frame'].diff()
+    
+    # Drop the first frame of each particle (where diffs are NaN) and zero-time steps
+    df = df.dropna(subset=['dx', 'dy', 'dt'])
+    df = df[df['dt'] > 0]
+    
+    # 4. Calculate instantaneous velocities (vx, vy)
+    df['vx'] = df['dx'] / df['dt']
+    df['vy'] = df['dy'] / df['dt']
+    
+    # Determine the bounding box if image dimensions aren't provided
+    if img_width is None:
+        img_width = int(np.ceil(df['x'].max()))
+    if img_height is None:
+        img_height = int(np.ceil(df['y'].max()))
+        
+    # 5. Quantize positions into grid cells
+    # We use the starting 'x' and 'y' of the step to assign the velocity to a cell
+    df['grid_x'] = (df['x'] // grid_size).astype(int)
+    df['grid_y'] = (df['y'] // grid_size).astype(int)
+    
+    # 6. Aggregate velocities by grid cell
+    # Calculate the mean velocity for all particles that passed through each cell
+    cell_velocities = df.groupby(['grid_y', 'grid_x'])[['vx', 'vy']].median().reset_index()
+    
+    # Define grid dimensions
+    max_grid_x = (img_width // grid_size) + 1
+    max_grid_y = (img_height // grid_size) + 1
+    
+    # 7. Create dense matrices for U (x-velocity) and V (y-velocity)
+    U = np.zeros((max_grid_y, max_grid_x))
+    V = np.zeros((max_grid_y, max_grid_x))
+    
+    # Populate the matrices with our aggregated data
+    U[cell_velocities['grid_y'], cell_velocities['grid_x']] = cell_velocities['vx']
+    V[cell_velocities['grid_y'], cell_velocities['grid_x']] = cell_velocities['vy']
+    
+    # Create X, Y coordinate grids representing the center of each bin
+    X, Y = np.meshgrid(
+        np.arange(max_grid_x) * grid_size + (grid_size / 3), 
+        np.arange(max_grid_y) * grid_size + (grid_size / 3)
+    )
+    
+    return X, Y, U, V
