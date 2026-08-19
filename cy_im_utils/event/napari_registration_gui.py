@@ -41,6 +41,7 @@ from cy_im_utils.event.hot_px_filter import calc_hot_px, hot_px_cd_filter
 from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
 from cy_im_utils.event.ncc import compute_local_point_symmetry_gpu_kernel
+from cy_im_utils.event.gaussian_sub_pixel_centroid import gaussian_subpixel_peaks_2D_parallel_stack
 
 
 def make_scrollabel(magicgui_container):
@@ -701,7 +702,8 @@ class spatio_temporal_registration_gui:
                               self._zip_centroids_to_points_(),
                               ],
                 'Tracking': [
-                            self._preview_track_centroids_(),
+                            self._preview_track_centroids_crocker_grier_(),
+                            self._preview_track_centroids_gaussian_(),
                             self._track_batch_locate_(),
                             self._track_link_(),
                             #self._calc_velo_field_(),
@@ -1259,8 +1261,8 @@ class spatio_temporal_registration_gui:
     #--------------------------------------------------------------------------
     #                               TRACKING    
     #--------------------------------------------------------------------------
-    def _preview_track_centroids_(self):
-        @magicgui(call_button="Locate Centroids",
+    def _preview_track_centroids_crocker_grier_(self):
+        @magicgui(call_button="Locate Centroids (CG)",
                 layer_name = {'label':'Layer Name',"widget_type": "ComboBox"},
                 persist = True,
                 minmass = {'label':'minmass', 'max': 1e16, 'step':1e-6},
@@ -1391,52 +1393,61 @@ class spatio_temporal_registration_gui:
             print(f"tracking z offset = {z_offset}")
 
             n_elem = track_handle.shape[0]
-            proc = "auto" if processes < 0 else processes
-            if track_handle.ndim == 4:
-                print("--> not sure what to do for 4d images?")
-                track_handle = np.sum(track_handle.astype(np.float32), axis = -1)
-                pass
-            elif track_handle.ndim == 3:
-                pass
+            if "minmass" in self.track_dict and "maxsize" in self.track_dict:
+                print("[INFO] Using Crocker Grier Algorithm For Locating Particles")
+                proc = "auto" if processes < 0 else processes
+                if track_handle.ndim == 4:
+                    print("--> not sure what to do for 4d images?")
+                    track_handle = np.sum(track_handle.astype(np.float32), axis = -1)
+                    pass
+                elif track_handle.ndim == 3:
+                    pass
 
-            # Multiprocessing
-            if mode == "batch":
-                # All in 1 batch
-                if batch_size == -1:
-                    f = tp.batch(
-                            np.array(track_handle, dtype = track_handle.dtype), 
-                             processes = proc,
-                             **self.track_dict
-                             )
-                # Batches...?
-                elif batch_size != -1:
-                    f = []
-                    n_batch = int(np.ceil(n_elem / batch_size))
-                    for j in range(n_batch):
-                        slice_ = slice(j*batch_size, (j+1)*batch_size)
-                        local_arr = np.array(track_handle[slice_], dtype = track_handle.dtype)
-                        local_dict = tp.batch(
-                                              local_arr, 
-                                              processes = proc,
-                                              **self.track_dict
-                                              )
-                        local_dict['frame'] += j*batch_size
-                        f.append(local_dict)
-                    f = pd.concat(f)
-
-            # Serial Processing
-            elif mode == "locate":
-                f = []
-                desc =  "locating individual images"
-                for j, _image_ in tqdm(enumerate(track_handle), desc = desc):
-                    locate_dict = tp.locate(
-                                np.array(_image_, dtype = _image_.dtype), 
-                                **self.track_dict
+                # Multiprocessing
+                if mode == "batch":
+                    # All in 1 batch
+                    if batch_size == -1:
+                        f = tp.batch(
+                                np.array(track_handle, dtype = track_handle.dtype), 
+                                 processes = proc,
+                                 **self.track_dict
                                  )
-                    locate_dict['frame'] = j * np.ones(len(locate_dict), dtype = int) 
-                    f.append(locate_dict)
-                                 
-                f = pd.concat(f)
+                    # Batches...?
+                    elif batch_size != -1:
+                        f = []
+                        n_batch = int(np.ceil(n_elem / batch_size))
+                        for j in range(n_batch):
+                            slice_ = slice(j*batch_size, (j+1)*batch_size)
+                            local_arr = np.array(track_handle[slice_], dtype = track_handle.dtype)
+                            local_dict = tp.batch(
+                                                  local_arr, 
+                                                  processes = proc,
+                                                  **self.track_dict
+                                                  )
+                            local_dict['frame'] += j*batch_size
+                            f.append(local_dict)
+                        f = pd.concat(f)
+
+                # Serial Processing
+                elif mode == "locate":
+                    f = []
+                    desc =  "locating individual images"
+                    for j, _image_ in tqdm(enumerate(track_handle), desc = desc):
+                        locate_dict = tp.locate(
+                                    np.array(_image_, dtype = _image_.dtype), 
+                                    **self.track_dict
+                                     )
+                        locate_dict['frame'] = j * np.ones(len(locate_dict), dtype = int) 
+                        f.append(locate_dict)
+                                     
+                    f = pd.concat(f)
+            elif "threshold_abs" in self.track_dict and "window_radius" in self.track_dict:
+                print("[INFO] Using Gaussian Fitting for Centroids")
+                f = gaussian_subpixel_peaks_2D_parallel_stack(
+                          track_handle,
+                          **self.track_dict
+                          )
+
             
             f['frame'] += z_offset
             self.located_frames[layer_name] = f
@@ -1447,6 +1458,71 @@ class spatio_temporal_registration_gui:
             print(f"saving located frames to {track_f_name}")
             self.located_frames[layer_name].to_csv(track_f_name)
         return inner
+
+
+    def _preview_track_centroids_gaussian_(self):
+        @magicgui(call_button="Locate Centroids (Gaussian)",
+                layer_name = {'label':'Layer Name',"widget_type": "ComboBox"},
+                persist = True,
+                separation = {'label':'separation','step':1, 'min': 1},
+                threshold = {'label':'Threshold', 'max': 1e16, 'step':1e-6},
+                gaussian_size = {'label':'Gaussian Radius', 'max': 1e16},
+                )
+        def inner(
+                layer_name: str,
+                separation: int,
+                threshold: float,
+                gaussian_size: int,
+                ):
+            test_frame = self.__fetch_viewer_image_index__()
+            if layer_name in self.global_translation:
+                z_offset = self.global_translation[layer_name][0]
+                print(f"offsetting tracked frame {z_offset}")
+                test_frame -= z_offset
+            track_handle = self.__fetch_layer__(layer_name).data[test_frame].copy()
+            if track_handle.ndim == 3:
+                print("--> not sure what to do for 4d images?")
+                track_handle = np.sum(track_handle.astype(np.float32), axis = -1)
+                pass
+            elif track_handle.ndim == 2:
+                pass
+            self.track_dict = {
+                    "threshold_abs": threshold,
+                    "min_distance": separation,
+                    "window_radius":gaussian_size,
+                    }
+            self.track_bool = True
+            print(type(track_handle))
+            f = gaussian_subpixel_peaks_2D_parallel_stack(
+                          np.array(track_handle)[None,:,:],
+                          **self.track_dict
+                          )
+            self.frame_track[layer_name] = f.copy()
+            points_array = f[['y','x']].values
+
+            self.__remove_layer_string_match__(layer_name = "Tracked Centroids")
+            self.__remove_layer_string_match__(layer_name = "Diameter Mask")
+
+            self.viewer.add_points(
+                    points_array,
+                    name = f'Tracked Centroids {test_frame}',
+                    symbol = 'x',
+                    face_color = 'b'
+                    )
+            
+            ellipse_data = points_to_ellipse_coords(points_array, separation)
+            self.viewer.add_shapes(
+                    ellipse_data,
+                    name = f'Diameter Mask {test_frame}',
+                    shape_type = "ellipse",
+                    blending = "minimum",
+                    edge_color = "red"
+                    )
+
+            napari.experimental.link_layers(self.viewer.layers[-2:])
+
+        return inner
+
 
     def _track_link_(self):
         @magicgui(call_button="Link Particles",
@@ -2659,8 +2735,8 @@ class spatio_temporal_registration_gui:
     def _joint_hist_(self):
         @magicgui(
                 call_button="Plot Joint Histogram",
-                layer_1 = {'label': "Layer 1 Name","widget_type": "ComboBox"},
-                layer_2 = {'label': "Layer 2 Name","widget_type": "ComboBox"},
+                layer_1 = {'label': "Layer 1 Name"},
+                layer_2 = {'label': "Layer 2 Name"},
                 parameter = {'label': "Parameter"},
                 bins = {'label': "Bins", 'min':1,'max':1e16},
                 persist = True
