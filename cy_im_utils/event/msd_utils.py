@@ -1,6 +1,8 @@
 #!/home/mcd4/miniforge3/envs/im_proc/bin/python
 import numpy as np
 from argparse import ArgumentParser
+import trackpy as tp
+from tqdm import tqdm
 
 
 def water_viscosity(T, unit = 'C') -> float:
@@ -79,6 +81,33 @@ def parse_args():
                         )
 
     return parser.parse_args()
+
+
+def msd_with_velo(tracks, mpp, fps, velocity_label: str = 'y', fit_0: int = 0, 
+                  fit_1: int = 5, T = 295) -> np.ndarray:
+    """
+    This subtracts the velocity from the tracks
+    """
+    kb,eta = 1.38e-23,water_viscosity(T, unit = "K")
+    ft_slice = slice(fit_0,fit_1)
+    D = []
+    for part, df_ in tqdm(tracks.groupby("particle")):
+        df = df_.copy()
+        x,y,fr = df[['x','y','frame']].values.T
+        if velocity_label == 'y':
+            ft = np.polyfit(fr, y, 1)
+        elif velocity_label == 'x':
+            ft = np.polyfit(fr, x, 1)
+        else:
+            assert False, f"unknown column label: {velocity_label}"
+        df[velocity_label] -= np.polyval(ft, fr)
+        imsd = tp.imsd(df, mpp = mpp, fps = fps, max_lagtime = fit_1+1)
+        x_ft, y_ft = imsd.index.values[ft_slice], imsd.values[ft_slice]
+        diff_fit = np.polyfit(x_ft, y_ft, 1)
+        D.append(diff_fit[0]/4)
+    D = np.stack(D)
+    diam = kb*T/(3*np.pi*eta*D*1e-12)*1e9
+    return diam
 
 
 if __name__ == "__main__":
