@@ -42,6 +42,7 @@ from cy_im_utils.parametric_fits import parametric_gaussian, fit_param_gaussian
 from cy_im_utils.image_quality import mutual_information
 from cy_im_utils.event.ncc import compute_local_point_symmetry_gpu_kernel
 from cy_im_utils.event.gaussian_sub_pixel_centroid import gaussian_subpixel_peaks_2D_parallel_stack
+from cy_im_utils.event.filter_optimization import sweep_update_factor
 
 
 def make_scrollabel(magicgui_container):
@@ -668,6 +669,7 @@ class spatio_temporal_registration_gui:
                 "Event Filtering":[
                               self.__calculate_hot_pixels__(),
                               self._filter_hot_pixels_(),
+                              self._sweep_update_factor_(),
                               self._preview_event_noise_filter_(),
                               self._apply_event_noise_filter_(),
                               self._isolate_event_sign_(),
@@ -679,8 +681,8 @@ class spatio_temporal_registration_gui:
                             ],
                 "Image Filtering": [
                             self._preview_rvt_filter_(),
-                            self._calculate_multi_scale_ncc(),
                             self._apply_rvt_to_layer_(),
+                            self._calculate_multi_scale_ncc(),
                             self._apply_gaussian_layer_(),
                             self._apply_median_layer_(),
                             self._apply_conditional_median_layer_(),
@@ -1978,6 +1980,24 @@ class spatio_temporal_registration_gui:
     #--------------------------------------------------------------------------
     #                               FILTERS    
     #--------------------------------------------------------------------------
+    def _sweep_update_factor_(self):
+        @magicgui(call_button="Sweep Update Factor",
+                  scale = {"label":"Scale"},
+                  filter_length = {"label":"Filter Length","max":1e16},
+                  persist = True,
+                  )
+        def inner(
+                filter_length: int,
+                scale: int = 10,
+                n_points: int = 20,
+                idx_0: int = 0
+                ):
+            sweep_update_factor(scale, filter_length, self, numel = n_points, plot = True, idx_0 = idx_0)
+
+        return inner
+
+
+
     def _apply_event_noise_filter_(self):
         @magicgui(call_button="Apply Interpolation Noise Filter to CD Data")
         def inner():
