@@ -546,6 +546,11 @@ class transform_type(Enum):
     rigid_no_scale = residual_rigid_no_scale, [1,0,0,0], 'rigid no scale'
 
 
+class link_predictor(Enum):
+    none = None
+    Nearest_Velocity = "NearestVelo"
+
+
 def smart_slice(arr: np.array, x0: int, x1: int, y0: int, y1: int) -> np.array:
     """
     This funciton is for padding an array slice with zeros if the slice extends
@@ -1534,6 +1539,7 @@ class spatio_temporal_registration_gui:
                 search_range = {'label':'Search Range', 'max': 1e16},
                 memory = {'label':'memory', 'max': 1e16},
                 omit = {'label':'Particles to omit (comma sep)'},
+                link_predictor = {"label": "Link Predictor"},
                 drift_bool = {'label':"Correct Drift"},
                 )
         def inner(
@@ -1542,14 +1548,21 @@ class spatio_temporal_registration_gui:
                 search_range: int,
                 memory: int,
                 omit: str,
+                link_predictor: link_predictor,
                 drift_bool: bool = False,
                 ):
             assert self.track_bool, ("Set the tracking parameters with "
                                      "'preview' before tracking")
             assert self.located_frames is not None, "locate frames first..."
             f = self.located_frames[layer_name]
-            predictor = None  
-            t = tp.link(f, search_range = search_range, memory = memory, predictor = predictor)
+            link_kwargs = {"search_range":search_range,"memory":memory}
+            linker = link_predictor.value
+            predictor = {
+                          None  :tp.predict.NullPredict(),
+                         "NearestVelo":tp.predict.NearestVelocityPredict()
+                         }[linker]
+
+            t = predictor.link_df(f, **link_kwargs)
                 
 
             # Remove bad particles
