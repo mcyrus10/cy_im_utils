@@ -505,6 +505,27 @@ def calc_events_per_image(image_stack) -> np.ndarray:
     return event_count
 
 
+def memory_sweep(key: str, min_length: int, search_range: int, memory_max: int,
+        napari_instance, link_predictor) -> None:
+    """
+    """
+    sweep = []
+    for memory in tqdm(range(0, memory_max)):
+        napari_instance._track_link_()(
+                layer_name = key, 
+                search_range = search_range, 
+                min_length = min_length,
+                memory = memory,
+                link_predictor = link_predictor
+                )
+        sweep.append([memory, napari_instance.track_holder[key]['particle'].nunique()])
+    
+    fig, ax = plt.subplots()
+    ax.plot(*np.vstack(sweep).T, marker = 'o')
+    ax.set(xlabel = "memory", ylabel = "n particles")
+    fig.tight_layout()
+
+
 class np_dtype(Enum):
     float32 = np.float32
     float64 = np.float64
@@ -712,6 +733,7 @@ class spatio_temporal_registration_gui:
                             self._preview_track_centroids_crocker_grier_(),
                             self._preview_track_centroids_gaussian_(),
                             self._track_batch_locate_(),
+                            self._memory_sweep_(),
                             self._track_link_(),
                             #self._calc_velo_field_(),
                             self._calc_msd_(),
@@ -1466,7 +1488,6 @@ class spatio_temporal_registration_gui:
             self.located_frames[layer_name].to_csv(track_f_name)
         return inner
 
-
     def _preview_track_centroids_gaussian_(self):
         @magicgui(call_button="Locate Centroids (Gaussian)",
                 layer_name = {'label':'Layer Name',"widget_type": "ComboBox"},
@@ -1530,6 +1551,30 @@ class spatio_temporal_registration_gui:
 
         return inner
 
+    def _memory_sweep_(self):
+        @magicgui(call_button="Sweep Memory",
+                layer_name = {'label':'Layer Name',"widget_type": "ComboBox"},
+                persist = True,
+                min_length = {'label':'Filter Stub Length', 'max': 1e16},
+                search_range = {'label':'Search Range', 'max': 1e16},
+                memory_max = {'label':'max memory', 'max': 1e16},
+                link_predictor = {"label": "Link Predictor"},
+                )
+        def inner(
+                layer_name: str,
+                min_length: int,
+                search_range: int,
+                memory_max: int,
+                link_predictor: link_predictor,
+                ):
+            memory_sweep(
+                    layer_name, min_length = min_length , 
+                    search_range = search_range, 
+                    memory_max = memory_max,
+                    link_predictor = link_predictor,
+                    napari_instance = self)
+
+        return inner
 
     def _track_link_(self):
         @magicgui(call_button="Link Particles",
@@ -1954,7 +1999,6 @@ class spatio_temporal_registration_gui:
                         shape = f"2,{self.ny},{self.nx}")
         return inner
 
-
     def _add_match_points_(self):
         @magicgui(
                 call_button="Add match points to viewer",
@@ -2008,8 +2052,6 @@ class spatio_temporal_registration_gui:
             sweep_update_factor(scale, filter_length, self, numel = n_points, plot = True, idx_0 = idx_0)
 
         return inner
-
-
 
     def _apply_event_noise_filter_(self):
         @magicgui(call_button="Apply Interpolation Noise Filter to CD Data")
@@ -2398,8 +2440,6 @@ class spatio_temporal_registration_gui:
 
         return inner
 
-
-
     def _combine_event_channels_(self):
         @magicgui(
                 call_button="|Event| -> grayscale",
@@ -2468,7 +2508,6 @@ class spatio_temporal_registration_gui:
                         )
             self.viewer.add_image(filtered, colormap = 'plasma')
         return inner
-
 
     def _isolate_event_sign_(self):
         @magicgui(
@@ -2675,7 +2714,6 @@ class spatio_temporal_registration_gui:
             cp_free_mem()
 
         return inner
-
 
     def _calc_median_background_(self):
         @magicgui(
@@ -3336,7 +3374,6 @@ class spatio_temporal_registration_gui:
                 print("No event image layer found, skipping event rate per image calc")
                 
         return inner
-
 
 
 if __name__ == "__main__":

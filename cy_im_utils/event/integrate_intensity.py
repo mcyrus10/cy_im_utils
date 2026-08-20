@@ -320,8 +320,8 @@ def event_summation(cd_data, trigger_indices, nx = 1280, ny = 720) -> np.array:
 
     """
     n_im = trigger_indices.shape[0]
-    temp = np.zeros([n_im, ny, nx])
-    im_buffer = np.zeros([ny, nx], dtype = np.uint16)
+    temp = np.zeros([n_im, ny, nx], dtype = np.uint8)
+    im_buffer = np.zeros([ny, nx], dtype = np.uint8)
 
     for j, elem in tqdm(enumerate(trigger_indices), desc = "summing all events"):
         slice_ = slice(*elem)
