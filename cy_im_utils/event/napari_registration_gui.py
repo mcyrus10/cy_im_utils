@@ -596,6 +596,46 @@ def smart_slice(arr: np.array, x0: int, x1: int, y0: int, y1: int) -> np.array:
     return np.pad(temp, pad_shape)
 
 
+def measure_displacement(layer_1, layer_2, napari_instance, plot = True) -> None:
+    """
+    This takes two synchronized (fused) tracks and measures the magnitude of the
+    pixel-wise error for all particles
+    """
+    th1 = napari_instance.track_holder[f'{layer_1} -> {layer_2} matched'].copy()
+    th2 = napari_instance.track_holder[f'{layer_2} -> {layer_1} matched'].copy()
+    th1.index.name = None
+    th2.index.name = None
+    iterator = zip(th1.groupby("particle"),th2.groupby("particle"))
+    dxs,dys,drs,dx_abs,dy_abs = [],[],[],[],[]
+    for (_, df1),(_, df2) in tqdm(iterator):
+        dx = df1['x'].values - df2['x'].values
+        dy = df1['y'].values - df2['y'].values
+        dr = (dx**2+dy**2)**(1/2)
+        dxs.append(dx);dys.append(dy);drs.append(dr)
+        dx_abs.append(np.abs(dx))
+        dy_abs.append(np.abs(dy))
+
+    data_dict = {
+                 'dx':np.hstack(dxs),
+                 'dy':np.hstack(dys),
+                 'dr':np.hstack(drs),
+                 '|dx|':np.hstack(dx_abs),
+                 '|dy|':np.hstack(dy_abs)
+                 }
+    if plot:
+        fig,ax = plt.subplots(1,5, figsize = (12,4))
+    for j, (key,val) in enumerate(data_dict.items()):
+        med = np.median(val)
+        mad = median_abs_deviation(val)
+        print(f"{key}:\tmedian - {med};\tmad - {mad}")
+        if plot:
+            ax[j].boxplot(val, showfliers = False)
+            ax[j].set_title(key)
+    if plot:
+        fig.tight_layout()
+
+
+
 def batch_axial_median(arr, x_batch_size, y_batch_size, size, mode = 'reflect') -> np.array:
     n_im, nx, ny = arr.shape
     out = np.zeros_like(arr)
@@ -1788,6 +1828,7 @@ class spatio_temporal_registration_gui:
 
         # COMPOSE FIGURE
         fig,ax = plt.subplots(2,3, figsize = (10,10))
+        fig.suptitle(f"N Particles: {len(diam_lin)}")
         # ---------------------------------------------------------------------
         # Full MSD in linear and log scale
         # ---------------------------------------------------------------------
@@ -1968,6 +2009,9 @@ class spatio_temporal_registration_gui:
                                 self.track_holder[key][slice_],
                                 name = f"{key} tracks"
                                 )
+
+            measure_displacement(track_1, track_2, self, plot = True)
+
         return inner
 
     def _calculate_composite_centroids(self):
