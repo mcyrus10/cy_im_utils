@@ -24,11 +24,18 @@ def _2d_gaussian(coords, amplitude, xo, yo, sigma_x, sigma_y, offset):
 def gaussian_subpixel_peaks_2D(ncc_map, min_distance=10, threshold_abs=0.5, window_radius=2, frame_no: int = -1):
     integer_peaks = peak_local_max(ncc_map, min_distance=min_distance, threshold_abs=threshold_abs)
     subpixel_peaks = []
+
+    if integer_peaks.shape[0] == 0:
+        print(f"[WARN] no particles localized {frame_no}")
+        subpixel_peaks.append([int(frame_no), np.nan, np.nan])
+        return np.array(subpixel_peaks)
+
     
     # Create a grid of coordinates for the local window fitting
     window_size = 2 * window_radius + 1
     x_grid, y_grid = np.meshgrid(np.arange(window_size), np.arange(window_size))
     
+
     for y_int, x_int in integer_peaks:
         # Check if the window exceeds the map boundaries
         if (x_int - window_radius < 0 or x_int + window_radius >= ncc_map.shape[1] or 
@@ -68,13 +75,14 @@ def gaussian_subpixel_peaks_2D(ncc_map, min_distance=10, threshold_abs=0.5, wind
             subpixel_peaks.append([int(frame_no), x_int + dx, y_int + dy])
             
         except RuntimeError:
+            print("[WARN] error with gaussian subpix localize")
             # If the optimizer fails to converge, fall back to integer coordinates
             subpixel_peaks.append([int(frame_no), float(x_int), float(y_int)])
             
     return np.array(subpixel_peaks)
 
 
-def gaussian_subpixel_peaks_2D_parallel_stack(ncc_maps, min_distance=10, threshold_abs=0.5, window_radius=2, n_jobs = -1):
+def gaussian_subpixel_peaks_2D_parallel_stack(ncc_maps, min_distance=10, threshold_abs=0.5, window_radius=2, n_jobs = -1, nan_policy = "none"):
     """
     This function works exactly the same as gaussian_subpixel_peaks_2d_parallel, 
     except it decomposes the operations so that they can be parallelized with
@@ -88,6 +96,7 @@ def gaussian_subpixel_peaks_2D_parallel_stack(ncc_maps, min_distance=10, thresho
     located = []
 
     for elem in results:
+        elem = np.array(elem)
         located.append(pd.DataFrame({"frame":elem[:,0],"x":elem[:,1],"y":elem[:,2]}))
 
     return pd.concat(located)

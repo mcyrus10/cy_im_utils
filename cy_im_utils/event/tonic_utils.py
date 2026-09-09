@@ -17,24 +17,48 @@ import numpy as np
 import tonic
 
 
-def load_events(f_name: str | os.PathLike, field: str ) -> np.ndarray:
+def load_events(
+    f_name: str | os.PathLike,
+    n_images: int = -1,
+    delta_t: float | None = None,
+) -> np.ndarray:
     """
     Read the hdf5 output from a v2e simulation and convert it into structured
-    array
+    array.
+
+    When *n_images* > 0 and *delta_t* is provided, only the events within the
+    first ``n_images * delta_t`` time-units are loaded.  This avoids reading the
+    entire dataset into memory when only a temporal subset is needed.
     """
     import h5py
+
+    if n_images > 0 and delta_t is None:
+        raise ValueError("delta_t is required when n_images > 0")
+
     with h5py.File(f_name, "r") as f:
-        events_raw = f[field][:]
-        events = np.vstack(events_raw)
+        if n_images > 0:
+            timestamps = f["events"][:, 0]
+            t_max = timestamps[0] + delta_t * n_images
+            idx_max = int(np.searchsorted(timestamps, t_max))
+            events = f["events"][:idx_max]
+        else:
+            events = f["events"][:]
+
+    if events[:,0].max() != events[-1,0]:
+        print("[WARNING] final timestamp is not highest value; potential casting error")
 
     dtype = [
-            ('t', np.int64), 
+            ('t', np.int64),
             ('x', np.uint16),
             ('y', np.uint16),
             ('p', np.int16),
             ]
-    events = np.array([tuple(events[j]) for j in range(events.shape[0])], dtype=dtype)
-    return events
+    structured = np.empty(events.shape[0], dtype=dtype)
+    structured['t'] = events[:, 0]
+    structured['x'] = events[:, 1]
+    structured['y'] = events[:, 2]
+    structured['p'] = events[:, 3]
+    return structured
 
 
 def events_to_frames(

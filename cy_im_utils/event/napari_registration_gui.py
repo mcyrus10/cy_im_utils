@@ -859,7 +859,8 @@ class spatio_temporal_registration_gui:
                   num_images = {'label': "Number of Images (-1 for all triggers)",'max':1e16},
                   super_sampling = {'label': "Samples per trigger"},
                   dtype = {'label': "Data type"},
-                  omit_negative = {'label': "Omit Negative Polarity"}
+                  omit_negative = {'label': "Omit Negative Polarity"},
+                  trigger_offset = {'label': "trigger offset"}
                   )
         def inner(
                 event_file: Path = Path.home(),
@@ -867,9 +868,11 @@ class spatio_temporal_registration_gui:
                 num_images: int = -1,
                 super_sampling: int = 1,
                 dtype: np_dtype = np_dtype.int16,
-                omit_negative: bool = False
+                omit_negative: bool = False,
+                trigger_offset: int = 0
                 ):
             self.event_file = event_file
+            self.trigger_offset = trigger_offset
             self.event_acc_time = acc_time
             self.num_event_images = num_images
             self.super_sampling = super_sampling
@@ -882,7 +885,7 @@ class spatio_temporal_registration_gui:
             print("Reading .hdf5 file")
             self.cd_data = __read_hdf5__(event_file, "CD")
             
-            self.trigger_data = __read_hdf5__(event_file, "EXT_TRIGGER")['t']
+            self.trigger_data = __read_hdf5__(event_file, "EXT_TRIGGER")['t'][trigger_offset:]
             if len(self.trigger_data) == 0:
                 print("No Triggers -> self.trigger_data = None")
                 self.frame_comp_triggers = num_images
@@ -2443,6 +2446,9 @@ class spatio_temporal_registration_gui:
         def inner(tau: float,
                   R: int = 1):
             n_im = self.num_event_images
+            if n_im == -1:
+                print("[INFO] loading time surface based on shape of trigger indices")
+                n_im = self.trigger_indices.shape[0]
             ts = calc_time_surface_square(
                     self.cd_data,
                     self.trigger_indices[:n_im],
@@ -3058,8 +3064,10 @@ class spatio_temporal_registration_gui:
     def __plot_triggers__(self):
         @magicgui(call_button="Plot Triggers and Sampling")
         def inner():
+            if self.trigger_offset != 0:
+                print(f"[WARN] non-zero trigger offset: {self.trigger_offset}")
             triggers = __read_hdf5__(self.event_file, "EXT_TRIGGER")
-            plot_square_wave(triggers['t'], initial_state=0)
+            plot_square_wave(triggers['t'][self.trigger_offset:], initial_state=0)
             x_0 = self.cd_data[self.trigger_indices[:,0]]['t']
             y_0 = np.ones_like(x_0)
             x_1 = self.cd_data[self.trigger_indices[:,1]]['t']
