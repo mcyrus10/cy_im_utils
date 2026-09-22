@@ -117,6 +117,9 @@ class barrel_dist_corr_gui:
             retval, corners = findChessboardCorners(
                     image = image_handle.astype(np.uint8),
                     patternSize = pattern_size)
+            print(f"[INFO] retval = {retval}; conrners = {corners}")
+            if len(corners) == 0:
+                print("[WARN] no corners")
             self.viewer.add_points(np.squeeze(corners)[:,::-1], name = "Points")
         return inner
 
@@ -162,5 +165,6 @@ class barrel_dist_corr_gui:
 
 
 if __name__ == "__main__":
-    inst = barrel_dist_corr_gui()
-    napari.run()
+    print("[WARN] THIS IS DEPRECATED, USE reg_gui and load the reprojection utils")
+    #inst = barrel_dist_corr_gui()
+    #napari.run()

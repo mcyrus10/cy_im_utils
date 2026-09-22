@@ -88,7 +88,7 @@ def plot_joint_hist(arr_0,
     med_0 = np.nanmedian(arr_0)
     mad_0 = median_abs_deviation(arr_0, nan_policy = 'omit')
     rCV_0 = 100*mad_0*_k_/med_0
-    label_0 = f"diam: {med_0:0.2f} nm\nrCV: {rCV_0:0.2f}%"
+    label_0 = f"diam: {np.round(med_0):0.0f} nm\nrCV: {rCV_0:0.2f}%"
     ax[1].axvline(med_0, color = 'r', linestyle = '--', label = label_0)
     if mode == 'match_bins':
         bins_2 = hist_data[1]
@@ -98,7 +98,7 @@ def plot_joint_hist(arr_0,
     med_1 = np.nanmedian(arr_1)
     mad_1 = median_abs_deviation(arr_1, nan_policy = 'omit')
     rCV_1 = 100*mad_1*_k_/med_1
-    label_1 = f"{med_1:0.2f} nm\nrCV: {rCV_1:0.2f}%"
+    label_1 = f"{np.round(med_1):0.0f} nm\nrCV: {rCV_1:0.2f}%"
     ax[2].axhline(med_1, color = 'r', linestyle = '--', label = label_1)
     for a in [ax[1], ax[2]]:
         a.legend()
