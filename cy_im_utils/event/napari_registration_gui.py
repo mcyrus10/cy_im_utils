@@ -2467,14 +2467,16 @@ class spatio_temporal_registration_gui:
                 call_button="Calculate Multi Scale NCC",
                 persist = True,
                 layer_name = {'label':'Layer Name',"widget_type": "ComboBox"},
+                dtype = {"label":"dtype"},
                 R = {"label":"R (string comma sep)"},
                 )
         def inner(layer_name: str,
                   R: str = "5",
+                  dtype: np_dtype = np_dtype.float32,
                   omit_neg: bool = True,
                   ):
             reference_arr = self.__fetch_layer__(layer_name).data
-            ms_ncc = np.ones(reference_arr.shape)
+            ms_ncc = np.ones(reference_arr.shape, dtype = dtype.value)
             radii = [int(elem) for elem in R.replace(" ","").split(",")]
             for radius in radii:
                 desc = f"ncc; r = {radius}"

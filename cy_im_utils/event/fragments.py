@@ -104,6 +104,10 @@ def form_modalities_image_array(x0: int, y0: int, slice_size: int, napari_inst, 
 
 
 class pair_tracks_by_correlation:
+    """
+    auto register, registration, etc.
+
+    """
     def __init__(self):
         pass
 
@@ -194,7 +198,7 @@ class pair_tracks_by_correlation:
                             ax[0].set_title(title)
                             ax[1].set_title(f"mean err: {avg_err:0.2f}")
             if min_err < spatial_thresh:
-                print(f"key: {min_err:0.2f}, {thresh}")
+                print(f"key: {min_err:0.2f}, {spatial_thresh}")
                 global_pairs.append(pts)
         return np.vstack(global_pairs)
 
