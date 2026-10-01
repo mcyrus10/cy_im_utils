@@ -562,8 +562,8 @@ class transform_type(Enum):
     """
     Fetches the residual function and default x0
     """
-    rigid = residual_rigid, [1,0,0,0], 'rigid'
     affine = residual_affine, [1,0,0,1,0,0], 'affine'
+    rigid = residual_rigid, [1,0,0,0], 'rigid'
     rigid_no_scale = residual_rigid_no_scale, [1,0,0,0], 'rigid no scale'
 
 
